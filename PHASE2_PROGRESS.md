@@ -95,15 +95,16 @@ frontend/
 
 ## TODO — remaining Workspace parity (§7) before moving to other views
 
-- Column customizer (add/remove/reorder/rename/hide; TC. ID pinned; reviewed-column locking)
-  — backend needs the rename/delete validation rules extracted to logic (noted in Phase-0
-  `column_customizer.py` header) so the API can enforce server-side.
-- Fuzzy match candidate picker (the `GET /api/symbols` dropdown with scores) + manual-override
-  (purple) tracking surfaced in the cell.
-- Model management dialog (create/rename/duplicate/soft-delete/restore) — APIs exist.
+- ✅ **DONE (2026-06-14 q)** — Column customizer (add/remove/reorder/rename/hide; TC. ID pinned;
+  reviewed-column locking; rename migrates cell data server-side). See session log.
+- ✅ **DONE (2026-06-13 l)** — Fuzzy match candidate picker (`GET /api/symbols` dropdown with
+  scores) + conflict (purple) tint surfaced/cleared in the cell. See session log.
+- ✅ **DONE (2026-06-13 m)** — Model management dialog (create/rename/duplicate/status/
+  soft-delete/restore), wired to the sidebar ＋. See session log.
 - Port-state propagation confirmation UI (#8.2) — the two-step `/state/preview` → `/state`
   flow when a *model's* status changes (distinct from per-row pill edits, which are plain PATCH).
-- Excel/InterfaceExport import wizard (compose `/import/analyze` + `/ports/bulk` + `fuzzy_rematch`).
+- ✅ **DONE (2026-06-14 n)** — Data Import Wizard (single ⇪ button → ELF/JSON release import OR
+  Excel/CSV port import w/ baseline prompt + column-mapping dialog). See session log.
 - Retired/deleted visibility toggle; symbol filter; release results columns; baselines (create/load/compare).
 - Job progress UI: a `useJob(kind)` hook wrapping start/poll(SSE)/cancel (plan §4.1 #3) —
   re-match / generate / parse-elf currently fire-and-forget with a toast.
@@ -229,3 +230,176 @@ SSE streaming, mind-map status, requirements import). Then Phase 3 (pywebview sh
   `color: var(--accent)`, with `.picker-row.sel .picker-icon → #fff` so the selected row's folder
   stays white on the accent fill. Files (`FileIcon`) remain neutral. Verified: folders recolor live
   with the accent (blue → mint), breadcrumb included; no console errors; `npm run build` clean.
+- **2026-06-13 (l)** — **Feature 1: Fuzzy Match Candidate Picker** (Workspace parity). Clicking a
+  Match cell (or the Inspector "Pick match candidate…" button) opens `MatchPicker.tsx` — a
+  `.menu`-styled dropdown with an editable search box seeded from the row's adjacent search cell,
+  firing debounced `GET /api/symbols?q=&kind=&limit=12` (kind derived from the search column's
+  logic_key: Port Search→any, Function Search→function, Variable Search→variable) and listing
+  candidates with colour-coded score chips (reusing `.conf`/`confClass`). Picking writes the
+  canonical `"Name (NN%)"` into the cell's `text`+`widget_text` via `PATCH /models/{id}/ports/{row}`
+  (merged onto the existing cell so `last_func`/`widget_style` survive), sets `user_changed:true`,
+  and **clears `is_purple`** — because (per Alex) the purple tint is a *conflict warning* (backend
+  sets it when a previously-accepted match no longer equals the new auto-best, e.g. on release
+  switch), and the user's pick is the acknowledgment that resolves it (matches Qt
+  `column_types.py:557` "Case 8: clear purple on user interaction"). Files: `columns.ts`
+  (match cols now carry `searchCol`+`kind`; `SEARCH_KIND` map; `isConflict()`), new
+  `components/MatchPicker.tsx`, `PortsTable.tsx` (match cells now interactive `.matchcell` buttons
+  when editable, `.conflict` purple tint on `<td>`), `Workspace.tsx` (picker state + `pickMatch`
+  persist + Inspector wiring), `Inspector.tsx` (onPickMatch passes the anchor event), `theme/macos.css`
+  (`--v-purple`/`--v-purple-bg` light+dark, `.matchcell`/`.conflict`/`.matchpicker*` styles).
+  **Verified in-browser** (`/tmp/MatchPickerTest.arch`, model LedAdapter_SwPkg, ELF release active):
+  picker auto-seeds from the port name → 12 scored candidates (✓ on the current match); pick
+  persists as `"Name (NN%)"` with `user_changed:true`; a simulated `is_purple:true` cell renders the
+  purple tint + inset left bar, and picking a candidate clears both flag and tint; Inspector button
+  opens the same picker for the selected row's first match column. `npm run build` clean (tsc+vite);
+  no console errors. Backend untouched (suite stays **598**). **NEXT: Feature 2 — Model Management Dialog.**
+- **2026-06-13 (m)** — **Sidebar/scroll polish + Model Management dialog** (Alex bug report, 4 items):
+  (1) **Custom scrollbars app-wide** — themed `::-webkit-scrollbar` (slim overlay-pill thumb via
+  transparent border + `background-clip:padding-box`) + Firefox `scrollbar-width:thin`; new
+  `--scrollthumb`/`--scrollthumb-hover` tokens (light+dark). (2) **Sidebar restructure** — `.sidebar`
+  is now a flex column (`overflow:hidden`); only the new `.sl-list` scrolls, and the Release/Source/
+  action buttons live in a pinned `.sl-foot` with a separator border so they're never pushed below
+  the fold by a long model list. (3) **Model-row truncation** — name wrapped in `.sl-name`
+  (ellipsis, `min-width:0`); the port-count `.badge` is `flex:none` so it always stays visible
+  (`ArchName…  <ports>`); `.sl-list` is `overflow-x:hidden` (no horizontal bar — the ellipsis is the
+  hint). (4) **Model Management dialog** — new `components/ModelManager.tsx` (macOS modal reusing
+  `.modal-overlay`/`.modal`): left list of all models incl. deleted (greyed, restorable) with
+  active/deleted tags + port counts, right detail pane (name, status dropdown, port count) + actions
+  **New / Rename / Duplicate / Delete… / Restore**. Backed by `POST /api/models` (create;
+  `copy_from_id` for duplicate) and `PATCH /api/models/{id}` (name / status / `is_deleted` for
+  soft-delete+restore). Inline rename (double-click or Rename → editable field, Enter/blur commits);
+  auto-named New/Duplicate avoid collisions; `window.confirm` guards delete. Wired to the sidebar ＋
+  (`onManageModels`→modal); `onChanged`→`refreshAll`. Hardened Workspace to re-home `activeModelId`
+  if the selected model vanishes (soft-deleted). Files: `theme/macos.css`, `Sidebar.tsx`,
+  `ModelManager.tsx` (new), `Workspace.tsx`. **Verified in-browser** (`/tmp/MatchPickerTest.arch`,
+  35 models): footer pinned/visible, list scrolls (no h-bar), long names ellipsize with badge kept;
+  dialog create→inline-rename→duplicate→status(Released)→soft-delete(tag+Restore shown)→restore all
+  persisted to DB and reflected in the sidebar. `npm run build` clean; no console errors. Backend
+  untouched (**598**). **Issue 1 (imports) — the Import Wizard (Feature 3) is the remaining piece;
+  the ⇪ button still toasts.** NEXT: Feature 3 — Data Import Wizard.
+- **2026-06-14 (n)** — **Data Import Wizard** (one ⇪ button handles everything — no menu items, per
+  Alex's Linux concern). New `components/ImportWizard.tsx` (state-machine modal) + entry lifted to
+  App (`importOpen`) and rendered in Workspace (which owns `refreshAll`/active model/columns). Flow:
+  **pick file** (FolderPicker, exts `.elf,.json,.xlsx,.xls,.csv`, custom title/hint — added optional
+  `title`/`hint` props to FolderPicker) → branch by extension:
+  • **.elf/.json → release import**: name the release (pre-filled from filename) → `POST /releases`
+    + activate + `import_symbols` job (polled) → done. (Same path as onboarding.)
+  • **.xlsx/.xls/.csv → port import**: `/import/analyze` → **baseline prompt** ("Importing these
+    ports creates a *new software version* — baseline the current one first so you can compare", with
+    Create Baseline (`POST /baselines`) or Skip) → **column-mapping dialog** (each source column →
+    a Table-column dropdown or "Don't import", auto-mapped by exact name + Port-Name→Port-Search
+    heuristic, with a first-value sample per column) → build rows → `POST /models/{id}/ports/bulk` →
+    `fuzzy_rematch` job → done. Imports into the **active model** (InterfaceExport multi-model split deferred —
+    noted; the file's per-model breakdown is available from `/analyze` for a future enhancement).
+  **One small backend addition** (UI-supporting, same rationale as `/analyze` — the browser can't read
+  network-share paths): `POST /api/import/read {file_path, limit}` → `{columns, rows, total,
+  is_interface_export, path_col}` (reuses `Logic_InterfaceExport_Import.read_file`). +3 API tests
+  (`Tests/test_backend_import.py`: read_rows / read_rows_limit / read_missing_file_404). Files:
+  `ImportWizard.tsx` (new), `App.tsx`, `Workspace.tsx`, `FolderPicker.tsx`, `theme/macos.css`,
+  `backend/routers/imports.py`, `Tests/test_backend_import.py`. **Verified in-browser** (worker
+  restarted to load the new route; `/tmp/MatchPickerTest.arch`): **Excel** — `ports_csv.xlsx` (2910
+  rows, InterfaceExport) → baseline message → mapping dialog (Port Name/Required Interface auto-mapped,
+  remapped Port Name→Input Port + Operations→Mapped Func) → imported (385→**3295** rows, sidebar +
+  status bar updated, rematch fired); **JSON** — `elf_…json` correctly routed to the *release* path →
+  created+activated "R2.0_from_json" (releases 1→2). `npm run build` clean; no console errors. Full
+  suite **601 passed** (598 + 3). Restored Alex's `TestArch.arch` after verification.
+- **2026-06-14 (o)** — **InterfaceExport multi-model split** (Alex: "do the multi-model split next"). A
+  InterfaceExport export embeds many packages in one path column; instead of dumping all rows into the
+  active model, the import now fans out into per-model row sets. Backend: new composite endpoint
+  `POST /api/import/interface_export {file_path, col_mapping, path_col, ops_col?, required_col?,
+  create_missing?}` — reuses the existing Qt-free `Logic_InterfaceExport_Import.build_import_data`
+  (P10_SW_Arch_Public filter, model = 3rd path segment, drops rows missing the required-interface
+  value, expands multi-operation cells into one row each) → for each package, create the model if
+  missing else append (`db.save_model_rows`) → returns `{models:[{name,created,added}], total_models,
+  total_added, model_ids}`. `/import/analyze` now also returns `required_col` + `ops_col` (new
+  `_detect_ops_col`). The caller fires ONE `fuzzy_rematch` with `model_ids` (the handler already
+  accepts a list). Frontend (`ImportWizard.tsx`): keeps the analyze result; when `format==="interface_export"`
+  the mapping step shows the path column as a non-mappable **"Model name (splits packages)"** pill,
+  leads with "rows split into N models by package", auto-routes Operations→the Function Search column,
+  and the action becomes **"Split & Import"** (no active model required — models are created). Files:
+  `backend/routers/imports.py`, `frontend/src/components/ImportWizard.tsx`, `theme/macos.css`,
+  `Tests/test_backend_import.py` (+4: split-creates-models, ops-expand, append-to-existing,
+  view-only-blocked). **Verified in-browser** (`/tmp/InterfaceExportTest.arch` = fresh CodeMapTest, 35 models):
+  `ports_csv.xlsx` → "split into 34 models" → **1514 rows distributed by package** (LsmDevice 77→207,
+  LedAdapter 385→800, SmcAdapter 36→72, PixelAdapter 88→178; all 34 package names pre-existed so all
+  appended, 0 created — the create path is covered by the new unit test), sidebar refreshed, single
+  rematch fired over all model_ids. `npm run build` clean. Full suite **605 passed** (601 + 4).
+  Restored Alex's `TestArch.arch`.
+- **2026-06-14 (p)** — **Import baseline-prompt moved to the right branch** (Alex: ports import
+  shouldn't baseline; a new ELF/JSON should). Frontend-only (`ImportWizard.tsx` + `Workspace.tsx`):
+  • **Excel/CSV (ports)** → NO baseline; analyze goes straight to the column-mapping step (adding
+    ports to the current version isn't a version bump).
+  • **ELF/JSON (new SW version)** → new `elf_baseline` step *before* naming the release: "Importing X
+    is a new software version — baseline the current version (<currentRelease>) first" (snapshots the
+    table+current ELF via `POST /baselines` while the OLD release is still active), then Create
+    Baseline / Skip → release-name step → import_symbols. The prompt only shows when a release already
+    exists (`currentRelease` prop = `status.active_release`); first/onboarding ELF import skips it.
+  Verified in-browser (`/tmp/BaselineTest.arch`, active ELF release): Excel → mapping directly (no
+  baseline field); JSON → baseline prompt → Create Baseline ("Snapshot_before_R2", baselines 0→1) →
+  release step → imported "R2.0_new_elf" (baseline preserved). `npm run build` clean; no console
+  errors. Backend untouched (**605**). (Re-created `.claude/launch.json` frontend config — the
+  tracked dev server had been lost.)
+- **2026-06-14 (q)** — **Column customizer** (▦ button; Workspace parity — "finally show data").
+  Backend: new Qt-free logic module `Logic_Column_Layout.py` (extracted from the Phase-0
+  `src/UI/column_customizer.py` TODO) — `compute_locked_columns` (TC. ID + Port State + the Review
+  col + any column holding data in a *Reviewed* row), `validate_layout` (TC. ID first / unique / no
+  `|` / single Link·Last-Result), `migrate_rows` (rename → move cell key; delete → drop cell),
+  `diff_layout` (removed = old − new − rename-sources), `is_dependent`/`leader_of`, `ADDABLE_TYPES`.
+  Endpoints: `GET /api/columns/editor` → `{columns, locked, addable_types}` (locked from the active
+  model's rows); `PUT /api/columns` extended with `renames:{old:new}` → validates, then **migrates
+  cell keys across EVERY model** (layout is project-global, cells are per-model keyed by name) and
+  strips removed columns' cells, in one transaction. +10 tests (`Tests/test_backend_columns.py`:
+  logic + API rename-migration/delete-cleanup/locked/validation/view-only). Frontend
+  `ColumnCustomizer.tsx` (lifted `columnsOpen` to App like the import wizard): **group-aware** modal —
+  a Search col + its Match/Init/Cyclic and Review Status + Port State render as one block that
+  moves/renames/deletes together; TC. ID pinned first; reorder via ▲/▼ on groups (can't pass TC. ID);
+  per-column visibility checkbox; inline rename (leader → cascades to dependents); add column (name +
+  type → Search types auto-create dependents); 🔒 on locked columns (no rename, delete blocked w/
+  toast). Apply tracks renames by stable id (= original name) and `PUT`s `{columns, renames}`. Wired
+  through App→Workspace (`onChanged`=refreshAll). **Verified in-browser** (`/tmp/ColTest.arch`, 1 row
+  marked Reviewed): editor locked Input Port + deps + Port Name + Required Interface; renamed Mapped
+  Func→MappedFunc (deps cascaded), hid Mapped Parameter (gone from headers), added "QA Notes" +
+  reordered it up, Apply → table headers updated, no data loss; locked Input Port had no rename btn +
+  delete blocked with toast. `npm run build` clean; no console errors. Full suite **615 passed**
+  (605 + 10). Restored Alex's `TestArch.arch`.
+- **2026-06-14 (r)** — **Three import/layout fixes** (Alex). (1) **Auto-create columns during import**:
+  the mapping dropdown gained a "➕ Create new column "<src>"" option; on import the wizard appends
+  those as Static Text columns via `PUT /columns` *before* the bulk/interface_export insert and maps the
+  source to the new name (uniquified). (2) **Default table layout for new projects**: new Qt-free
+  `DEFAULT_COLUMN_LAYOUT` (ported from PyQt6 `architecture_table.py` active_config — TC. ID, Input
+  Port/Mapped Func/Mapped Parameter search families + Review Status + Port State) seeded in
+  `AppState.new_project` so a fresh project opens with usable columns (+1 test). (3) **Baseline dialog
+  (ELF import) is now mandatory**: name pre-filled with a valid `"<currentRelease> (baseline)"` (so
+  the action is active immediately), the **Skip button removed** (ASPICE requires a snapshot when
+  moving releases), button relabeled "Create Baseline & Continue", sub-text updated. Also fixed a
+  stray NULL byte in the wizard's `DONT` sentinel (→ clean `"__ignore"`). Files: `Logic_Column_Layout.py`
+  (DEFAULT_COLUMN_LAYOUT), `backend/state.py`, `ImportWizard.tsx`, `Tests/test_backend_api.py`.
+  **Verified in-browser** (`/tmp/Fix3Test.arch`): new project → 13 default cols; ELF baseline name =
+  "elf_… (baseline)" + no Skip + active; mapped Operations→"➕ Create" → import created the
+  "Operations" column (15→16) and populated it (130 cells in LsmDevice). `npm run build` clean; no
+  console errors. Full suite **616 passed** (615 + 1). NOTE: Alex's `ForTesting/` was reorganized
+  mid-session (`TestArch.arch` gone, encrypted `ArchTest1/ArchTest1.arch` added) — left the worker at
+  the start screen (can't open the encrypted project without the master password).
+- **2026-06-14 (s)** — **Column DnD + Init/Cyclic logic + cell gradients** (Alex, 3 of 4 items;
+  #3 Review/Port-State cascade deferred as the next step). **(1) Drag-and-drop** in the column
+  customizer — each group has a ⠿ grip (`draggable`); dragging reorders whole groups (leader +
+  dependents), TC. ID stays pinned; ▲/▼ arrows replaced by DnD. **(2) Init/Cyclic 3-state + value
+  logic**: visibility is now tri-state **Auto / Show / Hide** — DB `col_visible` encodes 2=Auto(None)/
+  1=Show/0=Hide (`_decode_visible`; `save_column_layout` no longer coerces None→1), API `ColumnSpec.
+  visible: Optional[bool]`, `DEFAULT_COLUMN_LAYOUT` Init/Cyclic default to Auto. The customizer shows a
+  cycling Auto/Show/Hide pill for Init/Cyclic (checkbox for the rest). "Auto" resolves at render
+  (Workspace): shown only when some row has a meaningful value. **Value logic** ported to `columns.ts`
+  (`initValueFor`/`cyclicValueFor`/`initCyclicValue`): Init = "1" if "init" in the matched function
+  else "0"; Cyclic = `<n>` from `<n>ms`, else "10" for a "cyclic" tag, else "0"; a stored
+  `user_changed` value overrides (rendered bolder). **(4) Cell gradients**: coloured cells get a
+  subtle `tone-ok/warn/err/grey` background gradient (match % by score, pills by state) via a
+  `cellTone` helper, plus a light depth gradient on `.pill`/`.conf`. Files: `Logic_Database.py`,
+  `Logic_Column_Layout.py`, `backend/routers/architecture.py`, `columns.ts`, `PortsTable.tsx`,
+  `Workspace.tsx`, `ColumnCustomizer.tsx`, `api/types.ts`, `theme/macos.css`,
+  `Tests/test_backend_columns.py` (+1 tri-state round-trip). **Verified in-browser**
+  (`/tmp/LogicTest.arch`): match "Lsm_Init_Setup"→Init=1, "Task_100ms_Handler"→Cyclic=100; 95% cell
+  `tone-ok` gradient; pill depth gradient; customizer 3-state cycle Show→Hide→Auto→Show persists
+  (Input Port Cyclic→Auto hidden, no values; Mapped Func shown with values); drag reorder moved a
+  group. `npm run build` clean; no console errors. Full suite **617 passed** (616 + 1). **NEXT:
+  #3 — Review Status / Port State cascade logic** (Reviewed→green+strip-% on match cells, retired→grey
+  row, deleted→strikethrough, empty-row→no pill).
