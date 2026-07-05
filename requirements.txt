@@ -14,9 +14,13 @@ requests>=2.31.0
 # acceptable there.
 capstone>=4.0.2; sys_platform != 'win32' or platform_machine != 'ARM64'
 capstone==6.0.0a9; sys_platform == 'win32' and platform_machine == 'ARM64'
-# cryptography: 46.x is the last series publishing win_arm64 wheels.
+# cryptography: exact pin — 46.0.3 is the LAST version with a win_arm64 wheel
+# (46.0.4-46.0.7 and 47+ ship none). A range like "<47" resolves to 46.0.7 and
+# silently falls back to the sdist, whose Rust/OpenSSL build fails on the CI
+# ARM64 runner. Bump deliberately when a newer version publishes ARM64 wheels:
+#   pip download cryptography --only-binary :all: --no-deps  (on an ARM64 box)
 cryptography>=42.0.0; sys_platform != 'win32' or platform_machine != 'ARM64'
-cryptography>=42.0.0,<47; sys_platform == 'win32' and platform_machine == 'ARM64'
+cryptography==46.0.3; sys_platform == 'win32' and platform_machine == 'ARM64'
 # cpp_demangle: no win_arm64 distribution at all; demangle_name() falls back
 # to returning the raw symbol name when the import fails.
 cpp_demangle>=0.1.0; sys_platform != 'win32' or platform_machine != 'ARM64'
