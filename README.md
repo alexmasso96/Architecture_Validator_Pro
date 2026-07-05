@@ -151,12 +151,30 @@ older or locked-down/VM images you may need to install them:
 | Component | Why | Download |
 | --- | --- | --- |
 | **Microsoft Edge WebView2 Runtime** | Renders the React UI. Missing or wrong-architecture → a blank **white window** (install the **ARM64** runtime on Windows-on-ARM). | [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) |
-| **.NET Framework 4.7.2+** | pythonnet / `clr_loader` bootstrap the WebView2 backend through .NET. Missing → `Failed to resolve Python.Runtime.Loader.Initialize`. | [.NET Framework](https://dotnet.microsoft.com/download/dotnet-framework) |
+| **.NET Framework 4.7.2+** (x64/x86 machines) | pythonnet / `clr_loader` bootstrap the WebView2 backend through .NET. Missing → `Failed to resolve Python.Runtime.Loader.Initialize`. | [.NET Framework](https://dotnet.microsoft.com/download/dotnet-framework) |
+| **.NET Desktop Runtime 8.0+ ARM64** (Windows-on-ARM only) | Native ARM64 builds run pythonnet on CoreCLR — `clr_loader` has no ARM64 .NET Framework shim. | [Desktop Runtime ARM64](https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-arm64.exe) |
 
-The app **checks for both at launch** and, if either is missing, shows a dialog
+The app **checks for these at launch** and, if one is missing, shows a dialog
 linking straight to the download page instead of failing silently. If startup
 still fails, a full traceback is written to
-`%LOCALAPPDATA%\ArchitectureValidator\crash.log`.
+`%LOCALAPPDATA%\ArchitectureValidator\crash.log` and shown in an error dialog.
+
+> **Distributing as a zip:** files unzipped from a browser download carry the
+> *Mark of the Web*, which makes .NET Framework refuse to load the bundled
+> `Python.Runtime.dll` (`Failed to resolve Python.Runtime.Loader.Initialize`).
+> The app now strips these marks from its own bundled assemblies at startup;
+> for older builds, right-click the zip → Properties → **Unblock** before
+> extracting (or `dir -Recurse | Unblock-File` in PowerShell).
+
+### Building / developing on Windows-on-ARM
+
+Native ARM64 Python needs two pywebview payload fixups (CoreCLR-compatible
+WebView2 assemblies + a folder-dialog patch). After `pip install -r
+requirements.txt`, run once per venv:
+
+```powershell
+python scripts/setup_windows_arm64.py
+```
 
 > **Note:** the app stores its WebView2 profile under
 > `%LOCALAPPDATA%\ArchitectureValidator\WebView2`, so it runs as a normal user —

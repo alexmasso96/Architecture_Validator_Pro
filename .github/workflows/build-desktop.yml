@@ -90,7 +90,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        # Two Windows legs: PyInstaller bundles inherit the build machine's CPU
+        # architecture, and an x64 bundle on Windows-on-ARM only runs under
+        # emulation (which is what produced the blank-white-window failure).
+        # windows-11-arm runners are free for public repos; private repos need
+        # a provisioned arm64 larger runner with the same label.
+        os: [windows-latest, windows-11-arm, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -143,21 +148,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Native ARM64 Python cannot use .NET Framework (clr_loader has no ARM64
+      # netfx shim), so pywebview needs its CoreCLR-compatible WebView2
+      # assemblies + folder-dialog patch swapped in BEFORE PyInstaller collects
+      # them into the bundle. Idempotent; see the script's docstring.
+      - name: Apply Windows-on-ARM pywebview CoreCLR fixups
+        if: matrix.os == 'windows-11-arm'
+        run: python scripts/setup_windows_arm64.py
+
       - name: Build with PyInstaller
         run: pyinstaller ArchitectureValidatorDesktop.spec --noconfirm
 
-      # --- Package: Windows -------------------------------------------------
+      # --- Package: Windows (per-arch zip: -x64 / -arm64) --------------------
       - name: Package Windows (zip)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/ArchitectureValidator -DestinationPath architecture-validator-desktop-windows.zip
+        run: |
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          Compress-Archive -Path dist/ArchitectureValidator -DestinationPath "architecture-validator-desktop-windows-$arch.zip"
 
       - name: Upload Windows artifact
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-windows-artifact
-          path: architecture-validator-desktop-windows.zip
+          # matrix.os in the name keeps the two Windows legs from colliding
+          # (upload-artifact@v4 rejects duplicate artifact names).
+          name: desktop-windows-artifact-${{ matrix.os }}
+          path: architecture-validator-desktop-windows-*.zip
 
       # --- Package: macOS ---------------------------------------------------
       - name: Package macOS (zip)
@@ -258,5 +275,6 @@ jobs:
             architecture-validator-desktop-linux.deb
             architecture-validator-desktop-linux.rpm
             architecture-validator-desktop-linux.flatpak
-            architecture-validator-desktop-windows.zip
+            architecture-validator-desktop-windows-x64.zip
+            architecture-validator-desktop-windows-arm64.zip
             architecture-validator-desktop-macos.zip

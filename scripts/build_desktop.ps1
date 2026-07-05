@@ -30,6 +30,11 @@ Write-Host '==> 2/4 Building Rust ELF parser wheel'
 Write-Host '==> 3/4 Installing Python dependencies'
 & $Python -m pip install -r requirements.txt
 
+if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+    Write-Host '==> 3b/4 Windows-on-ARM: applying pywebview CoreCLR fixups'
+    & $Python scripts/setup_windows_arm64.py
+}
+
 Write-Host '==> 4/4 Packaging with PyInstaller (onedir)'
 & $Python -m PyInstaller ArchitectureValidatorDesktop.spec --noconfirm --clean
 

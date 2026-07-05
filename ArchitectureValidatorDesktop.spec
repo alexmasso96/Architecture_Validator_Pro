@@ -51,13 +51,19 @@ hiddenimports += collect_submodules('webview')
 # (pythonnet) and bootstraps the .NET runtime through `clr_loader`. PyInstaller's
 # automatic analysis does NOT reliably bundle pythonnet's managed assembly
 # (pythonnet/runtime/Python.Runtime.dll) together with clr_loader's native
-# bootstrap shims (clr_loader/ffi/dlls/{x86,x64,arm64}/*.dll). When the shim and
-# the managed assembly are mismatched or the shim is missing, clr_loader raises
+# bootstrap shims (clr_loader/ffi/dlls/{x86,amd64}/*.dll — NO arm64 shim
+# exists; see pythonnet/pythonnet#2523). When the shim and the managed assembly
+# are mismatched or the shim is missing, clr_loader raises
 #   "Failed to resolve Python.Runtime.Loader.Initialize from ...Python.Runtime.dll"
 # and the app crashes before the window appears. collect_all() pulls the data
 # files, native DLLs, and submodules for both so they ship with the correct
 # layout. Guarded to win32 because pythonnet/clr_loader are not installed on the
 # macOS/Linux build hosts (those use the WKWebView / GTK backends instead).
+#
+# ARM64 note: a bundle built with a *native ARM64* Python targets CoreCLR at
+# runtime instead of .NET Framework (desktop/main.py:_configure_dotnet_runtime);
+# build such bundles from a venv prepared by scripts/setup_windows_arm64.py so
+# the CoreCLR-compatible WebView2 assemblies are the ones collected here.
 if sys.platform == 'win32':
     for _pkg in ('pythonnet', 'clr_loader'):
         _d, _b, _h = collect_all(_pkg)
