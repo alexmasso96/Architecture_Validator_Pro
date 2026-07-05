@@ -427,8 +427,10 @@ def main() -> None:
         proc.join(timeout=5)
         logger.error("Worker failed to become ready; aborting.")
         _show_fatal_dialog(
-            "The background worker process did not start.\n\n"
-            f"Details may be in:\n{_log_dir() / 'crash.log'}"
+            "The background worker process did not become ready in time.\n\n"
+            "Common causes: endpoint-protection software delaying first "
+            "launch, or a proxy/firewall interfering with local connections.\n\n"
+            f"The exact reason is logged in:\n{_log_dir() / 'crash.log'}"
         )
         raise SystemExit(1)
 

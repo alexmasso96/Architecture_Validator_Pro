@@ -11,6 +11,7 @@ project locked.
 """
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import socket
 import sys
@@ -87,16 +88,33 @@ def spawn_worker(token: str, timeout: float = 30.0):
     return proc, port, parent_conn
 
 
-def wait_until_ready(port: int, timeout: float = 20.0, interval: float = 0.1) -> bool:
-    """Poll ``/api/health`` until the worker accepts connections."""
+def wait_until_ready(port: int, timeout: float = 60.0, interval: float = 0.1) -> bool:
+    """Poll ``/api/health`` until the worker accepts connections.
+
+    The request goes through a proxy-free opener: plain ``urlopen`` honours the
+    system/environment proxy even for ``http://127.0.0.1``, and on corporate
+    machines a proxy that cannot connect back to loopback makes a perfectly
+    healthy worker look dead — the shell then aborts while a browser (which
+    bypasses proxies for localhost) can still reach the app. The generous
+    timeout covers EDR-encumbered cold starts of the frozen worker, and the
+    last failure is logged so a timeout is diagnosable from crash.log.
+    """
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/api/health"
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({})  # never proxy loopback traffic
+    )
+    last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1) as r:  # noqa: S310 (localhost only)
+            with opener.open(url, timeout=1) as r:  # noqa: S310 (localhost only)
                 if r.status == 200:
                     return True
-        except Exception:
-            pass
+        except Exception as exc:
+            last_error = exc
         time.sleep(interval)
+    logging.getLogger(__name__).error(
+        "Worker health check got no 200 from %s within %.0fs; last error: %r",
+        url, timeout, last_error,
+    )
     return False
