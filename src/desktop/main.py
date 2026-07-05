@@ -410,10 +410,26 @@ def main() -> None:
     # extract) the non-admin user can't write there, so the browser process never
     # starts and the window stays blank white — while running as admin "fixes" it.
     # setdefault honours a user-provided WEBVIEW2_USER_DATA_FOLDER if one is set.
+    # (Verified: the WebView2 loader gives these env vars precedence over the
+    # values pywebview sets programmatically, so this mechanism is reliable.)
     if sys.platform == "win32":
         os.environ.setdefault(
             "WEBVIEW2_USER_DATA_FOLDER", str(_log_dir() / "WebView2")
         )
+        # The embedded webview only ever navigates to the local worker
+        # (http://127.0.0.1:<port>). Corporate proxy/PAC configs frequently
+        # route even loopback traffic to the proxy, which cannot connect back
+        # into this machine — the SPA never loads and the window stays blank
+        # white. (Proxy config is per-user, which is why "Run as administrator"
+        # can render fine while a normal launch stays white, or vice versa.)
+        # --no-proxy-server makes the embedded browser direct-connect only;
+        # outbound AI/provider calls happen in the worker process via
+        # `requests` and keep normal system proxy behaviour.
+        _wv2_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+        if "--no-proxy-server" not in _wv2_args:
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+                f"{_wv2_args} --no-proxy-server".strip()
+            )
 
     token = generate_token()
 
