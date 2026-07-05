@@ -53,6 +53,7 @@ _APP_SALT = b"ArchValidator::ai-credentials::v1"
 _KDF_ITERATIONS = 200_000
 
 _COPILOT_OAUTH_FIELD = "__copilot_oauth__"
+_NETWORK_PROXY_FIELD = "__network_proxy__"
 
 
 # ---------------------------------------------------------------------------
@@ -194,11 +195,11 @@ def delete_key(provider: str) -> None:
 
 
 def list_configured() -> List[str]:
-    """Provider ids that currently have a non-empty key (excludes the Copilot
-    OAuth token, which is queried separately)."""
+    """Provider ids that currently have a non-empty key. Reserved dunder
+    fields (Copilot OAuth token, network proxy) are internal and excluded."""
     return sorted(
         k for k, v in _load().items()
-        if k != _COPILOT_OAUTH_FIELD and v
+        if not (k.startswith("__") and k.endswith("__")) and v
     )
 
 
@@ -227,6 +228,33 @@ def set_copilot_oauth_token(token: str) -> None:
 def clear_copilot_oauth_token() -> None:
     data = _load()
     if data.pop(_COPILOT_OAUTH_FIELD, None) is not None:
+        _save(data)
+
+
+# ---------------------------------------------------------------------------
+# Public API — outbound network proxy
+# ---------------------------------------------------------------------------
+# The proxy URL may embed credentials (http://user:pass@proxy:8080), so it
+# lives in this encrypted store alongside the AI keys rather than in the
+# plaintext prefs file.
+
+def get_network_proxy() -> Optional[str]:
+    val = _load().get(_NETWORK_PROXY_FIELD)
+    return val if val else None
+
+
+def set_network_proxy(url: str) -> None:
+    data = _load()
+    if url:
+        data[_NETWORK_PROXY_FIELD] = url
+    else:
+        data.pop(_NETWORK_PROXY_FIELD, None)
+    _save(data)
+
+
+def clear_network_proxy() -> None:
+    data = _load()
+    if data.pop(_NETWORK_PROXY_FIELD, None) is not None:
         _save(data)
 
 

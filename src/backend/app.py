@@ -35,8 +35,11 @@ from .routers import jobs as jobs_router
 from .routers import prefs as prefs_router
 from .routers import project as project_router
 from .routers import releases as releases_router
+from . import net
+from .routers import net as net_router
 from .routers import symbols as symbols_router
 from .routers import testdesign as testdesign_router
+from .routers import update as update_router
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,13 @@ def create_app(
     app.include_router(injection_router.router)
     app.include_router(testdesign_router.router)
     app.include_router(prefs_router.router)
+    app.include_router(update_router.router)
+    app.include_router(net_router.router)
+
+    # Export the stored outbound proxy (Preferences → Network) into this
+    # worker's environment so every `requests` call — AI providers, update
+    # check — inherits it. Must happen before any outbound call is possible.
+    net.apply_stored_proxy()
 
     @app.get("/api/health")
     def health() -> dict:

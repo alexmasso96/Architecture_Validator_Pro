@@ -473,7 +473,18 @@ def main() -> None:
 
     logger.info("Entering webview.start() — .NET/WebView2 bootstrap happens now")
     try:
-        webview.start()
+        # private_mode=False + storage_path pin the WebView2 profile to a
+        # per-user-writable location THROUGH pywebview (which passes the folder
+        # to WebView2 explicitly — the WEBVIEW2_USER_DATA_FOLDER env var is
+        # ignored when the host app sets one). pywebview's private-mode default
+        # is a %TEMP% profile; on locked-down machines where the user cannot
+        # use that path the browser process never starts and the window stays
+        # blank white as user while working as admin. Persistent storage also
+        # keeps SPA cookies/localStorage across sessions.
+        webview.start(
+            private_mode=False,
+            storage_path=str(_log_dir() / "WebView2"),
+        )
         logger.info("webview.start() returned cleanly (window closed); shutting down")
     finally:
         # Closing the lifeline triggers the worker's graceful shutdown, which

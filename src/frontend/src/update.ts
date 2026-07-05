@@ -1,9 +1,17 @@
 // In-app "Check for Updates": compares the running version against the latest
 // published GitHub release and exposes a small status machine the launcher and
-// Preferences subscribe to. The GitHub Releases API serves permissive CORS, so
-// the fetch works from both the desktop shell and a plain dev browser.
+// Preferences subscribe to.
+//
+// The check goes through the worker (/api/update/latest): the desktop shell
+// runs WebView2 with --no-proxy-server (loopback must stay direct on corporate
+// proxy networks), so the webview itself may have no internet access — the
+// worker resolves the system proxy instead. A direct GitHub fetch remains as
+// fallback for a plain dev browser without the relay (the Releases API serves
+// permissive CORS).
 
 import { useCallback, useEffect, useState } from "react";
+
+import { api, ApiError } from "./api/client";
 
 // Single source of truth for the running version. Keep in lockstep with
 // package.json / RELEASE_NOTES.md on every release.
@@ -48,18 +56,46 @@ export function isNewer(latest: string, current: string): boolean {
 }
 
 async function fetchLatestRelease(): Promise<{ tag: string; body: string }> {
-  const res = await fetch(RELEASES_API, {
-    headers: { Accept: "application/vnd.github+json" },
-  });
-  if (!res.ok) {
-    throw new Error(
-      res.status === 404
-        ? "No published releases found."
-        : `GitHub API responded ${res.status}.`,
+  try {
+    const j = await api.get<{ tag_name: string; body: string }>(
+      "/update/latest",
     );
+    return { tag: String(j.tag_name ?? ""), body: String(j.body ?? "") };
+  } catch (e) {
+    if (e instanceof ApiError) {
+      // The relay answered: its verdict is final (it already timed out /
+      // classified the GitHub failure). A direct fetch from the webview
+      // would just hang without a proxy.
+      throw new Error(e.detail);
+    }
+    // Relay not reachable (plain dev browser) → fall through to direct fetch.
   }
-  const json = await res.json();
-  return { tag: String(json.tag_name ?? ""), body: String(json.body ?? "") };
+
+  // Hard timeout so the status pill can never sit in "checking" forever.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  try {
+    const res = await fetch(RELEASES_API, {
+      headers: { Accept: "application/vnd.github+json" },
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      throw new Error(
+        res.status === 404
+          ? "No published releases found."
+          : `GitHub API responded ${res.status}.`,
+      );
+    }
+    const json = await res.json();
+    return { tag: String(json.tag_name ?? ""), body: String(json.body ?? "") };
+  } catch (e) {
+    if ((e as Error).name === "AbortError") {
+      throw new Error("Timed out connecting to GitHub.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Owns the update-check lifecycle. App mounts this once and threads the result
