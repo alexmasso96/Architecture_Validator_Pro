@@ -274,6 +274,33 @@ def _dotnet_fx_installed() -> bool:
         return False
 
 
+def _is_elevated() -> bool:
+    """True when this process runs elevated (Run as administrator)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _webview_profile_dir() -> Path:
+    """WebView2 user-data folder, separated per elevation level.
+
+    WebView2 does not support sharing a user-data folder between processes at
+    different integrity levels: once an elevated run has initialized the
+    profile, a normal-user run (and often subsequent runs of either kind,
+    because failed inits leave msedgewebview2.exe subprocesses holding the
+    profile lock) dies in CreateCoreWebView2ControllerAsync with
+    0x80004004 (E_ABORT) and the window stays blank. Keeping "user" and
+    "admin" profiles apart makes the two launch modes independent.
+    """
+    suffix = "-admin" if _is_elevated() else ""
+    return _log_dir() / f"WebView2{suffix}"
+
+
 def _windows_prereqs_ok() -> bool:
     """Preflight the Windows-only runtime deps; warn + link to downloads if any
     are missing. Returns False when the app cannot run (caller should exit).
@@ -414,7 +441,7 @@ def main() -> None:
     # values pywebview sets programmatically, so this mechanism is reliable.)
     if sys.platform == "win32":
         os.environ.setdefault(
-            "WEBVIEW2_USER_DATA_FOLDER", str(_log_dir() / "WebView2")
+            "WEBVIEW2_USER_DATA_FOLDER", str(_webview_profile_dir())
         )
         # The embedded webview only ever navigates to the local worker
         # (http://127.0.0.1:<port>). Corporate proxy/PAC configs frequently
@@ -453,7 +480,12 @@ def main() -> None:
     # Breadcrumbs: a hard native crash (CLR/WebView2) or an external kill (EDR)
     # produces no Python traceback, so these log lines are the only way to see
     # how far startup got on a machine where the shell dies silently.
-    logger.info("Worker ready; creating native window (pywebview shell)")
+    logger.info(
+        "Worker ready; creating native window (pywebview shell); "
+        "elevated=%s, webview profile=%s",
+        _is_elevated(),
+        _webview_profile_dir(),
+    )
     api = JsApi(token)
     window = webview.create_window(
         WINDOW_TITLE,
@@ -483,7 +515,8 @@ def main() -> None:
         # keeps SPA cookies/localStorage across sessions.
         webview.start(
             private_mode=False,
-            storage_path=str(_log_dir() / "WebView2"),
+            # Elevation-scoped profile dir — see _webview_profile_dir().
+            storage_path=str(_webview_profile_dir()),
         )
         logger.info("webview.start() returned cleanly (window closed); shutting down")
     finally:
