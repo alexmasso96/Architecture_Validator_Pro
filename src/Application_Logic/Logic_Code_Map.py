@@ -170,11 +170,12 @@ def build_code_map(parser, code_index, *, source_root: str,
                 (elf_hash,)
             )
             for r in cur.fetchall():
+                dec_params = db._dec_text("A", r["parameters"])
                 dwarf_funcs[r["name"]] = {
                     "address": r["address"],
                     "size": r["size"],
-                    "parameters": json.loads(r["parameters"]) if r["parameters"] else [],
-                    "return_type": r["return_type"] or ""
+                    "parameters": json.loads(dec_params) if dec_params else [],
+                    "return_type": db._dec_text("A", r["return_type"]) or ""
                 }
             
             cur_g = db.execute(
@@ -182,7 +183,7 @@ def build_code_map(parser, code_index, *, source_root: str,
                 (elf_hash,)
             )
             for r in cur_g.fetchall():
-                dwarf_globals[r["name"]] = r["var_type"]
+                dwarf_globals[r["name"]] = db._dec_text("A", r["var_type"])
             
             dwarf_structures = db.get_all_structures(elf_hash)
         except Exception as e:

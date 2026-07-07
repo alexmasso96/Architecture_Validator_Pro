@@ -88,7 +88,8 @@ export async function bootstrapToken(): Promise<void> {
 
 export function nativeSetTitle(title: string): void {
   // Fire-and-forget; document.title already updates the window on most backends.
-  window.pywebview?.api?.set_title(title)?.catch(() => {});
+  // The JS bridge is populated asynchronously; use optional chaining so we don't throw if set_title isn't bound yet.
+  window.pywebview?.api?.set_title?.(title)?.catch(() => {});
 }
 
 export async function nativePickFolder(): Promise<string | null> {

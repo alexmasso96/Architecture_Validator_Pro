@@ -224,7 +224,7 @@ class ProjectDatabase:
         parent = os.path.dirname(os.path.abspath(db_path))
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False, cached_statements=0)
         self._conn.row_factory = sqlite3.Row
         if apply_journal:
             self.journal_mode = self._apply_journal_mode(db_path)
