@@ -22,6 +22,7 @@ export function Titlebar({
   canSave,
   saving,
   onImport,
+  onImportProfile,
   onColumns,
   onPrefs,
 }: {
@@ -33,6 +34,7 @@ export function Titlebar({
   canSave: boolean;
   saving: boolean;
   onImport: () => void;
+  onImportProfile: () => void;
   onColumns: () => void;
   onPrefs: () => void;
 }) {
@@ -66,6 +68,10 @@ export function Titlebar({
         <button className="tb-icon" title="Import" onClick={onImport}>
           <span className="tb-glyph">⇪</span>
           {showLabels && <span className="tb-label">Import</span>}
+        </button>
+        <button className="tb-icon" title="Import from profile" onClick={onImportProfile}>
+          <span className="tb-glyph">⇫</span>
+          {showLabels && <span className="tb-label">Profile</span>}
         </button>
         <button className="tb-icon" title="Columns" onClick={onColumns}>
           <span className="tb-glyph">▦</span>

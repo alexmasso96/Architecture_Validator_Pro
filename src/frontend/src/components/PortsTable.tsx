@@ -53,6 +53,7 @@ export function PortsTable({
   onSelectRow,
   onEditCell,
   onOpenMatch,
+  onUnlockCell,
   canEdit,
   modelStatus,
 }: {
@@ -62,12 +63,20 @@ export function PortsTable({
   onSelectRow: (rowIndex: number) => void;
   onEditCell: (rowIndex: number, colName: string, value: string) => void;
   onOpenMatch: (rowIndex: number, col: ResolvedColumn, x: number, y: number) => void;
+  onUnlockCell?: (rowIndex: number, colName: string) => void;
   canEdit: boolean;
   modelStatus: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pill, setPill] = useState<PillTarget | null>(null);
   const [edit, setEdit] = useState<EditTarget | null>(null);
+  // #7: context menu for import-locked cells (explicit, change-logged unlock).
+  const [unlockMenu, setUnlockMenu] = useState<{
+    x: number;
+    y: number;
+    rowIndex: number;
+    colName: string;
+  } | null>(null);
 
   function startEdit(rowIndex: number, colName: string, current: string) {
     if (!canEdit) return;
@@ -188,6 +197,33 @@ export function PortsTable({
 
   function renderCell(row: PortRow, col: ResolvedColumn, reviewed: boolean) {
     const value = cellText(row.cells[col.name]);
+
+    // #7: cells populated by an import are locked — no inline edit; the only
+    // way back to editability is the explicit right-click unlock (audited).
+    if (row.cells[col.name]?.origin === "import") {
+      return (
+        <span
+          className="mono editcell locked-cell"
+          title={
+            "Populated by an import and locked." +
+            (canEdit ? " Right-click to unlock (recorded in the change log)." : "")
+          }
+          onContextMenu={
+            canEdit && onUnlockCell
+              ? (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setUnlockMenu({ x: e.clientX, y: e.clientY,
+                                  rowIndex: row.row_index, colName: col.name });
+                }
+              : undefined
+          }
+        >
+          <span className="lock-glyph">🔒</span>
+          {value || <span className="dim">—</span>}
+        </span>
+      );
+    }
 
     // Inline free-text editor: shown when this exact cell is being edited.
     if (
@@ -428,6 +464,21 @@ export function PortsTable({
           y={pill.y}
           items={pillMenuItems}
           onClose={() => setPill(null)}
+        />
+      )}
+      {unlockMenu && (
+        <Menu
+          x={unlockMenu.x}
+          y={unlockMenu.y}
+          items={[
+            {
+              label: "Unlock imported cell…",
+              danger: true,
+              onClick: () =>
+                onUnlockCell?.(unlockMenu.rowIndex, unlockMenu.colName),
+            },
+          ]}
+          onClose={() => setUnlockMenu(null)}
         />
       )}
     </div>

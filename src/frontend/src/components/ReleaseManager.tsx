@@ -314,6 +314,19 @@ export function ReleaseManager({
                             ✓ Source
                           </span>
                         )}
+                        {n.parser_backend && (
+                          <span
+                            className="mm-tag"
+                            title={
+                              n.parser_backend === "rust_elf_parser"
+                                ? "ELF imported with the native Rust parser"
+                                : "ELF imported with the pyelftools fallback parser (slower — " +
+                                  "the native module was unavailable or overridden)"
+                            }
+                          >
+                            ⚙ {n.parser_backend === "rust_elf_parser" ? "native" : "python"}
+                          </span>
+                        )}
                         {n.is_deleted && <span className="mm-tag del">deleted</span>}
                       </span>
                     </td>
@@ -433,6 +446,19 @@ export function ReleaseManager({
                         {n.has_source && (
                           <span className="mm-tag src" title="Source code stored in the database">
                             ✓ Source
+                          </span>
+                        )}
+                        {n.parser_backend && (
+                          <span
+                            className="mm-tag"
+                            title={
+                              n.parser_backend === "rust_elf_parser"
+                                ? "ELF imported with the native Rust parser"
+                                : "ELF imported with the pyelftools fallback parser (slower — " +
+                                  "the native module was unavailable or overridden)"
+                            }
+                          >
+                            ⚙ {n.parser_backend === "rust_elf_parser" ? "native" : "python"}
                           </span>
                         )}
                       </div>

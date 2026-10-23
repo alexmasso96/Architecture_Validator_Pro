@@ -5,6 +5,8 @@ import { confClass, type SymbolKind } from "../columns";
 interface Candidate {
   name: string;
   score: number;
+  /** #6D: exists only as an inline expansion — no symbol, no address. */
+  inlined?: boolean;
 }
 interface SymbolsResponse {
   query: string;
@@ -156,7 +158,18 @@ export function MatchPicker({
               }}
             >
               <span className="check">{c.name === current ? "✓" : ""}</span>
-              <span className="mono matchpicker-name">{c.name}</span>
+              <span
+                className="mono matchpicker-name"
+                title={
+                  c.inlined
+                    ? "This function was inlined by the optimizer — it exists " +
+                      "in the code but has no standalone symbol or address."
+                    : undefined
+                }
+              >
+                {c.name}
+                {c.inlined && <span className="mm-tag"> inlined</span>}
+              </span>
               <span className={confClass(c.score)}>{c.score}%</span>
             </button>
           ))

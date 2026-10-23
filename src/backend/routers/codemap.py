@@ -120,12 +120,18 @@ def codemap_graph(fn: Optional[str] = None,
             ntype = "center" if lvl == 0 else ("caller" if lvl < 0 else "callee")
             nodes.append({"name": name, "level": lvl, "type": ntype})
 
+        # #6C: when the map was built against a .o dataset, label each edge —
+        # verified (compiler-confirmed via relocations/inlining) or not.
+        verification = bool(ds.get("edge_verification"))
         edges = []
         for u in node_levels:
-            for v in functions.get(u, {}).get("calls", []):
+            fu = functions.get(u, {})
+            verified_set = set(fu.get("verified_calls") or [])
+            for v in fu.get("calls", []):
                 if v in node_levels:
                     kind = "callee" if node_levels[v] >= 0 else "caller"
-                    edges.append({"source": u, "target": v, "kind": kind})
+                    edges.append({"source": u, "target": v, "kind": kind,
+                                  "verified": v in verified_set})
 
         return {
             "focus": focus,
@@ -134,6 +140,7 @@ def codemap_graph(fn: Optional[str] = None,
             "total_nodes": total,
             "truncated": total > MAX_GRAPH_NODES,
             "max_nodes": MAX_GRAPH_NODES,
+            "edge_verification": verification,
         }
     return _guard(go)
 

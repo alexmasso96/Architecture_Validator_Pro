@@ -31,10 +31,18 @@ class SymbolMatcher:
             # DB-backed path — load only name strings, not full objects
             self.all_function_names: List[str] = db.get_function_names(elf_hash)
             self.all_variable_names: List[str] = db.get_variable_names(elf_hash)
+            # #6D: functions that exist only as inline expansions (no symbol,
+            # no address) still belong in the match pool — an architecture
+            # port whose function was inlined is NOT missing from the code.
+            self.inlined_names = set(
+                db.get_inlined_only_function_names(elf_hash))
+            self.all_function_names = (
+                self.all_function_names + sorted(self.inlined_names))
         else:
             # Legacy in-memory path
             self.all_function_names = [f.name for f in parser.functions]
             self.all_variable_names = list(parser.global_vars_dwarf.keys())
+            self.inlined_names = set()
 
         self.search_pool: List[str] = self.all_function_names + self.all_variable_names
 

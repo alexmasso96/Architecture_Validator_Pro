@@ -34,6 +34,7 @@ def register_handlers(jobs: JobManager, state: AppState) -> None:
     jobs.register("parse_elf", _make_parse_elf(state))
     jobs.register("import_symbols", _make_import_symbols(state))
     jobs.register("import_source", _make_import_source(state))
+    jobs.register("import_objects", _make_import_objects(state))
 
 
 # ----------------------------------------------------------------------
@@ -368,6 +369,102 @@ def _make_import_source(state: AppState):
         state.bus.publish("db-changed",
                           {"reason": "source-imported", "release_id": release_id})
         return {"files": count, "release_id": release_id}
+    return handler
+
+
+# ----------------------------------------------------------------------
+# import_objects — #6: scan a build-output folder of .o files and store the
+# enrichment dataset (compiler-verified call edges, inlined functions, file
+# attribution) keyed to a release. Requires the native parser: the relocation
+# and inlined-subroutine extraction only exists in rust_elf_parser.
+# ----------------------------------------------------------------------
+def _make_import_objects(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        import fnmatch
+        import hashlib
+        import json as _json
+        from pathlib import Path
+
+        from core import elf_parser as ep
+
+        state.require_edit()
+        release_id = params.get("release_id")
+        obj_dir = params.get("obj_dir")
+        include_glob = params.get("include_glob") or "**/*.o"
+        exclude_globs = [g.strip() for g in
+                         (params.get("exclude_globs") or "").split(",") if g.strip()]
+        if release_id is None or not obj_dir:
+            raise ProjectError("release_id and obj_dir are required.")
+        if not ep.RUST_PARSER_AVAILABLE:
+            raise ProjectError(
+                "Object enrichment needs the native Rust parser "
+                "(rust_elf_parser), which is not available in this build.")
+        import rust_elf_parser
+
+        root = Path(obj_dir)
+        if not root.is_dir():
+            raise ProjectError(f"Not a folder: {obj_dir}")
+
+        progress("Scanning object folder…")
+        paths = sorted(p for p in root.glob(include_glob) if p.is_file())
+        paths = [p for p in paths
+                 if not any(fnmatch.fnmatch(str(p.relative_to(root)), g)
+                            for g in exclude_globs)]
+        if not paths:
+            raise ProjectError(
+                f"No object files matched {include_glob!r} under {obj_dir}.")
+
+        objects, edges, inlined = [], [], []
+        for idx, p in enumerate(paths, 1):
+            if cancel.is_set():
+                raise ProjectError("Import cancelled.")
+            rel = str(p.relative_to(root))
+            progress(f"Parsing {rel} ({idx}/{len(paths)})")
+            # One read per file (EDR-friendly): hash the bytes we read and
+            # hand the parser the same path right after (its mmap is the
+            # second and last file access).
+            try:
+                content = p.read_bytes()
+                content_hash = hashlib.md5(content).hexdigest()
+                del content
+                data = _json.loads(rust_elf_parser.parse_elf(str(p)))
+            except ValueError as e:
+                status = ("lto" if "LTO object" in str(e)
+                          else f"error: {str(e)[:200]}")
+                objects.append((rel, "", "", status))
+                continue
+            except Exception as e:
+                objects.append((rel, "", "", f"error: {str(e)[:200]}"))
+                continue
+
+            cu = data.get("cu_files") or [""]
+            objects.append((rel, cu[0], content_hash, "ok"))
+            for e in data.get("call_edges") or []:
+                edges.append((e["from"], e["to"], rel))
+            for i in data.get("inlined_functions") or []:
+                inlined.append((i["name"], i["caller"], rel))
+
+        # Synthetic dataset hash: order-independent over per-file hashes, so
+        # re-import detection works without re-parsing.
+        lines = sorted(f"{o[0]}:{o[2]}" for o in objects)
+        dataset_hash = hashlib.md5("\n".join(lines).encode()).hexdigest()
+
+        with _worker_db(state) as wdb:
+            progress("Writing object dataset…")
+            wdb.save_release_object_config(
+                release_id, str(root), include_glob,
+                params.get("exclude_globs") or "")
+            wdb.replace_release_objects(
+                release_id, objects, edges, inlined, dataset_hash)
+            wdb.commit()
+
+        state.bus.publish("db-changed",
+                          {"reason": "objects-imported", "release_id": release_id})
+        ok = sum(1 for o in objects if o[3] == "ok")
+        return {"release_id": release_id, "objects": ok,
+                "failed": len(objects) - ok,
+                "edges": len({(e[0], e[1]) for e in edges}),
+                "inlined": len(set(inlined)), "dataset_hash": dataset_hash}
     return handler
 
 

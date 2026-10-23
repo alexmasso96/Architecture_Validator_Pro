@@ -21,10 +21,11 @@ import { AISettings } from "./AISettings";
 import { ColorPicker } from "./ColorPicker";
 import { CustomExplorerArt, SystemExplorerArt } from "./Icons";
 import { NetworkSettings } from "./NetworkSettings";
+import { ImportProfilesSettings } from "./ImportProfilesSettings";
 import { PathsSettings } from "./PathsSettings";
 import { Tutorials } from "./Tutorials";
 
-type Category = "appearance" | "ai" | "network" | "paths" | "tutorials" | "updates";
+type Category = "appearance" | "ai" | "network" | "paths" | "import" | "tutorials" | "updates";
 type PreviewVariant = "light" | "dark" | "system";
 
 const CATEGORIES: { key: Category; label: string; icon: string }[] = [
@@ -32,6 +33,7 @@ const CATEGORIES: { key: Category; label: string; icon: string }[] = [
   { key: "ai", label: "AI Settings", icon: "✦" },
   { key: "network", label: "Network", icon: "🌐" },
   { key: "paths", label: "Paths", icon: "🗂" },
+  { key: "import", label: "Import Profiles", icon: "⇪" },
   { key: "tutorials", label: "Tutorials", icon: "🎓" },
   { key: "updates", label: "Updates", icon: "⤓" },
 ];
@@ -257,6 +259,8 @@ export function Preferences({
           {category === "network" && <NetworkSettings />}
 
           {category === "paths" && <PathsSettings />}
+
+          {category === "import" && <ImportProfilesSettings />}
 
           {category === "tutorials" && <Tutorials />}
 

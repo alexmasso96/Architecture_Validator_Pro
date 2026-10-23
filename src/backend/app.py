@@ -15,8 +15,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import sqlite3
 
 from fastapi import FastAPI
+
+from Application_Logic.Logic_Crypto import PasswordInvalid
 
 from .events import EventBus
 from .handlers import register_handlers
@@ -38,6 +41,7 @@ from .routers import releases as releases_router
 from . import net
 from .routers import net as net_router
 from .routers import symbols as symbols_router
+from .routers import table_import as table_import_router
 from .routers import testdesign as testdesign_router
 from .routers import update as update_router
 
@@ -70,6 +74,41 @@ def create_app(
     app.state.jobs = jobs
     app.state.token = token or os.environ.get("ARCH_API_TOKEN") or generate_token()
 
+    @app.exception_handler(sqlite3.ProgrammingError)
+    async def _closed_db_conflict(request, exc: sqlite3.ProgrammingError):
+        # Request threads use the shared project connection without holding the
+        # AppState lock, so closing/switching the project can race an in-flight
+        # query ("Cannot operate on a closed database/cursor"). That's a stale
+        # request against a project that's gone — a 409 conflict, not a server
+        # bug. Only that case is mapped: every other ProgrammingError (bad SQL,
+        # wrong bind count, …) is a genuine coding bug and must keep surfacing
+        # as a logged 500, not a misleading "connection closed" 409.
+        if "closed" not in str(exc).lower():
+            raise exc
+        from fastapi.responses import JSONResponse
+        logger.warning("Stale request on %s after project close: %s",
+                       request.url.path, exc)
+        return JSONResponse(status_code=409,
+                            content={"detail": f"Project connection closed: {exc}"})
+
+    @app.exception_handler(PasswordInvalid)
+    async def _corrupt_ciphertext(request, exc: PasswordInvalid):
+        # The open/new endpoints catch PasswordInvalid themselves (401/403 —
+        # wrong master password). Reaching THIS handler means a decrypt failed
+        # mid-session, long after the canary verified the password: an
+        # encrypted value on disk is corrupt (bit rot, truncation, or a foreign
+        # tool touched the .arch). Without this mapping it surfaced as an
+        # unexplained 500 on whichever endpoint happened to read the bad row.
+        from fastapi.responses import JSONResponse
+        logger.error("Decrypt failure on %s: %s (corrupt encrypted value in the "
+                     "project file?)", request.url.path, exc)
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "Cannot decrypt a stored value — the project "
+                               "file appears to be corrupted (the password "
+                               "itself was verified at open). Restore from a "
+                               "backup or re-import the affected data."})
+
     app.include_router(project_router.router)
     app.include_router(jobs_router.router)
     app.include_router(architecture_router.router)
@@ -84,6 +123,7 @@ def create_app(
     app.include_router(injection_router.router)
     app.include_router(testdesign_router.router)
     app.include_router(prefs_router.router)
+    app.include_router(table_import_router.router)
     app.include_router(update_router.router)
     app.include_router(net_router.router)
 

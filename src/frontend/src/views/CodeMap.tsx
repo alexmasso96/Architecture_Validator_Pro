@@ -89,10 +89,11 @@ function CallGraph({
     });
 
     const edges = graph.edges
-      .map((e) => ({ a: pos.get(e.source), b: pos.get(e.target) }))
+      .map((e) => ({ a: pos.get(e.source), b: pos.get(e.target), verified: e.verified }))
       .filter((e) => e.a && e.b) as {
       a: { x: number; y: number };
       b: { x: number; y: number };
+      verified?: boolean;
     }[];
 
     return { pos, edges, width, height };
@@ -116,11 +117,31 @@ function CallGraph({
         {edges.map((e, i) => (
           <line
             key={i}
+            // #6C: with a .o dataset present, compiler-confirmed edges render
+            // solid and source-only edges dashed. Without a dataset every
+            // edge stays plain — no false "unverified" signal.
+            className={
+              graph?.edge_verification
+                ? e.verified
+                  ? "cm-edge-verified"
+                  : "cm-edge-unverified"
+                : undefined
+            }
             x1={e.a.x + NODE_W}
             y1={e.a.y + NODE_H / 2}
             x2={e.b.x}
             y2={e.b.y + NODE_H / 2}
-          />
+          >
+            {graph?.edge_verification && (
+              <title>
+                {e.verified
+                  ? "Verified by the object files (compiler-confirmed call)"
+                  : "Seen in source only — not confirmed by the object files " +
+                    "(possibly disabled by #ifdef, or an intra-file call the " +
+                    "relocations cannot see)"}
+              </title>
+            )}
+          </line>
         ))}
       </g>
       <g className="cm-nodes">
@@ -263,6 +284,16 @@ export function CodeMap({
   // Whether a code mind map exists for the active model/release (drives the
   // availability badge so the user can see what AI grounding is ready).
   const [mindmapOn, setMindmapOn] = useState(false);
+  // #6: .o enrichment dataset for the active release — drives the Objects
+  // badge and the verified-edge rendering after a rebuild.
+  const [activeRelId, setActiveRelId] = useState<number | null>(null);
+  const [objSummary, setObjSummary] = useState<{
+    objects: number;
+    edges: number;
+    inlined: number;
+    failed: number;
+  } | null>(null);
+  const [objPickerOpen, setObjPickerOpen] = useState(false);
 
   const theme = useMonacoTheme();
 
@@ -314,6 +345,17 @@ export function CodeMap({
       );
       setRelHasSource(Boolean(rel?.has_source));
       setMindmapOn(Boolean(mm?.has_mindmap));
+      setActiveRelId(rel?.id ?? null);
+      if (rel?.id != null) {
+        const oi = await api
+          .get<{ summary: { objects: number; edges: number; inlined: number; failed: number } }>(
+            `/releases/${rel.id}/objects`,
+          )
+          .catch(() => null);
+        setObjSummary(oi && oi.summary.objects > 0 ? oi.summary : null);
+      } else {
+        setObjSummary(null);
+      }
     } catch {
       /* leave previous value on a transient failure */
     }
@@ -431,6 +473,23 @@ export function CodeMap({
       toast("Building Code Map…");
     } catch (e) {
       toast(`Build failed to start: ${(e as Error).message}`);
+    }
+  }
+
+  async function importObjects(dir: string) {
+    setObjPickerOpen(false);
+    if (activeRelId == null) {
+      toast("No active release to import objects for.");
+      return;
+    }
+    try {
+      await api.post(`/releases/${activeRelId}/objects`, { obj_dir: dir });
+      toast(
+        "Importing object files… rebuild the Code Map afterwards to see " +
+          "verified call edges.",
+      );
+    } catch (e) {
+      toast(`Object import failed to start: ${(e as Error).message}`);
     }
   }
 
@@ -612,6 +671,25 @@ export function CodeMap({
           >
             <span className="cm-stat-dot" /> Mind Map
           </span>
+          <span
+            className={"cm-stat-badge " + (objSummary ? "on" : "off")}
+            role="button"
+            style={{ cursor: "pointer" }}
+            title={
+              objSummary
+                ? `${objSummary.objects} object file(s): ${objSummary.edges} ` +
+                  `compiler-verified edges, ${objSummary.inlined} inlined ` +
+                  `function(s)` +
+                  (objSummary.failed ? `, ${objSummary.failed} failed` : "") +
+                  " — click to re-import from a build-output folder"
+                : "No .o files imported for the active release — click to " +
+                  "import a build-output folder (verifies call edges and " +
+                  "recovers optimized-away functions)"
+            }
+            onClick={() => setObjPickerOpen(true)}
+          >
+            <span className="cm-stat-dot" /> Objects
+          </span>
         </div>
         <div className="cm-search">
           <input
@@ -654,6 +732,22 @@ export function CodeMap({
               <span className="cm-leg callee">
                 <i /> Callees
               </span>
+              {graph?.edge_verification && (
+                <>
+                  <span
+                    className="cm-leg verified"
+                    title="Edge confirmed by the imported object files"
+                  >
+                    <i /> Verified
+                  </span>
+                  <span
+                    className="cm-leg unverified"
+                    title="Edge seen in source only — not confirmed by the object files"
+                  >
+                    <i /> Source-only
+                  </span>
+                </>
+              )}
             </div>
           </div>
           <div className="cm-graph-body">
@@ -694,6 +788,15 @@ export function CodeMap({
           <DetailsCard detail={detail} source={source} onFocus={setFocused} />
         </div>
       </div>
+      {objPickerOpen && (
+        <FolderPicker
+          mode="folder"
+          title="Import object files (.o) — choose the build-output folder"
+          hint="Navigate to the folder containing the compiled .o files"
+          onCancel={() => setObjPickerOpen(false)}
+          onConfirm={(path) => importObjects(path)}
+        />
+      )}
     </div>
   );
 }

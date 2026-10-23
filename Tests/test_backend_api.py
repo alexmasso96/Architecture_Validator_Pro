@@ -177,6 +177,68 @@ def test_release_diff_job_requires_open_project(client):
 
 
 # ---------------------------------------------------------------------------
+# Close-project race: request threads use the shared connection without the
+# AppState lock, so a project close can kill the connection under an in-flight
+# query. The app-level sqlite3.ProgrammingError handler must map that to a 409
+# conflict instead of a 500.
+# ---------------------------------------------------------------------------
+def test_non_closed_programming_error_is_not_masked_as_409(client, tmp_arch):
+    # Only the closed-connection race maps to 409. Any OTHER ProgrammingError
+    # (a genuine coding bug, e.g. a bind-count mismatch) must keep escaping as
+    # a server error — not be reclassified as "Project connection closed".
+    import sqlite3
+    assert client.post("/api/project/new", json={"path": tmp_arch},
+                       headers=AUTH).status_code == 200
+    assert client.post("/api/models", json={"name": "M1"},
+                       headers=AUTH).status_code == 200
+
+    def bad_query(*a, **k):
+        raise sqlite3.ProgrammingError(
+            "Incorrect number of bindings supplied. The current statement "
+            "uses 2, and there are 1 supplied.")
+    client.app.state.appstate.db.get_row_count = bad_query
+    with pytest.raises(sqlite3.ProgrammingError):
+        client.get("/api/models", headers=AUTH)
+
+
+def test_closed_connection_race_maps_to_409(client, tmp_arch):
+    assert client.post("/api/project/new", json={"path": tmp_arch},
+                       headers=AUTH).status_code == 200
+    assert client.post("/api/models", json={"name": "M1"},
+                       headers=AUTH).status_code == 200
+    # Simulate the race: the raw sqlite connection dies while AppState still
+    # reports the project open (state.db._conn is closed, not None).
+    client.app.state.appstate.db._conn.close()
+    r = client.get("/api/models", headers=AUTH)
+    assert r.status_code == 409
+    assert "closed" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Corrupt encrypted value mid-session: the canary verified the password at
+# open, so a decrypt failure later means on-disk corruption. The app-level
+# PasswordInvalid handler must answer 409 with a corruption message, not an
+# unexplained 500 (and not be confused with the open-time 401/403 mapping).
+# ---------------------------------------------------------------------------
+def test_corrupt_ciphertext_maps_to_409(client, tmp_arch):
+    r = client.post("/api/project/new",
+                    json={"path": tmp_arch, "password": "Sup3r-Secret!"},
+                    headers=AUTH)
+    assert r.status_code == 200
+    mid = client.post("/api/models", json={"name": "M1"},
+                      headers=AUTH).json()["id"]
+    # Plant a value that carries the encrypted-text marker but is not a valid
+    # Fernet token — decrypt_text raises PasswordInvalid when a row reads it.
+    db = client.app.state.appstate.db
+    db.execute("INSERT INTO architecture_rows (model_id, row_index, row_data) "
+               "VALUES (?, 0, 'fb1:corrupted-not-a-token')", (mid,))
+    db.commit()
+    r = client.get(f"/api/models/{mid}/ports", headers=AUTH)
+    assert r.status_code == 409
+    assert "corrupt" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
 # No PyQt6 under backend/
 # ---------------------------------------------------------------------------
 def test_backend_imports_without_pyqt6():

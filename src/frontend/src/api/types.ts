@@ -61,6 +61,8 @@ export interface Cell {
   user_changed?: boolean;
   is_purple?: boolean;
   last_func?: string;
+  /** #7: "import" = tool-populated and locked (explicit unlock required). */
+  origin?: string;
   [k: string]: unknown;
 }
 
@@ -87,6 +89,8 @@ export interface ReleaseInfo {
   is_baseline?: boolean;
   elf_hash?: string | null;
   elf_path?: string | null;
+  /** KI-02 provenance: "rust_elf_parser" | "pyelftools" | null (no ELF). */
+  parser_backend?: string | null;
   has_source?: boolean;
   [k: string]: unknown;
 }
@@ -109,6 +113,7 @@ export interface LineageNode {
   timestamp: string;
   row_count: number;
   elf_hash: string | null;
+  parser_backend: string | null;
   has_source: boolean;
   grid_x: number;
   grid_y: number;
@@ -155,6 +160,8 @@ export interface GraphEdge {
   source: string;
   target: string;
   kind: "caller" | "callee";
+  /** #6C: true when the .o dataset confirmed this edge (relocation/inlining). */
+  verified?: boolean;
 }
 
 export interface CodeMapGraph {
@@ -164,6 +171,8 @@ export interface CodeMapGraph {
   total_nodes: number;
   truncated: boolean;
   max_nodes?: number;
+  /** #6C: true when the code map was built against a .o enrichment dataset. */
+  edge_verification?: boolean;
 }
 
 export interface GlobalMatch {

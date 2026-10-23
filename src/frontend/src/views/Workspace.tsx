@@ -15,6 +15,7 @@ import { ModelManager } from "../components/ModelManager";
 import { ReleaseManager } from "../components/ReleaseManager";
 import { getReleaseRecents, touchReleaseRecent } from "../releaseRecents";
 import { ImportWizard } from "../components/ImportWizard";
+import { ProfileImportDialog } from "../components/ProfileImportDialog";
 import { ColumnCustomizer } from "../components/ColumnCustomizer";
 import { PortsTable } from "../components/PortsTable";
 import { MatchPicker } from "../components/MatchPicker";
@@ -47,7 +48,9 @@ export function Workspace({
   onReloadStatus,
   toast,
   importOpen,
+  importProfileOpen,
   onCloseImport,
+  onCloseImportProfile,
   columnsOpen,
   onCloseColumns,
   onShowInCodeMap,
@@ -56,7 +59,9 @@ export function Workspace({
   onReloadStatus: () => void;
   toast: (msg: string) => void;
   importOpen: boolean;
+  importProfileOpen: boolean;
   onCloseImport: () => void;
+  onCloseImportProfile: () => void;
   columnsOpen: boolean;
   onCloseColumns: () => void;
   onShowInCodeMap: (funcName: string) => void;
@@ -292,6 +297,20 @@ export function Workspace({
       ports.reload();
     } catch (e) {
       toast(`Edit failed: ${(e as Error).message}`);
+    }
+  }
+
+  // #7: explicit unlock of an import-locked cell (audited in the change log).
+  async function unlockCell(rowIndex: number, colName: string) {
+    if (activeModelId === null) return;
+    try {
+      await api.post(`/models/${activeModelId}/ports/${rowIndex}/unlock`, {
+        column: colName,
+      });
+      toast(`'${colName}' unlocked — the cell is hand-editable again.`);
+      ports.reload();
+    } catch (e) {
+      toast(`Unlock failed: ${(e as Error).message}`);
     }
   }
 
@@ -590,6 +609,7 @@ export function Workspace({
               onOpenMatch={(rowIndex, col, x, y) =>
                 setMatchTarget({ rowIndex, col, x, y })
               }
+              onUnlockCell={unlockCell}
               canEdit={canEdit}
               modelStatus={activeModel?.status ?? "In Work"}
             />
@@ -660,6 +680,14 @@ export function Workspace({
           columns={columns.data?.columns ?? []}
           onChanged={refreshAll}
           onClose={onCloseImport}
+        />
+      )}
+
+      {importProfileOpen && (
+        <ProfileImportDialog
+          onClose={onCloseImportProfile}
+          onChanged={refreshAll}
+          toast={toast}
         />
       )}
 

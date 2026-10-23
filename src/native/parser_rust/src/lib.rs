@@ -36,34 +36,151 @@ fn load_and_relocate_section(
             _ => 0,
         };
         
-        let value = symbol_value.wrapping_add(reloc.addend() as u64);
-        
-        let size = reloc.size() / 8; // in bytes
+        let size = (reloc.size() / 8) as usize; // in bytes
         let offset = offset as usize;
-        if offset + size as usize <= data.len() {
-            let is_little_endian = elf_file.is_little_endian();
+        // checked_add: a malformed r_offset near usize::MAX must be skipped,
+        // not wrap past the bounds check and panic on the slice (a Rust panic
+        // crosses the FFI boundary as PanicException, which the Python-side
+        // `except Exception` fallback would NOT catch).
+        let end = match offset.checked_add(size) {
+            Some(e) => e,
+            None => continue,
+        };
+        if (size != 4 && size != 8) || end > data.len() {
+            continue;
+        }
+        let is_little_endian = elf_file.is_little_endian();
+
+        // ELF REL relocations (used by ARM, among others) store the addend
+        // *in place* in the section bytes; object's reloc.addend() is 0 for
+        // them. Overwriting with `symbol_value + 0` zeroes every DWARF
+        // string/type offset in an ET_REL object (KI-01). Read the existing
+        // bytes as the addend instead; RELA keeps its explicit addend.
+        let addend: i64 = if reloc.has_implicit_addend() {
             if size == 4 {
-                let bytes = if is_little_endian {
-                    (value as u32).to_le_bytes()
-                } else {
-                    (value as u32).to_be_bytes()
-                };
-                data[offset..offset + 4].copy_from_slice(&bytes);
-            } else if size == 8 {
-                let bytes = if is_little_endian {
-                    value.to_le_bytes()
-                } else {
-                    value.to_be_bytes()
-                };
-                data[offset..offset + 8].copy_from_slice(&bytes);
+                let raw = data[offset..offset + 4].try_into().map(|b| {
+                    if is_little_endian { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) }
+                }).unwrap_or(0);
+                raw as i32 as i64 // sign-extend, as a linker would
+            } else {
+                data[offset..offset + 8].try_into().map(|b| {
+                    if is_little_endian { u64::from_le_bytes(b) } else { u64::from_be_bytes(b) }
+                }).unwrap_or(0) as i64
             }
+        } else {
+            reloc.addend()
+        };
+
+        let mut value = symbol_value.wrapping_add(addend as u64);
+        // PC-relative: value = S + A - P, where P is the place being
+        // relocated (section address is 0 in an ET_REL object, so P is just
+        // the offset). Note: object 0.32 maps e.g. i386 R_386_PC32 and
+        // x86-64 R_X86_64_PC32 to Relative, but NOT ARM's R_ARM_REL32 —
+        // that arrives as RelocationKind::Elf(3) with size 0 and is skipped
+        // by the size guard above (DWARF offset relocations are absolute,
+        // so this does not affect the KI-01 fix).
+        if matches!(reloc.kind(), object::RelocationKind::Relative) {
+            value = value.wrapping_sub(section.address().wrapping_add(offset as u64));
+        }
+
+        if size == 4 {
+            let bytes = if is_little_endian {
+                (value as u32).to_le_bytes()
+            } else {
+                (value as u32).to_be_bytes()
+            };
+            data[offset..offset + 4].copy_from_slice(&bytes);
+        } else {
+            let bytes = if is_little_endian {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            };
+            data[offset..offset + 8].copy_from_slice(&bytes);
         }
     }
-    
+
     data
 }
 
 type Reader<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
+
+/// Compiler-verified reference edges from `.text*` relocations (ET_REL only —
+/// linked images carry no text relocations, yielding an empty list).
+///
+/// Every relocation in a text section is a reference from the function whose
+/// [address, address+size) range covers the relocation offset to the named
+/// target symbol. Defined data symbols are skipped (literal-pool loads of
+/// globals); undefined targets are kept even though their type is unknowable
+/// (cross-TU callees are usually STT_NOTYPE) — downstream consumers match
+/// edges against known function names, so extern-data noise is inert. This
+/// deliberately avoids per-architecture relocation-type tables so it works
+/// unchanged for ARM, TriCore, and RH850 objects.
+fn extract_call_edges(elf_file: &object::File<'_>) -> Vec<CallEdge> {
+    use object::RelocationTarget;
+
+    // Function ranges per section: (start, size, name), sorted by start.
+    let mut by_section: HashMap<object::SectionIndex, Vec<(u64, u64, String)>> = HashMap::new();
+    for sym in elf_file.symbols() {
+        if sym.kind() != SymbolKind::Text {
+            continue;
+        }
+        if let object::SymbolSection::Section(idx) = sym.section() {
+            if let Ok(name) = sym.name() {
+                if !name.is_empty() {
+                    by_section.entry(idx).or_default().push(
+                        (sym.address(), sym.size(), name.to_string()));
+                }
+            }
+        }
+    }
+    for v in by_section.values_mut() {
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    let mut edges: HashSet<CallEdge> = HashSet::new();
+    for section in elf_file.sections() {
+        let sec_name = section.name().unwrap_or("");
+        if sec_name != ".text" && !sec_name.starts_with(".text.") {
+            continue;
+        }
+        let funcs = match by_section.get(&section.index()) {
+            Some(f) if !f.is_empty() => f,
+            _ => continue,
+        };
+        for (offset, reloc) in section.relocations() {
+            let target = match reloc.target() {
+                RelocationTarget::Symbol(idx) => match elf_file.symbol_by_index(idx) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                },
+                _ => continue, // section-relative targets: not name-resolvable here
+            };
+            if target.kind() == SymbolKind::Data {
+                continue; // defined data symbol: a literal-pool load, not a call
+            }
+            let callee = match target.name() {
+                Ok(n) if !n.is_empty() => n.to_string(),
+                _ => continue,
+            };
+            // Caller = last function starting at or before the offset whose
+            // range covers it (zero-size symbols cover to the next start).
+            let i = funcs.partition_point(|(a, _, _)| *a <= offset);
+            if i == 0 {
+                continue;
+            }
+            let (start, size, caller) = &funcs[i - 1];
+            if *size > 0 && offset >= start + size {
+                continue;
+            }
+            edges.insert(CallEdge { from: caller.clone(), to: callee });
+        }
+    }
+
+    let mut out: Vec<CallEdge> = edges.into_iter().collect();
+    out.sort(); // deterministic JSON output
+    out
+}
 
 #[derive(Serialize)]
 struct Symbol {
@@ -91,6 +208,20 @@ struct Field {
     field_type: String,
 }
 
+#[derive(Serialize, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct CallEdge {
+    from: String,
+    to: String,
+}
+
+#[derive(Serialize, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct InlinedCall {
+    /// The function whose body was inlined (the callee).
+    name: String,
+    /// The subprogram it was inlined into (the caller).
+    caller: String,
+}
+
 struct TypeInfo {
     tag: gimli::DwTag,
     name: String,
@@ -108,6 +239,7 @@ struct CUResult {
     struct_by_offset: HashMap<usize, Vec<Field>>,
     global_vars: HashMap<String, String>,
     typedefs: Vec<Typedef>,
+    inlined: HashSet<InlinedCall>,
 }
 
 
@@ -133,6 +265,24 @@ fn get_absolute_type_offset(
         match attr_val {
             gimli::AttributeValue::UnitRef(offset) => {
                 return Some(offset.to_debug_info_offset(&unit.header).unwrap().0);
+            }
+            gimli::AttributeValue::DebugInfoRef(offset) => {
+                return Some(offset.0);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn get_abstract_origin_offset(
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>
+) -> Option<usize> {
+    if let Some(attr_val) = entry.attr_value(gimli::DW_AT_abstract_origin).unwrap_or(None) {
+        match attr_val {
+            gimli::AttributeValue::UnitRef(offset) => {
+                return offset.to_debug_info_offset(&unit.header).map(|o| o.0);
             }
             gimli::AttributeValue::DebugInfoRef(offset) => {
                 return Some(offset.0);
@@ -260,12 +410,31 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
         .map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(format!("Failed to open ELF file: {}", e)))?;
     let mmap = unsafe { Mmap::map(&file) }
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Failed to memory map ELF file: {}", e)))?;
+
+    // LTO objects are compiler IR, not machine code — refuse with a clear
+    // reason instead of importing nonsense (or a confusing parse error).
+    if mmap.len() >= 4 && &mmap[0..4] == b"BC\xC0\xDE" {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "LTO object: this file is LLVM bitcode (compiler intermediate), not \
+             machine code. Rebuild without -flto to import it."));
+    }
     let elf_file = object::File::parse(&*mmap)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Failed to parse ELF headers: {}", e)))?;
+    for section in elf_file.sections() {
+        if section.name().unwrap_or("").starts_with(".gnu.lto_") {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "LTO object: this file carries GCC .gnu.lto_* sections (compiler \
+                 intermediate), not usable machine code. Rebuild without -flto to \
+                 import it."));
+        }
+    }
 
     // Compute hexadecimal MD5 hash of the memory-mapped file natively in Rust
     let digest = md5::compute(&mmap);
     let elf_hash = format!("{:x}", digest);
+
+    // Compiler-verified reference edges from .text relocations (ET_REL only).
+    let call_edges = extract_call_edges(&elf_file);
 
     // 1. Extract symbols
     let mut symbols = Vec::new();
@@ -370,6 +539,10 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
                 "functions": functions,
                 "structures": HashMap::<String, Vec<Field>>::new(),
                 "global_vars": HashMap::<String, String>::new(),
+                "producer": "",
+                "call_edges": call_edges,
+                "inlined_functions": Vec::<InlinedCall>::new(),
+                "cu_files": Vec::<String>::new(),
             });
             let json_str = serde_json::to_string(&output)
                 .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
@@ -379,6 +552,16 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
 
     let mut type_map = HashMap::new();
     let mut cu_headers = Vec::new();
+    // DW_AT_producer of the first CU: consumers use it to detect the KI-01
+    // corruption signature (zeroed strp offsets make every DWARF name read
+    // .debug_str offset 0, which is typically this very string).
+    let mut producer = String::new();
+    // DW_AT_name of each CU (the translation unit's source file) — file
+    // attribution for `.o` enrichment imports.
+    let mut cu_files: Vec<String> = Vec::new();
+    // Subprogram names by absolute .debug_info offset, so pass 2 can resolve
+    // DW_AT_abstract_origin references from inlined-subroutine DIEs.
+    let mut subprogram_names: HashMap<usize, String> = HashMap::new();
 
     // Pass 1: Build type cache and collect CU headers sequentially
     let mut units = dwarf.units();
@@ -426,6 +609,27 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
             let mut entries = unit.entries();
             while let Ok(Some((_, entry))) = entries.next_dfs() {
                 match entry.tag() {
+                    gimli::DW_TAG_compile_unit => {
+                        // Read after the unit bases are set so strx forms
+                        // resolve; keep the first CU's producer only.
+                        if producer.is_empty() {
+                            if let Some(attr) = entry.attr_value(gimli::DW_AT_producer).unwrap_or(None) {
+                                if let Ok(s) = dwarf.attr_string(&unit, attr) {
+                                    producer = s.to_string_lossy().into_owned();
+                                }
+                            }
+                        }
+                        if let Some(name) = get_die_name(&dwarf, &unit, entry) {
+                            cu_files.push(name);
+                        }
+                    }
+                    gimli::DW_TAG_subprogram => {
+                        if let Some(name) = get_die_name(&dwarf, &unit, entry) {
+                            if let Some(abs) = entry.offset().to_debug_info_offset(&unit.header) {
+                                subprogram_names.insert(abs.0, name);
+                            }
+                        }
+                    }
                     gimli::DW_TAG_base_type |
                     gimli::DW_TAG_typedef |
                     gimli::DW_TAG_structure_type |
@@ -461,6 +665,7 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
                 struct_by_offset: HashMap::new(),
                 global_vars: HashMap::new(),
                 typedefs: Vec::new(),
+                inlined: HashSet::new(),
             }
         };
         let mut str_offsets_base = None;
@@ -508,6 +713,7 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
             struct_by_offset: HashMap::new(),
             global_vars: HashMap::new(),
             typedefs: Vec::new(),
+            inlined: HashSet::new(),
         };
 
         let mut depth = 0;
@@ -557,6 +763,19 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
                         param_map.insert("name".to_string(), p_name);
                         param_map.insert("type".to_string(), p_type);
                         current_func_params.push(param_map);
+                    }
+                } else if entry.tag() == gimli::DW_TAG_inlined_subroutine {
+                    // A function body pasted into this one by the optimizer:
+                    // the callee has no call instruction (invisible to
+                    // disassembly) and possibly no symbol at all. Resolve the
+                    // abstract origin to its subprogram name (pass-1 map).
+                    let origin = get_abstract_origin_offset(&unit, entry)
+                        .and_then(|o| subprogram_names.get(&o));
+                    if let (Some(callee), Some(caller)) = (origin, current_func_name.as_ref()) {
+                        res.inlined.insert(InlinedCall {
+                            name: callee.clone(),
+                            caller: caller.clone(),
+                        });
                     }
                 }
             } else if current_struct_offset.is_some() {
@@ -640,6 +859,7 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
     let mut global_vars = HashMap::new();
     let mut typedefs = Vec::new();
     let mut func_params_map = HashMap::new();
+    let mut inlined_set: HashSet<InlinedCall> = HashSet::new();
 
     for r in cu_results {
         structures.extend(r.structures);
@@ -647,7 +867,10 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
         global_vars.extend(r.global_vars);
         typedefs.extend(r.typedefs);
         func_params_map.extend(r.func_params);
+        inlined_set.extend(r.inlined);
     }
+    let mut inlined_functions: Vec<InlinedCall> = inlined_set.into_iter().collect();
+    inlined_functions.sort();
 
     // Populate function parameters in the sequential output list
     for func in &mut functions {
@@ -697,6 +920,10 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
         "functions": functions,
         "structures": structures,
         "global_vars": global_vars,
+        "producer": producer,
+        "call_edges": call_edges,
+        "inlined_functions": inlined_functions,
+        "cu_files": cu_files,
     });
 
     let json_str = serde_json::to_string(&output)

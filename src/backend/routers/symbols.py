@@ -44,9 +44,14 @@ def symbols(q: str = Query(..., min_length=1),
     else:
         pairs = matcher.find_top_matches(q, limit=limit)
 
+    # #6D: mark candidates that exist only as inline expansions — they are
+    # matchable by name but carry no address (the UI shows "inlined" and
+    # disables address-dependent affordances for them).
+    inlined = getattr(matcher, "inlined_names", set())
     return {
         "query": q,
         "kind": kind,
         "elf_hash": ehash,
-        "candidates": [{"name": n, "score": s} for n, s in pairs],
+        "candidates": [{"name": n, "score": s, "inlined": n in inlined}
+                       for n, s in pairs],
     }

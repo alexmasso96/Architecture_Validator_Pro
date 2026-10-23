@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import base64
 import datetime
+import threading
 import time
 import logging
 from contextlib import contextmanager
@@ -50,6 +51,73 @@ def _timed(label: str, **extra):
     _perf_logger.info("[PERF] %-45s %6.1f ms  %s", label, ms, detail)
 
 DB_SCHEMA_VERSION = 4
+
+
+class _TxnSerializedConnection:
+    """Thin sqlite3.Connection proxy that serializes `with conn:` transaction
+    blocks across threads.
+
+    The main project connection is shared by every FastAPI threadpool thread
+    (check_same_thread=False). `cached_statements=0` already prevents the
+    SQLITE_MISUSE crash from shared prepared statements, but two threads
+    entering `with self._conn:` simultaneously still interleave: thread A's
+    commit-on-exit also commits thread B's half-finished writes (and a rollback
+    does the reverse). Holding an RLock for the duration of the `with` block
+    makes each transaction atomic again. RLock (not Lock) so the pre-existing
+    same-thread nesting semantics of sqlite3's context manager are unchanged.
+
+    Plain `execute()` reads outside a `with` block deliberately do NOT take the
+    lock — SQLite's serialized mode already makes individual statements safe,
+    and blocking every read behind a writer would serialize the whole API.
+
+    Bare `commit()`/`rollback()`/`close()` DO take the lock: they mutate
+    transaction state, so letting one run unlocked while another thread sits
+    inside a `with` block would commit (or discard, or kill) that thread's
+    half-finished transaction — the very interleaving this proxy exists to
+    prevent. RLock keeps same-thread calls inside a `with` block re-entrant.
+    Everything else (execute/executemany/cursor/…) delegates untouched.
+
+    Invariant this relies on (verified 2026-08-16): every runtime DML write
+    goes through a `with conn:` block — the only bare DML executes are in
+    `_create_schema` and the Logic_Block_Crypto migrations, both single-
+    threaded at open time. A future bare `execute("INSERT/UPDATE/…")` on the
+    shared connection would open an implicit transaction OUTSIDE the lock,
+    which this proxy cannot protect; put new writes in a `with` block.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._raw = conn
+        self._txn_lock = threading.RLock()
+
+    def __enter__(self):
+        self._txn_lock.acquire()
+        try:
+            self._raw.__enter__()
+        except BaseException:
+            self._txn_lock.release()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return self._raw.__exit__(exc_type, exc, tb)
+        finally:
+            self._txn_lock.release()
+
+    def commit(self):
+        with self._txn_lock:
+            return self._raw.commit()
+
+    def rollback(self):
+        with self._txn_lock:
+            return self._raw.rollback()
+
+    def close(self):
+        with self._txn_lock:
+            return self._raw.close()
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
 
 # Category-E project_meta keys (free-text settings, never queried by value) that
 # are encrypted at rest when a block cipher is attached. Structural / pre-cipher
@@ -224,8 +292,12 @@ class ProjectDatabase:
         parent = os.path.dirname(os.path.abspath(db_path))
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False, cached_statements=0)
-        self._conn.row_factory = sqlite3.Row
+        conn = sqlite3.connect(db_path, check_same_thread=False, cached_statements=0)
+        conn.row_factory = sqlite3.Row
+        # Wrap AFTER configuring the raw connection: the proxy delegates reads
+        # via __getattr__, but attribute WRITES on the proxy would not reach the
+        # underlying connection.
+        self._conn = _TxnSerializedConnection(conn)
         if apply_journal:
             self.journal_mode = self._apply_journal_mode(db_path)
             logger.info(f"Journal mode: {self.journal_mode}")
@@ -445,11 +517,62 @@ class ProjectDatabase:
                 CREATE INDEX IF NOT EXISTS idx_release_source_files
                     ON release_source_files(release_id);
 
+                -- #6: .o enrichment layer, keyed by release (mirrors the #2E
+                -- source pattern). Names are queried by value, so these
+                -- columns stay plaintext like elf_symbols.name.
+                CREATE TABLE IF NOT EXISTS release_object_config (
+                    release_id    INTEGER PRIMARY KEY REFERENCES releases(id) ON DELETE CASCADE,
+                    obj_dir       TEXT    NOT NULL DEFAULT '',
+                    include_glob  TEXT    NOT NULL DEFAULT '**/*.o',
+                    exclude_globs TEXT    NOT NULL DEFAULT '',
+                    dataset_hash  TEXT    NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS release_objects (
+                    release_id   INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+                    rel_path     TEXT    NOT NULL,
+                    cu_file      TEXT    NOT NULL DEFAULT '',
+                    content_hash TEXT    NOT NULL DEFAULT '',
+                    status       TEXT    NOT NULL DEFAULT 'ok',
+                    PRIMARY KEY (release_id, rel_path)
+                );
+                CREATE TABLE IF NOT EXISTS release_object_edges (
+                    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+                    caller     TEXT    NOT NULL,
+                    callee     TEXT    NOT NULL,
+                    rel_path   TEXT    NOT NULL DEFAULT '',
+                    PRIMARY KEY (release_id, caller, callee, rel_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_release_object_edges
+                    ON release_object_edges(release_id);
+                CREATE TABLE IF NOT EXISTS release_inlined_functions (
+                    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+                    name       TEXT    NOT NULL,
+                    caller     TEXT    NOT NULL,
+                    rel_path   TEXT    NOT NULL DEFAULT '',
+                    PRIMARY KEY (release_id, name, caller, rel_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_release_inlined_functions
+                    ON release_inlined_functions(release_id);
+
                 CREATE TABLE IF NOT EXISTS elf_index (
                     elf_hash         TEXT PRIMARY KEY,
                     elf_path         TEXT NOT NULL DEFAULT '',
                     import_timestamp TEXT NOT NULL DEFAULT ''
                 );
+
+                -- #6D: DWARF inlined-subroutine records from the import —
+                -- functions whose bodies were pasted into callers by the
+                -- optimizer (often no symtab entry at all). Lets the match
+                -- picker offer "exists, inlined — no address" instead of the
+                -- function silently vanishing.
+                CREATE TABLE IF NOT EXISTS elf_inlined_functions (
+                    elf_hash TEXT NOT NULL,
+                    name     TEXT NOT NULL,
+                    caller   TEXT NOT NULL,
+                    PRIMARY KEY (elf_hash, name, caller)
+                );
+                CREATE INDEX IF NOT EXISTS idx_elf_inlined_functions
+                    ON elf_inlined_functions(elf_hash);
 
                 CREATE TABLE IF NOT EXISTS elf_symbols (
                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1272,6 +1395,120 @@ class ProjectDatabase:
                 "DELETE FROM release_source_files WHERE release_id=?", (release_id,))
 
     # ------------------------------------------------------------------
+    # #6: .o enrichment layer (release-scoped, mirrors the #2E source pattern)
+    # ------------------------------------------------------------------
+
+    def save_release_object_config(self, release_id: int, obj_dir: str,
+                                   include_glob: str = "**/*.o",
+                                   exclude_globs: str = "") -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO release_object_config "
+                "(release_id, obj_dir, include_glob, exclude_globs, dataset_hash) "
+                "VALUES (?,?,?,?, COALESCE((SELECT dataset_hash FROM "
+                "release_object_config WHERE release_id=?), ''))",
+                (release_id, obj_dir, include_glob or "**/*.o",
+                 exclude_globs or "", release_id))
+
+    def get_release_object_config(self, release_id: int) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT obj_dir, include_glob, exclude_globs, dataset_hash "
+            "FROM release_object_config WHERE release_id=?", (release_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return {"obj_dir": row[0], "include_glob": row[1],
+                "exclude_globs": row[2], "dataset_hash": row[3]}
+
+    def replace_release_objects(self, release_id: int, objects, edges,
+                                inlined, dataset_hash: str) -> None:
+        """Atomically replace a release's whole object dataset.
+
+        objects: iterable of (rel_path, cu_file, content_hash, status)
+        edges:   iterable of (caller, callee, rel_path)
+        inlined: iterable of (name, caller, rel_path)
+        """
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM release_objects WHERE release_id=?", (release_id,))
+            self._conn.execute(
+                "DELETE FROM release_object_edges WHERE release_id=?", (release_id,))
+            self._conn.execute(
+                "DELETE FROM release_inlined_functions WHERE release_id=?",
+                (release_id,))
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO release_objects "
+                "(release_id, rel_path, cu_file, content_hash, status) "
+                "VALUES (?,?,?,?,?)",
+                [(release_id, *o) for o in objects])
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO release_object_edges "
+                "(release_id, caller, callee, rel_path) VALUES (?,?,?,?)",
+                [(release_id, *e) for e in edges])
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO release_inlined_functions "
+                "(release_id, name, caller, rel_path) VALUES (?,?,?,?)",
+                [(release_id, *i) for i in inlined])
+            self._conn.execute(
+                "UPDATE release_object_config SET dataset_hash=? WHERE release_id=?",
+                (dataset_hash, release_id))
+
+    def get_release_object_edges(self, release_id: int) -> set:
+        """Unique (caller, callee) pairs across all of the release's objects."""
+        cur = self._conn.execute(
+            "SELECT DISTINCT caller, callee FROM release_object_edges "
+            "WHERE release_id=?", (release_id,))
+        return {(r[0], r[1]) for r in cur.fetchall()}
+
+    def get_release_inlined_functions(self, release_id: int) -> list:
+        cur = self._conn.execute(
+            "SELECT name, caller, rel_path FROM release_inlined_functions "
+            "WHERE release_id=? ORDER BY name, caller", (release_id,))
+        return [{"name": r[0], "caller": r[1], "rel_path": r[2]}
+                for r in cur.fetchall()]
+
+    def has_release_objects(self, release_id: int) -> bool:
+        cur = self._conn.execute(
+            "SELECT 1 FROM release_objects WHERE release_id=? LIMIT 1",
+            (release_id,))
+        return cur.fetchone() is not None
+
+    def get_release_object_summary(self, release_id: int) -> dict:
+        n_obj, n_err = self._conn.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN status != 'ok' THEN 1 ELSE 0 END) "
+            "FROM release_objects WHERE release_id=?", (release_id,)).fetchone()
+        n_edges = self._conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT caller, callee "
+            "FROM release_object_edges WHERE release_id=?)",
+            (release_id,)).fetchone()[0]
+        n_inl = self._conn.execute(
+            "SELECT COUNT(*) FROM release_inlined_functions WHERE release_id=?",
+            (release_id,)).fetchone()[0]
+        errors = [
+            {"rel_path": r[0], "status": r[1]}
+            for r in self._conn.execute(
+                "SELECT rel_path, status FROM release_objects "
+                "WHERE release_id=? AND status != 'ok' ORDER BY rel_path",
+                (release_id,)).fetchall()]
+        return {"objects": int(n_obj or 0), "failed": int(n_err or 0),
+                "edges": int(n_edges or 0), "inlined": int(n_inl or 0),
+                "errors": errors}
+
+    def delete_release_objects(self, release_id: int) -> None:
+        """Drop a release's object dataset (config row stays for re-import)."""
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM release_objects WHERE release_id=?", (release_id,))
+            self._conn.execute(
+                "DELETE FROM release_object_edges WHERE release_id=?", (release_id,))
+            self._conn.execute(
+                "DELETE FROM release_inlined_functions WHERE release_id=?",
+                (release_id,))
+            self._conn.execute(
+                "UPDATE release_object_config SET dataset_hash='' WHERE release_id=?",
+                (release_id,))
+
+    # ------------------------------------------------------------------
     # Source-Level Test Code Injection — test projects, helper files, hooks
     # ------------------------------------------------------------------
 
@@ -1603,6 +1840,7 @@ class ProjectDatabase:
             self._conn.execute("DELETE FROM elf_functions WHERE elf_hash=?", (elf_hash,))
             self._conn.execute("DELETE FROM elf_structures WHERE elf_hash=?", (elf_hash,))
             self._conn.execute("DELETE FROM elf_global_vars WHERE elf_hash=?", (elf_hash,))
+            self._conn.execute("DELETE FROM elf_inlined_functions WHERE elf_hash=?", (elf_hash,))
 
     def register_elf(self, elf_hash: str, elf_path: str, parser_backend: Optional[str] = None):
         ts = datetime.datetime.now().isoformat()
@@ -1612,6 +1850,19 @@ class ProjectDatabase:
                 " VALUES (?,?,?,?)",
                 (elf_hash, elf_path or "", ts, parser_backend)
             )
+
+    def get_parser_backend(self, elf_hash: str) -> Optional[str]:
+        """Which ELF backend produced this import (KI-02 provenance).
+
+        Lightweight companion to get_elf_stats: one indexed lookup, no COUNTs,
+        suitable for per-release list payloads. plain (unencrypted) meta column.
+        """
+        if not elf_hash:
+            return None
+        row = self._conn.execute(
+            "SELECT parser_backend FROM elf_index WHERE elf_hash=?", (elf_hash,)
+        ).fetchone()
+        return row[0] if row and row[0] else None
 
     def bulk_insert_symbols(self, elf_hash: str, symbols):
         BATCH = 2000
@@ -1738,6 +1989,38 @@ class ProjectDatabase:
         )
         return [r[0] for r in cur.fetchall()]
 
+    def bulk_insert_inlined_functions(self, elf_hash: str, inlined) -> None:
+        """#6D: store DWARF inlined-subroutine records ({name, caller} dicts)."""
+        rows = [(elf_hash,
+                 i.get("name", "") if isinstance(i, dict) else i[0],
+                 i.get("caller", "") if isinstance(i, dict) else i[1])
+                for i in inlined]
+        rows = [r for r in rows if r[1]]
+        if not rows:
+            return
+        with self._conn:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO elf_inlined_functions"
+                " (elf_hash, name, caller) VALUES (?,?,?)", rows)
+
+    def get_inlined_only_function_names(self, elf_hash: str) -> list:
+        """Functions that exist only as inline expansions — no standalone
+        elf_functions row (the optimizer removed their symbol). These are the
+        entries the match picker must offer as 'inlined — no address'."""
+        cur = self._conn.execute(
+            "SELECT DISTINCT i.name FROM elf_inlined_functions i "
+            "WHERE i.elf_hash=? AND NOT EXISTS "
+            " (SELECT 1 FROM elf_functions f "
+            "  WHERE f.elf_hash=i.elf_hash AND f.name=i.name) "
+            "ORDER BY i.name", (elf_hash,))
+        return [r[0] for r in cur.fetchall()]
+
+    def get_inlined_function_callers(self, elf_hash: str, name: str) -> list:
+        cur = self._conn.execute(
+            "SELECT caller FROM elf_inlined_functions "
+            "WHERE elf_hash=? AND name=? ORDER BY caller", (elf_hash, name))
+        return [r[0] for r in cur.fetchall()]
+
     def get_symbol_by_address(self, elf_hash: str, address: int):
         cur = self._conn.execute(
             "SELECT name, address, size, sym_type, binding, section"
@@ -1817,7 +2100,8 @@ class ProjectDatabase:
     def delete_elf(self, elf_hash: str):
         with self._conn:
             for table in ("elf_symbols", "elf_functions", "elf_structures",
-                          "elf_global_vars", "elf_index"):
+                          "elf_global_vars", "elf_inlined_functions",
+                          "elf_index"):
                 self._conn.execute(
                     f"DELETE FROM {table} WHERE elf_hash=?", (elf_hash,)
                 )

@@ -63,6 +63,8 @@ def _release_view(rm, db, r, active_id) -> dict:
         "timestamp": r.timestamp,
         "elf_hash": r.elf_hash,
         "elf_path": r.elf_path,
+        # KI-02 provenance: which backend produced this release's ELF data.
+        "parser_backend": db.get_parser_backend(r.elf_hash) if r.elf_hash else None,
         "has_source": has_source,
         "is_active": r.id == active_id,
         # 'selectable' = a real release offered in pickers (#2E).
@@ -164,6 +166,7 @@ def release_lineage(state: AppState = Depends(get_state)) -> dict:
                 "timestamp": r.timestamp,
                 "row_count": row_count,
                 "elf_hash": r.elf_hash,
+                "parser_backend": db.get_parser_backend(r.elf_hash) if r.elf_hash else None,
                 "has_source": db.has_release_source(r.id) if r.id is not None else False,
                 "grid_x": gx,
                 "grid_y": gy,
@@ -444,6 +447,58 @@ def set_compare_release(body: CompareReleaseBody,
                         None if body.previous_release_id is None
                         else str(body.previous_release_id))
         return {"previous_release_id": body.previous_release_id}
+    return _guard(go)
+
+
+# ---------------------------------------------------------------------------
+# #6: .o enrichment layer — per-release object-folder config + import/summary.
+# ---------------------------------------------------------------------------
+class ImportObjectsBody(BaseModel):
+    obj_dir: str
+    include_glob: str = "**/*.o"
+    exclude_globs: str = ""
+
+
+@router.post("/{release_id}/objects")
+def import_release_objects(release_id: int, body: ImportObjectsBody,
+                           state: AppState = Depends(get_state),
+                           jobs: JobManager = Depends(get_jobs)) -> dict:
+    """Scan a build-output folder of .o files and store the enrichment dataset
+    (compiler-verified call edges, inlined functions, file attribution) for
+    this release. Runs as the ``import_objects`` background job."""
+    def go():
+        state.require_edit()
+        if not body.obj_dir:
+            raise ProjectError("obj_dir is required.")
+        job = jobs.start("import_objects",
+                         {"release_id": release_id, "obj_dir": body.obj_dir,
+                          "include_glob": body.include_glob,
+                          "exclude_globs": body.exclude_globs})
+        return job.public()
+    return _guard(go)
+
+
+@router.get("/{release_id}/objects")
+def release_objects_summary(release_id: int,
+                            state: AppState = Depends(get_state)) -> dict:
+    def go():
+        db = state.require_open()
+        return {"release_id": release_id,
+                "config": db.get_release_object_config(release_id),
+                "summary": db.get_release_object_summary(release_id)}
+    return _guard(go)
+
+
+@router.delete("/{release_id}/objects")
+def drop_release_objects(release_id: int, state: AppState = Depends(get_state),
+                         bus: EventBus = Depends(get_bus)) -> dict:
+    def go():
+        db = state.require_edit()
+        db.delete_release_objects(release_id)
+        db.commit()
+        bus.publish("db-changed",
+                    {"reason": "objects-dropped", "release_id": release_id})
+        return {"release_id": release_id, "result": "objects dropped"}
     return _guard(go)
 
 

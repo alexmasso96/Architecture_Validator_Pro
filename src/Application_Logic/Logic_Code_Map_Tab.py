@@ -96,10 +96,21 @@ def build_code_map_job(db_path, elf_hash, elf_path, source_dir, model_id,
                         "graph will have no edges. Map/Import source for this "
                         "release (or link a local folder) to build it from source.")
 
+        # #6C: the release's compiler-verified edges from the .o enrichment
+        # dataset (text relocations + inlined-subroutine records — an inline
+        # expansion is a compiler-confirmed caller→callee relationship too).
+        object_edges = None
+        if release_id is not None and wdb.has_release_objects(release_id):
+            progress_cb("Loading compiler-verified call edges from the object dataset…")
+            object_edges = wdb.get_release_object_edges(release_id)
+            for inl in wdb.get_release_inlined_functions(release_id):
+                object_edges.add((inl["caller"], inl["name"]))
+
         progress_cb("Building code map (call graph & symbol join)…")
         # Pass the probe result so build_code_map doesn't re-disassemble to decide.
         code_map = build_code_map(wparser, code_index, source_root=source_dir or "",
-                                  prefer_source_calls=not has_call_tree)
+                                  prefer_source_calls=not has_call_tree,
+                                  object_edges=object_edges)
 
         # Commit on the worker's own connection → durable immediately, no project
         # Save required, nothing lost if the user doesn't hit Save afterwards.

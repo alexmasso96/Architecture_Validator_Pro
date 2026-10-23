@@ -31,8 +31,13 @@ except ImportError as e:
 try:
     import rust_elf_parser
     RUST_PARSER_AVAILABLE = True
-except ImportError:
+    _RUST_IMPORT_ERROR = None
+except ImportError as e:
+    # Keep the reason: on Windows a bundled-but-unloadable .pyd raises
+    # ImportError("DLL load failed…") — indistinguishable from "not bundled"
+    # unless we surface the message (logged below, after logging is configured).
     RUST_PARSER_AVAILABLE = False
+    _RUST_IMPORT_ERROR = str(e)
 
 
 try:
@@ -53,6 +58,37 @@ except ImportError:
 #configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# The native Rust parser is the intended backend for ALL ELF imports; pyelftools
+# is a much slower fallback that should never run in a correctly-built frozen
+# app. A silent fallback already shipped once (work-machine log 2026-07-07:
+# "Using the Python (pyelftools) parser"), so make the degradation loud enough
+# to show up in crash.log / the worker console with the actual reason.
+if not RUST_PARSER_AVAILABLE:
+    logger.warning(
+        "Native Rust ELF parser (rust_elf_parser) failed to import: %s — "
+        "falling back to the much slower pyelftools backend for all ELF "
+        "imports. In a frozen build this means the module was not bundled "
+        "or its DLL failed to load (EDR/VC-runtime).", _RUST_IMPORT_ERROR)
+
+
+def _forced_parser_backend() -> Optional[str]:
+    """KI-02 (#5): ARCH_PARSER_BACKEND=python|rust forces an ELF backend.
+
+    Debug aid: lets a user force the safe pyelftools backend (or insist on
+    the native one) without rebuilding. Read per-call, not at import time,
+    so it can be flipped between imports. Unknown values are ignored loudly.
+    """
+    val = os.environ.get("ARCH_PARSER_BACKEND", "").strip().lower()
+    if not val:
+        return None
+    if val in ("python", "pyelftools"):
+        return "pyelftools"
+    if val in ("rust", "native", "rust_elf_parser"):
+        return "rust_elf_parser"
+    logger.warning(
+        "Ignoring unknown ARCH_PARSER_BACKEND=%r (use 'python' or 'rust').", val)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -181,9 +217,19 @@ class ELFParser:
         if not self.elf_path.exists():
             raise FileNotFoundError(f"ELF file not found: {elf_path}")
 
-        # Try native hashing first if available
+        # Backend choice: native by default, overridable via ARCH_PARSER_BACKEND.
+        forced = _forced_parser_backend()
+        if forced == "pyelftools":
+            logger.info("ARCH_PARSER_BACKEND override: forcing the pyelftools backend.")
+        elif forced == "rust_elf_parser" and not RUST_PARSER_AVAILABLE:
+            logger.warning(
+                "ARCH_PARSER_BACKEND requested the native backend, but "
+                "rust_elf_parser is not importable — using pyelftools.")
+
+        # Try native hashing first if available (skipped entirely when the
+        # override forces python, so a debug run never touches the native module).
         self.parser_backend = "pyelftools"  # default
-        if RUST_PARSER_AVAILABLE:
+        if RUST_PARSER_AVAILABLE and forced != "pyelftools":
             try:
                 self.md5_hash = rust_elf_parser.compute_md5(str(self.elf_path))
                 self.parser_backend = "rust_elf_parser"
@@ -416,19 +462,69 @@ class ELFParser:
         try:
             json_str = rust_elf_parser.parse_elf(str(self.elf_path))
             data = json.loads(json_str)
+            if not self._native_result_is_sane(data):
+                logger.warning(
+                    "Native parser output for %s failed the sanity check "
+                    "(KI-01 ET_REL corruption signature) — discarding it and "
+                    "falling back to pyelftools.", self.elf_path)
+                return self._fallback_to_pyelftools()
             self._map_native_json(data)
             return True
         except Exception as e:
             logger.warning(f"Native extraction failed: {e}. Falling back to Python parser.")
-            self.parser_backend = "pyelftools"
-            try:
-                with open(self.elf_path, 'rb') as f:
-                    raw_data = f.read()
-                self.stream = io.BytesIO(raw_data)
-                self._load_elf_file()
-            except Exception as e2:
-                logger.error(f"Failed to open ELF file for fallback parser: {e2}")
+            return self._fallback_to_pyelftools()
+
+    def _fallback_to_pyelftools(self) -> bool:
+        """Switch this parser to the pyelftools backend and load the stream."""
+        self.parser_backend = "pyelftools"
+        try:
+            with open(self.elf_path, 'rb') as f:
+                raw_data = f.read()
+            self.stream = io.BytesIO(raw_data)
+            self._load_elf_file()
+        except Exception as e2:
+            logger.error(f"Failed to open ELF file for fallback parser: {e2}")
+        return False
+
+    @staticmethod
+    def _native_result_is_sane(data: dict) -> bool:
+        """Detect the KI-01 corruption signature in native parser output.
+
+        Mishandled REL (implicit-addend) relocations zero every DWARF strp
+        offset, so all names read .debug_str offset 0 — the producer string.
+        Two observable symptoms: (a) every struct "name" equals the producer;
+        (b) the symtab→DWARF name join misses, so no function has parameters
+        even though symbols exist.
+
+        The "producer" JSON field ships in the same native-module version as
+        the relocation fix, so its *absence* means a stale pre-fix module —
+        the one realistic source of corrupt output. For those, symptom (a) is
+        matched structurally (a DWARF name collapsed to a compiler banner is
+        never a valid C identifier), and symptom (b) applies unconditionally.
+        A fixed module that found no DWARF at all (producer == "") is
+        accepted as-is: there is nothing the checks could say.
+        """
+        structures = data.get("structures") or {}
+        functions = data.get("functions") or []
+        symbols = data.get("symbols") or []
+
+        if "producer" in data:
+            producer = (data.get("producer") or "").strip()
+            if not producer:
+                return True
+            if structures and all(name == producer for name in structures):
+                return False
+        else:
+            # Pre-fix module: no producer to compare against, so use the
+            # structural version of symptom (a) — every struct name collapsed
+            # to the same non-identifier string (compiler banners contain
+            # spaces; C struct names cannot).
+            if structures and all(" " in name for name in structures):
+                return False
+
+        if symbols and functions and not any(f.get("parameters") for f in functions):
             return False
+        return True
 
     def _map_native_json(self, data: dict):
         self.md5_hash = data.get("elf_hash", self.md5_hash)
@@ -839,23 +935,40 @@ class ELFParser:
                 logger.info("Decoding parsed ELF data…")
                 data = json.loads(json_str)
 
-                n_sym = len(data.get("symbols", []))
-                n_fn = len(data.get("functions", []))
-                logger.info(f"Writing {n_sym} symbols and {n_fn} functions to the database…")
-                db.bulk_insert_symbols(self.md5_hash, data.get("symbols", []))
-                db.bulk_insert_functions(self.md5_hash, data.get("functions", []))
-                logger.info("Writing structures and global variables…")
-                db.bulk_insert_structures(self.md5_hash, data.get("structures", {}))
-                db.bulk_insert_global_vars(self.md5_hash, data.get("global_vars", {}))
+                if not self._native_result_is_sane(data):
+                    # KI-01: corrupted-but-parseable output (a stale pre-fix
+                    # native module, or a relocation regression) must never be
+                    # bulk-inserted into the project DB. This is the app's
+                    # production import path — the in-memory gate in
+                    # _try_native_extract does not cover it.
+                    logger.warning(
+                        "Native parser output for %s failed the sanity check "
+                        "(KI-01 ET_REL corruption signature) — discarding it "
+                        "and falling back to the pyelftools streaming path.",
+                        self.elf_path)
+                    self._fallback_to_pyelftools()
+                else:
+                    n_sym = len(data.get("symbols", []))
+                    n_fn = len(data.get("functions", []))
+                    logger.info(f"Writing {n_sym} symbols and {n_fn} functions to the database…")
+                    db.bulk_insert_symbols(self.md5_hash, data.get("symbols", []))
+                    db.bulk_insert_functions(self.md5_hash, data.get("functions", []))
+                    logger.info("Writing structures and global variables…")
+                    db.bulk_insert_structures(self.md5_hash, data.get("structures", {}))
+                    db.bulk_insert_global_vars(self.md5_hash, data.get("global_vars", {}))
+                    # #6D: inlined-subroutine records — functions that run but
+                    # may have no symbol (optimizer pasted them into callers).
+                    db.bulk_insert_inlined_functions(
+                        self.md5_hash, data.get("inlined_functions", []))
 
-                db.register_elf(self.md5_hash, str(self.elf_path) if self.elf_path else "", "rust_elf_parser")
+                    db.register_elf(self.md5_hash, str(self.elf_path) if self.elf_path else "", "rust_elf_parser")
 
-                self._db = db
-                self._active_elf_hash = self.md5_hash
-                db.commit()
-                logger.info("ELF extraction complete (native Rust parser).")
-                self.close()
-                return
+                    self._db = db
+                    self._active_elf_hash = self.md5_hash
+                    db.commit()
+                    logger.info("ELF extraction complete (native Rust parser).")
+                    self.close()
+                    return
             except Exception as e:
                 logger.warning(f"Native streaming extraction failed: {e}. Falling back to Python streaming.")
                 self.parser_backend = "pyelftools"
@@ -1079,13 +1192,9 @@ class ELFParser:
                         # Forward declaration: resolve alias via DB lookup
                         if 'DW_AT_name' in t_die.attributes:
                             target = t_die.attributes['DW_AT_name'].value.decode('utf-8', errors='replace')
-                            row = db.execute(
-                                "SELECT fields FROM elf_structures"
-                                " WHERE elf_hash=? AND name=? LIMIT 1",
-                                (self.md5_hash, target)
-                            ).fetchone()
-                            if row:
-                                typedef_structs[td_name] = json.loads(row[0])
+                            fields = self._lookup_structure_fields(db, self.md5_hash, target)
+                            if fields is not None:
+                                typedef_structs[td_name] = fields
                         continue
                     fields = []
                     for child in t_die.iter_children():
@@ -1109,6 +1218,26 @@ class ELFParser:
             db.bulk_insert_structures(self.md5_hash, typedef_structs)
 
         db.commit()
+
+    @staticmethod
+    def _lookup_structure_fields(db, elf_hash: str, name: str) -> Optional[list]:
+        """Fetch one struct's parsed fields list from elf_structures, or None.
+
+        The raw SELECT bypasses ProjectDatabase's decrypting getters, and
+        elf_structures.fields is a category-A encrypted column — so the value
+        MUST go through db._dec_text before json.loads, or encrypted projects
+        get `fb1:…` ciphertext and the parse fails."""
+        row = db.execute(
+            "SELECT fields FROM elf_structures"
+            " WHERE elf_hash=? AND name=? LIMIT 1",
+            (elf_hash, name)
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(db._dec_text("A", row[0]))
+        except (ValueError, TypeError):
+            return None
 
     def flush_to_db(self, db) -> None:
         """
@@ -1176,6 +1305,11 @@ class ELFParser:
         h = self._active_elf_hash
         os.makedirs(cache_dir, exist_ok=True)
         out_path = os.path.join(cache_dir, f"elf_{h}.json")
+        # Write to a temp path and rename into place on success: the JSON is
+        # written incrementally, so a mid-write failure would otherwise leave a
+        # truncated file — and a failure BEFORE the write starts (closed DB,
+        # corrupt encrypted row) must not touch a pre-existing good cache.
+        tmp_path = out_path + ".tmp"
         try:
             elf_info = self._db.execute(
                 "SELECT elf_path FROM elf_index WHERE elf_hash=?", (h,)
@@ -1193,7 +1327,7 @@ class ELFParser:
             structs = self._db.get_all_structures(h)
             gvars = self._db.get_all_global_vars(h)
 
-            with open(out_path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 import json as _json
                 f.write("{\n")
                 f.write(f'  "elf_path": {_json.dumps(elf_path_str)},\n')
@@ -1217,10 +1351,14 @@ class ELFParser:
                 f.write('  "functions": [\n')
                 first = True
                 for fn in func_rows:
+                    # parameters/return_type are category-A encrypted columns —
+                    # decrypt before parsing/writing (the raw SELECT above
+                    # bypasses ProjectDatabase's decrypting getters).
+                    dec_params = self._db._dec_text("A", fn[3])
                     d = {
                         "name": fn[0], "address": fn[1], "size": fn[2],
-                        "parameters": _json.loads(fn[3]) if fn[3] else [],
-                        "return_type": fn[4]
+                        "parameters": _json.loads(dec_params) if dec_params else [],
+                        "return_type": self._db._dec_text("A", fn[4])
                     }
                     if not first:
                         f.write(",\n")
@@ -1233,9 +1371,17 @@ class ELFParser:
                 f.write(f'  "structures": {_json.dumps(structs)},\n')
                 f.write(f'  "global_vars": {_json.dumps(gvars)}\n')
                 f.write("}")
+            os.replace(tmp_path, out_path)
             return out_path
         except Exception as e:
             logger.warning(f"Failed to export ELF cache: {e}")
+            # Only the temp file can be dirty; out_path still holds whatever
+            # was there before (a prior good export, or nothing).
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
             return None
 
     @staticmethod

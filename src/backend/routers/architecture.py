@@ -359,6 +359,15 @@ def patch_port(model_id: int, row_index: int, body: CellUpdate,
         rows = db.get_model_rows(model_id)
         if not (0 <= row_index < len(rows)):
             raise ProjectError(f"No such row: {row_index}")
+        # #7: cells written by an import are locked — a manual edit must not
+        # change them (the tool owns them; ASPICE IDs are stable). Unlocking
+        # is the explicit /unlock action, never a side effect of editing.
+        for col in body.updates:
+            cell = rows[row_index].get(col)
+            if isinstance(cell, dict) and cell.get("origin") == "import":
+                raise ProjectError(
+                    f"'{col}' was populated by an import and is locked. "
+                    "Unlock the cell explicitly to edit it.")
         # Snapshot the displayed text of each touched column BEFORE applying —
         # a shallow row copy shares the inner cell dicts, so _apply_updates would
         # otherwise mutate them in place and erase the "old" value.
@@ -386,6 +395,48 @@ def patch_port(model_id: int, row_index: int, body: CellUpdate,
         bus.publish("db-changed",
                     {"reason": "port-edited", "model_id": model_id, "row_index": row_index})
         return {"model_id": model_id, "row_index": row_index, "cells": updated}
+    return _guard(go)
+
+
+class UnlockBody(BaseModel):
+    column: str
+
+
+@router.post("/models/{model_id}/ports/{row_index}/unlock")
+def unlock_port_cell(model_id: int, row_index: int, body: UnlockBody,
+                     state: AppState = Depends(get_state),
+                     bus: EventBus = Depends(get_bus)) -> dict:
+    """#7: explicitly remove the import lock from one cell (change-logged).
+    The value stays; only the provenance flag is cleared, so the cell becomes
+    hand-editable again — a deliberate, audited decision."""
+    def go():
+        db = state.require_table_edit()
+        state.model_index_by_id(model_id)
+        rows = db.get_model_rows(model_id)
+        if not (0 <= row_index < len(rows)):
+            raise ProjectError(f"No such row: {row_index}")
+        cell = rows[row_index].get(body.column)
+        if not (isinstance(cell, dict) and cell.get("origin") == "import"):
+            raise ProjectError(f"'{body.column}' is not a locked cell.")
+        new_cell = {k: v for k, v in cell.items() if k != "origin"}
+        updated = dict(rows[row_index])
+        updated[body.column] = new_cell
+        db.upsert_model_row(model_id, row_index, updated)
+        db.commit()
+        from Application_Logic.Logic_Architecture_Models import _cell_text
+        _state_cols, name_col = _port_columns(db)
+        port = (_cell_text(updated.get(name_col)) if name_col else "") or "N/A"
+        _record_history(
+            state,
+            f"Row {row_index + 1} -> {port} -> {body.column} -> "
+            f"unlocked imported cell (value kept: {_cell_text(new_cell)})",
+            _model_name(state, model_id),
+        )
+        bus.publish("db-changed",
+                    {"reason": "port-edited", "model_id": model_id,
+                     "row_index": row_index})
+        return {"model_id": model_id, "row_index": row_index,
+                "column": body.column, "unlocked": True}
     return _guard(go)
 
 

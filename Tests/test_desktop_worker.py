@@ -59,6 +59,13 @@ def test_api_accepts_session_token(worker):
     assert r.status == 200
 
 
+_FRONTEND_DIST = os.path.join(os.path.abspath("src"), "frontend", "dist", "index.html")
+
+
+@pytest.mark.skipif(
+    not os.path.exists(_FRONTEND_DIST),
+    reason="no frontend build (run `npm run build` in src/frontend) — "
+           "the worker can only serve a dist that exists")
 def test_spa_shell_is_served(worker):
     # serve_frontend=True → the built index.html is returned at the root
     _, port, _ = worker

@@ -129,10 +129,19 @@ def elf_has_call_tree(parser, *, sample: int = 12) -> bool:
     return disasm_ok
 
 def build_code_map(parser, code_index, *, source_root: str,
-                   prefer_source_calls: Optional[bool] = None) -> dict:
+                   prefer_source_calls: Optional[bool] = None,
+                   object_edges: Optional[set] = None) -> dict:
     """
     Join the static C AST index data with DWARF extraction records.
-    
+
+    object_edges (#6C): the release's compiler-verified (caller, callee)
+    pairs from the .o enrichment dataset (text relocations + inlined-
+    subroutine records). When given, each function gains "verified_calls" —
+    the subset of its "calls" confirmed by the compiler — and the top-level
+    "edge_verification" flag is True. Semantics are one-directional: presence
+    CONFIRMS an edge; absence does NOT refute it (intra-TU calls can be
+    resolved without a relocation), so unverified edges stay in "calls".
+
     Returns a unified CodeMap dictionary:
     {
         "functions": {
@@ -140,6 +149,7 @@ def build_code_map(parser, code_index, *, source_root: str,
                 "address": int,
                 "size": int,
                 "calls": [callee_names],
+                "verified_calls": [callee_names],   # subset of calls (#6C)
                 "file": str,
                 "line_start": int,
                 "signature": str,
@@ -152,7 +162,8 @@ def build_code_map(parser, code_index, *, source_root: str,
         },
         "global_variables": {
             "name": var_type
-        }
+        },
+        "edge_verification": bool
     }
     """
     # 1. Retrieve DWARF function and global details from parser
@@ -284,10 +295,22 @@ def build_code_map(parser, code_index, *, source_root: str,
         # Combine calls from static AST analysis and dynamic Capstone disassembly
         combined_calls = sorted(list(set(ast_func.calls + dwarf_calls)))
 
+        # #6C: which of these edges did the compiler confirm? The object
+        # dataset keys edges by symbol name — try both the source name and
+        # the matched DWARF/symtab name for the caller side.
+        verified = []
+        if object_edges:
+            caller_keys = {ast_name}
+            if dwarf_name:
+                caller_keys.add(dwarf_name)
+            verified = [c for c in combined_calls
+                        if any((k, c) in object_edges for k in caller_keys)]
+
         joined_functions[ast_name] = {
             "address": address,
             "size": size,
             "calls": combined_calls,
+            "verified_calls": verified,
             "file": ast_func.relpath,
             "line_start": ast_func.line_start,
             "signature": ast_func.signature,
@@ -318,6 +341,9 @@ def build_code_map(parser, code_index, *, source_root: str,
                 "address": df["address"],
                 "size": df["size"],
                 "calls": dwarf_calls,
+                "verified_calls": (
+                    [c for c in dwarf_calls if (mangled_name, c) in object_edges]
+                    if object_edges else []),
                 "file": "",
                 "line_start": 0,
                 "signature": f"{df['return_type']} {name_to_use}()" if df["return_type"] else f"{name_to_use}()",
@@ -346,5 +372,9 @@ def build_code_map(parser, code_index, *, source_root: str,
         "functions": joined_functions,
         "global_variables": joined_globals,
         "structures": dwarf_structures,
+        # #6C: only render verified/unverified edge styling when a dataset
+        # actually backed the check — otherwise every edge would look
+        # "unverified" for the wrong reason.
+        "edge_verification": object_edges is not None,
         "defines": dict(code_index.defines) if code_index else {}
     }

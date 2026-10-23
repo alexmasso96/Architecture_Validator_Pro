@@ -123,7 +123,7 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 
 | Module | Role |
 |--------|------|
-| `app.py` | `create_app()` wires the singletons (`EventBus`, `AppState`, `JobManager`) onto `app.state`, binds the event loop to the bus at startup, and mounts the 14 routers + `/api/health`. Module-level `app` for `uvicorn backend.app:app`. |
+| `app.py` | `create_app()` wires the singletons (`EventBus`, `AppState`, `JobManager`) onto `app.state`, binds the event loop to the bus at startup, and mounts the 17 routers + `/api/health`. App-level exception handlers map infrastructure races to **409 Conflict** instead of 500: a closed-connection `sqlite3.ProgrammingError` (project closed under an in-flight request) and a mid-session `PasswordInvalid` (a corrupt encrypted value on disk). Module-level `app` for `uvicorn backend.app:app`. |
 | `state.py` | `AppState` — headless project lifecycle. Owns the open `ProjectDatabase`, the Qt-free `ArchitectureManager`/`ReleaseManager`, the project path, edit mode, and file-lock state. **View-only is enforced server-side** with `PRAGMA query_only=ON`. Routers read/mutate the DB through here. |
 | `events.py` | The SSE event bus. A single `/api/events` stream carries job progress, `db-changed`, and lock events. `publish` is thread-safe (`call_soon_threadsafe`) because publishers are usually worker threads. |
 | `jobs.py` | `JobManager` — one contract for every heavy operation: `POST /api/jobs/{kind}` → `202 {job_id}`, polled via `GET /api/jobs/{job_id}`, cancelled via `…/cancel`, progress streamed over SSE. A handler is `fn(params, progress, cancel_event) -> result`. |
@@ -136,14 +136,15 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 | Router | Surface |
 |--------|---------|
 | `project.py` | `/api/project/{new,open,save,close,status}` — project lifecycle (master password optional; `None` → plaintext). |
-| `architecture.py` | The architecture matrix plus `/api/models` CRUD + `/ports` (create, bulk, patch, delete), model `state` transitions, and activate. |
-| `releases.py` | `/api/releases` CRUD, `activate`, `branch`, `unfreeze`, `restore`, `source` attach/detach, `result-column`, `compare`, `lineage`. |
+| `architecture.py` | The architecture matrix plus `/api/models` CRUD + `/ports` (create, bulk, patch, delete, `unlock`), model `state` transitions, and activate. A PATCH on an import-locked cell is refused (409); `ports/{row}/unlock` is the explicit, change-logged way back. |
+| `releases.py` | `/api/releases` CRUD, `activate`, `branch`, `unfreeze`, `restore`, `source` attach/detach, `objects` (`.o` enrichment import/summary/drop), `result-column`, `compare`, `lineage`. Release payloads carry `parser_backend` (which ELF backend produced the data). |
 | `baselines.py` | Baseline diffs. |
-| `symbols.py` | `/api/symbols` + re-match. |
-| `codemap.py` | `/api/codemap` (+ `function/{name}`, `graph`). |
+| `symbols.py` | `/api/symbols` + re-match. Candidates that exist only as inlined functions are tagged `inlined`. |
+| `codemap.py` | `/api/codemap` (+ `function/{name}`, `graph`). Graph edges carry `verified` when the map was built against a `.o` dataset. |
 | `changelog.py` | `/api/changelog` (+ `diff`) — release source diffs. |
 | `ai.py` | `/api/ai/{providers,prompts,mindmap,chat,parse-hlt}` + Copilot device-flow login. |
-| `imports.py` | `/api/import/{analyze,read,interface_export}` — spreadsheet / InterfaceExport import. |
+| `imports.py` | `/api/import/{analyze,read,interface_export}` — the legacy spreadsheet / InterfaceExport import (unchanged). |
+| `table_import.py` | Import Profiles: `/api/import/sample` (one-read in-memory sample sessions), `preview` + `preview/all` (pure in-memory), `profiles` CRUD (app-data JSON + built-in InterfaceExport profiles), and the two-step `diff` → `commit` import. |
 | `injection.py` | `/api/injection/*` — test projects, hooks (injections), files, build, export. |
 | `testdesign.py` | Test Case Design templates + preview + export. |
 | `fs.py` | Native folder/file picker bridge. |
@@ -155,7 +156,7 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 Qt-free modules that hold the actual business logic. The worker (and the test suite) drive these directly.
 
 **Persistence & lifecycle**
-- `Logic_Database.py` — `ProjectDatabase`: SQLite-backed storage for one `.arch`. Owns the full schema and typed CRUD for project meta, column layout, models + rows, releases + rows, ELF data tables, baselines, test-case design, history, AI mind maps/diffs, source files, and test-injection data. There is no JSON-on-disk project format.
+- `Logic_Database.py` — `ProjectDatabase`: SQLite-backed storage for one `.arch`. The shared main connection is wrapped in `_TxnSerializedConnection`, which holds an RLock for every `with conn:` transaction and for bare `commit`/`rollback`/`close`, so threadpool requests cannot interleave transactions (opened with `cached_statements=0` to avoid shared prepared-statement misuse). Owns the full schema and typed CRUD for project meta, column layout, models + rows, releases + rows, ELF data tables, baselines, test-case design, history, AI mind maps/diffs, source files, and test-injection data. There is no JSON-on-disk project format.
 - `Logic_New_Project.py` — new-project import sequencing (run as worker jobs).
 - `Logic_File_Locking.py` — `FileLockManager`: the View-Only / Exclusive-Edit model via a `<project>.arch.lock` sidecar carrying owner + heartbeat; stale locks are reclaimable.
 - `Logic_Column_Layout.py` — project-global column-layout rules (Qt-free), enforced by the API and reused by the React column customizer. Cell keys are migrated across every model's rows on rename/delete.
@@ -163,16 +164,17 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 **Models, releases, matching, results**
 - `Logic_Architecture_Models.py` — multiple architecture models per project (create, duplicate, soft-delete, restore, reorder).
 - `Logic_Release_Manager.py` — `ReleaseManager`: software releases + baselines; ELF shared by `elf_hash`; lazy loading of the active release only.
-- `Logic_Symbol_Matcher.py` — `rapidfuzz` fuzzy matching over DB-loaded name strings (`find_best_match`, `find_top_matches`, threshold).
+- `Logic_Symbol_Matcher.py` — `rapidfuzz` fuzzy matching over DB-loaded name strings (`find_best_match`, `find_top_matches`, threshold). The pool includes functions that exist only as inline expansions (no symbol, no address).
 - `Logic_Release_Results.py` — per-release validation result derivation (Pass / Block / No Result / Not Run).
 - `Logic_Release_Source_Picker.py` — shared release-dropdown helper for the source pickers (every "pick a folder" became a release dropdown).
 
 **Source, code map, change log**
 - `Logic_Source_Store.py` — source-provider abstraction (`FilesystemSourceProvider` for a local folder; a DB-backed provider for release-keyed source) so parsing/diff/AI context are decoupled from where source bytes live.
 - `Logic_Code_Index.py` — stdlib-only C indexer: `build_index(path) -> CodeIndex` (functions / globals / call_graph / file_functions).
-- `Logic_Code_Map.py` — `build_code_map(parser, code_index)` joins DWARF facts to the C call graph **by function name** (with C++ demangling) into a `CodeMap`.
+- `Logic_Code_Map.py` — `build_code_map(parser, code_index)` joins DWARF facts to the C call graph **by function name** (with C++ demangling) into a `CodeMap`. Given a release's `.o` dataset (`object_edges`), it labels each call edge **verified** (compiler-confirmed) or source-only — presence confirms an edge, absence never removes one.
 - `Logic_Change_Log_Tab.py` — release-to-release source diff logic.
-- `Logic_InterfaceExport_Import.py` — InterfaceExport path-based export detection and parsing.
+- `Logic_InterfaceExport_Import.py` — InterfaceExport path-based export detection and parsing (the legacy import path).
+- `Logic_Table_Import.py` — the Import Profiles engine: CSV/Excel reader (delimiter sniffing, sheet/header-row selection, merged-cell fill), the declarative rule pipeline (`filter`, `derive`, `split_cell`, `expand`, `partition`, `clean`), column mapping with import provenance, and `compute_update_diff` for match-and-update imports (composite keys; locked cells are flagged, never overwritten). The built-in InterfaceExport profiles reproduce `Logic_InterfaceExport_Import` exactly (regression-tested).
 
 **Test design, injection, history**
 - `Logic_TestCase_Design.py` — the Markdown template language (`[Column]` tokens + `#if` conditionals), live preview, operation grouping, and bulk/individual `.md` export.
@@ -192,8 +194,8 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 
 ### Core & native parser
 
-- `src/core/elf_parser.py` — `ELFParser`. Tries the native `rust_elf_parser` first (`_try_native_extract()` maps its JSON onto the in-memory contract) and falls back transparently to **`pyelftools`** on any error. Extracts the symbol table + DWARF (params, structures, globals) and provides Capstone disassembly for sub-call analysis. `flush_to_db()` / `load_from_db()` back the SQLite design; `export_elf_cache()` / `import_elf_cache_to_db()` give a portable JSON cache for fast re-import. The active backend is surfaced in `get_statistics()`.
-- `src/native/parser_rust/` — `rust_elf_parser`, a PyO3 Rust extension (built with **maturin**) that parses ELF symbols + DWARF with parallel traversal and `mmap`. Exposes `parse_elf(path)` (JSON) and `compute_md5(path)`. Bundled into the packaged app; CI builds it on all three platforms.
+- `src/core/elf_parser.py` — `ELFParser`. Tries the native `rust_elf_parser` first (`_try_native_extract()` maps its JSON onto the in-memory contract) and falls back to **`pyelftools`** on any error **or** when the native output fails a sanity check (`_native_result_is_sane` — the KI-01 corruption signature; applied on both the in-memory and the DB-streaming import paths). `ARCH_PARSER_BACKEND=python|rust` forces a backend for debugging; a failed native import is logged as a WARNING with the real `ImportError`. Extracts the symbol table + DWARF (params, structures, globals) and provides Capstone disassembly for sub-call analysis. `flush_to_db()` / `load_from_db()` back the SQLite design; `export_elf_cache()` / `import_elf_cache_to_db()` give a portable JSON cache for fast re-import. The active backend is surfaced in `get_statistics()`.
+- `src/native/parser_rust/` — `rust_elf_parser`, a PyO3 Rust extension (built with **maturin**) that parses ELF symbols + DWARF with parallel traversal and `mmap`. Exposes `parse_elf(path)` (JSON) and `compute_md5(path)`. Debug relocations are applied correctly for both REL (implicit, in-place addend) and RELA objects, so relocatable `.o` files parse correctly. The JSON also carries `producer` (DWARF producer), `call_edges` (compiler-verified references from `.text` relocations — architecture-neutral), `inlined_functions` (`DW_TAG_inlined_subroutine` records) and `cu_files`. LTO objects (LLVM bitcode / `.gnu.lto_*`) are rejected with a clear error. Bundled into the packaged app; CI builds it on all three platforms.
 
 ### Frontend — `src/frontend/src/`
 
@@ -202,7 +204,7 @@ A Vite + React + TypeScript SPA; Monaco for code editing.
 | Area | Contents |
 |------|----------|
 | `views/` | The 7 workbench views: `Workspace`, `TestDesign`, `AIGeneration`, `AIChat`, `CodeMap`, `ChangeLog`, `TestCodeInjection`. |
-| `components/` | Shared UI — `Titlebar`, `Sidebar`, `PortsTable`, `Inspector`, `Preferences`, import/column/release dialogs, and `tutorial/` (the in-app interactive guides + `TutorialShell`). |
+| `components/` | Shared UI — `Titlebar`, `Sidebar`, `PortsTable`, `Inspector`, `Preferences`, import/column/release dialogs (incl. `ImportProfilesSettings` and `ProfileImportDialog`), and `tutorial/` (the in-app interactive guides + `TutorialShell`). |
 | `api/` | The typed `/api/*` client; attaches the bearer token and exposes the SSE subscription. |
 | `native.ts` | Reads the session token from the URL fragment (`#token=…`) or `VITE_API_TOKEN`, and bridges native file pickers. |
 | `theme/` | `macos.css` — the app's styling, including the tutorial/demo widgets. |
@@ -252,10 +254,12 @@ MyProject.arch.elf_caches/    # exported ELF JSON caches for fast re-import
 | `project_meta` | Key/value settings, schema version, master-password hash, integrity HMAC |
 | `column_layout` | The project-global column layout |
 | `architecture_models` | Models (with soft-delete) |
-| `architecture_rows` | Port rows, cells keyed by column name, per model |
+| `architecture_rows` | Port rows, cells keyed by column name, per model. A cell with `"origin": "import"` is import-locked |
 | `releases` / `release_rows` / `release_results` | Releases, their port snapshots, and per-release results |
 | `release_column_metadata` | Per-release result columns |
-| `elf_index` / `elf_symbols` / `elf_functions` / `elf_structures` / `elf_global_vars` | ELF data keyed by `elf_hash` |
+| `elf_index` / `elf_symbols` / `elf_functions` / `elf_structures` / `elf_global_vars` | ELF data keyed by `elf_hash` (`elf_index.parser_backend` records which backend produced it) |
+| `elf_inlined_functions` | DWARF inline expansions per ELF (functions that run but may have no symbol) |
+| `release_object_config` / `release_objects` / `release_object_edges` / `release_inlined_functions` | The per-release `.o` enrichment dataset: folder config + dataset hash, per-object status, compiler-verified call edges, inlined records |
 | `release_source_files` | Release-keyed C source (DB-backed source provider) |
 | `ai_model_mindmaps` / `ai_code_diffs` / `ai_release_maps` | AI mind maps, computed source diffs, per-release code maps |
 | `test_projects` / `test_project_files` / `test_code_injections` | Test Injection projects, helper files, and hooks |

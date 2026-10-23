@@ -32,6 +32,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [importProfileOpen, setImportProfileOpen] = useState(false);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [viewBannerDismissed, setViewBannerDismissed] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
@@ -221,6 +222,7 @@ export default function App() {
         canSave={canEdit}
         saving={saving}
         onImport={() => setImportOpen(true)}
+        onImportProfile={() => setImportProfileOpen(true)}
         onColumns={() => setColumnsOpen(true)}
         onPrefs={() => setPrefsOpen(true)}
       />
@@ -250,7 +252,9 @@ export default function App() {
           onReloadStatus={reloadStatus}
           toast={toast}
           importOpen={importOpen}
+          importProfileOpen={importProfileOpen}
           onCloseImport={() => setImportOpen(false)}
+          onCloseImportProfile={() => setImportProfileOpen(false)}
           columnsOpen={columnsOpen}
           onCloseColumns={() => setColumnsOpen(false)}
           onShowInCodeMap={(fn) => {

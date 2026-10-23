@@ -1,3 +1,55 @@
+# Unreleased (planned v3.1.0) — Import Profiles, object-file enrichment, parser & stability fixes
+
+In on-machine validation. Version numbers are bumped when the release is cut.
+
+## 📥 New: Import Profiles
+- **Import any table format without code.** Build a reusable profile from
+  declarative rules (filter, derive if/else, split cell, expand to rows,
+  partition into models, clean / fill merged cells) plus a column mapping, in
+  **Preferences → Import Profiles**.
+- **Live preview** against a sample file read once into memory: per-rule row
+  counts, a target-shaped preview of what each table column will receive, and a
+  paged *show all rows* view for cross-checking.
+- **Append** new rows or **match & update** existing rows by a key (composite keys
+  supported), e.g. filling one test-case ID into every function row of an interface.
+- **Diff before write**: every import shows exactly what will change before you
+  apply it. Profiles are auto-selected by filename pattern.
+- The built-in InterfaceExport profiles reproduce the existing InterfaceExport import exactly;
+  the existing Import wizard is unchanged.
+
+## 🔒 New: locked imported cells (TC. ID)
+- Cells filled by an import in a locked column show 🔒, can't be edited by hand,
+  and are **never overwritten by later imports**; a differing value is flagged in
+  the import diff. Unlock is an explicit right-click action, recorded in history.
+
+## 🗺️ New: object-file (`.o`) enrichment for the Code Map
+- Import a build-output folder of `.o` files per release (Code Map → **Objects**).
+  Call edges confirmed by the compiler's relocations are drawn solid; edges seen
+  only in the source (e.g. inside a disabled `#ifdef`) are drawn dashed. Works
+  without disassembly, so it also covers RH850.
+- **Inlined functions** (code that runs but has no symbol) are recovered from the
+  debug info and offered in the match picker tagged *inlined*.
+- LTO objects are detected and skipped with a clear reason.
+
+## 🔍 Parser
+- **Relocatable objects parse correctly** with the native parser (KI-01): ELF REL
+  relocations' in-place addends are now applied. Output is sanity-checked and falls
+  back to `pyelftools` if it ever looks corrupted, on every import path.
+- **Backend provenance** (KI-02): the Release Manager shows **⚙ native** /
+  **⚙ python** per release; `ARCH_PARSER_BACKEND=python|rust` forces a backend.
+  A failed native-module load is logged with its real reason.
+
+## 🐛 Fixed (crash audit)
+- `bad parameter or other API misuse` crash from concurrent requests sharing a
+  prepared statement; transactions on the shared connection are now serialized.
+- Several reads of **encrypted** project data skipped decryption (Code Map crash
+  with `Expecting value`, typedef structs silently missing, broken ELF cache
+  export). A failed cache export no longer deletes an older good cache.
+- Closing a project during a request, or a corrupt encrypted value, now returns a
+  clear **409** message instead of an unexplained server error.
+
+---
+
 # v3.0.2 — Hotfix: Windows blank/white window
 
 A follow-up Windows fix. On some machines the app opened to a **blank white

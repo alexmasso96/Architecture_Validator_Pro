@@ -3710,6 +3710,18 @@ button.update-pill:hover {
   stroke-width: 1.4;
   opacity: 0.6;
 }
+/* #6C: edge verification against the .o dataset (only applied when a dataset
+   was present at build time). Verified = compiler-confirmed; unverified =
+   seen in source only (possibly an #ifdef ghost). */
+.cm-edges line.cm-edge-verified {
+  stroke: var(--accent, #2f7d4f);
+  opacity: 0.85;
+  stroke-width: 1.7;
+}
+.cm-edges line.cm-edge-unverified {
+  stroke-dasharray: 5 4;
+  opacity: 0.45;
+}
 .cm-node rect {
   fill: var(--card);
   stroke: var(--border);
@@ -4841,6 +4853,249 @@ button.update-pill:hover {
   height: 11px;
   border-radius: 3px;
   border: 1.4px solid var(--border);
+}
+/* #8 Phase D: profile-driven import dialog + Import Profiles editor */
+.modal.profimp {
+  width: min(760px, 92vw);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+}
+.profimp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+.profimp-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.profimp-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.profimp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.profimp-label {
+  min-width: 90px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.profimp-file {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 380px;
+}
+.profimp-error {
+  color: var(--red);
+  font-size: 12px;
+}
+.profimp-warn {
+  background: color-mix(in srgb, orange 12%, transparent);
+  border: 1px solid color-mix(in srgb, orange 35%, transparent);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.profimp-diff-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.profimp-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+.profimp-table th,
+.profimp-table td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profimp-table th {
+  background: var(--card);
+  font-weight: 600;
+}
+
+.ips-root {
+  min-height: 0;
+}
+.ips-cols {
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+}
+.ips-list {
+  width: 190px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding-right: 10px;
+}
+.ips-list-head,
+.ips-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.ips-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.ips-item:hover {
+  background: var(--card);
+}
+.ips-item.sel {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.ips-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ips-editor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ips-empty {
+  padding: 30px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.ips-section {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.ips-line,
+.ips-cond {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.ips-cond input,
+.ips-line input {
+  min-width: 90px;
+}
+.ips-narrow {
+  width: 60px;
+  min-width: 60px !important;
+}
+.ips-rule {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--card);
+}
+.ips-rule-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ips-count {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.ips-x {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 5px;
+}
+.ips-x:hover {
+  color: var(--red);
+}
+.ips-src {
+  min-width: 140px;
+  font-size: 11.5px;
+}
+.ips-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.ips-addrule {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.ips-preview-table {
+  margin-top: 4px;
+}
+.ips-all-body {
+  max-height: 60vh;
+}
+.ips-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+/* #7: import-locked cells — tool-populated, read-only until explicit unlock */
+.locked-cell {
+  cursor: not-allowed;
+  opacity: 0.92;
+}
+.lock-glyph {
+  font-size: 9px;
+  margin-right: 4px;
+  opacity: 0.7;
+}
+
+.cm-leg.verified i {
+  background: transparent;
+  border: none;
+  border-top: 2.2px solid var(--accent, #2f7d4f);
+  border-radius: 0;
+  height: 0;
+  margin-top: 5px;
+}
+.cm-leg.unverified i {
+  background: transparent;
+  border: none;
+  border-top: 2px dashed var(--muted);
+  border-radius: 0;
+  height: 0;
+  margin-top: 5px;
 }
 .cm-leg.caller i {
   background: var(--cm-caller-bg);

@@ -43,6 +43,8 @@ For a full, screenshot-by-screenshot walkthrough of every feature, see the **[Us
 ### 🔍 ELF / DWARF binary parsing (native Rust + Python fallback)
 Reads compiled `.elf` files and pulls out the symbols, functions, structures, and global variables from the DWARF debug info. A bundled **native Rust parser** (`rust_elf_parser`, a PyO3 extension built with maturin) does this with parallel traversal and `mmap`; if the native module isn't present it falls back transparently to `pyelftools`. Includes disassembly-based sub-call analysis (via Capstone) and caches parsed data so large binaries only get the slow treatment once.
 
+The native parser handles **relocatable objects (`.o`)** as well as linked images, and its output is sanity-checked: if it ever looks corrupted, the app discards it and re-parses with `pyelftools` rather than trusting it. The Release Manager shows which backend produced each release's data (**⚙ native** / **⚙ python**), and `ARCH_PARSER_BACKEND=python` forces the Python backend for troubleshooting.
+
 ### 🤖 AI test-case generation, agentic chat & mind maps
 Generate **low-level, HiL-debugger-style test designs** from your high-level test cases and the real C source, across **GitHub Copilot, Anthropic, OpenAI, and Gemini** (keys stored encrypted, per-user, never in the project). An **Advanced AI Chat** indexes your source into a compact **mind map** and answers questions agentically with read-only, sandboxed tools (`read_file`, `search_code`, `get_call_graph`, …) — grounded in the actual code. Import requirements (CSV/XLSX) and compute file-by-file source diffs between releases.
 
@@ -52,6 +54,8 @@ Generate **low-level, HiL-debugger-style test designs** from your high-level tes
 
 ### 🗺️ Code Map
 A visual **call-graph + source explorer** that joins the ELF/DWARF facts (addresses, sizes, params, structs, globals) to the C source by function name — depth-bounded caller/callee graph, matched-globals panel, and a syntax-highlighted source view. Rebuildable offline (no AI tokens).
+
+**Object-file enrichment.** Point the Code Map's **Objects** badge at your build-output folder of `.o` files and the compiler's own relocation records confirm the call graph: edges the compiler really emitted are drawn **solid**, edges seen only in the source text (e.g. a call inside a disabled `#ifdef`) are drawn **dashed**. Because this needs no disassembly, it works on targets the disassembler doesn't support (e.g. RH850). Functions the optimizer **inlined** — which run but have no symbol of their own — are recovered from the debug info and offered in the match picker tagged *inlined*, so a port isn't reported missing just because its function was inlined. The linked ELF remains the primary import; object files only add information.
 
 ![Code Map — call-graph explorer joined to the C source](/Media/images/code_map.png "Code Map — depth-bounded caller/callee graph with function details, matched globals, and a syntax-highlighted source view")
 
@@ -66,11 +70,15 @@ Splice extra C code — instrumentation, stubs, a test harness — into your fir
 ### 📥 Flexible architecture import
 Bring your architecture in from **Excel or CSV**. InterfaceExport path-based exports are detected automatically and routed through a dedicated import flow, and the classic sheet-per-model spreadsheet format is supported too.
 
+**Import Profiles** handle every other format without code: build a reusable profile from declarative rules — *filter* rows, *derive* a column from if/else conditions, *split* a cell (e.g. a `::` path), *expand* multi-value cells into rows, *partition* into one model per value, *clean* values (incl. filling merged cells) — then map columns onto the table. A **live preview** runs against a sample file read once into memory and shows what each table column will receive, with per-rule row counts and a *show all rows* view for cross-checking. A profile can **append** rows or **match and update** existing ones by a key (e.g. fill a test-case ID into every function row of an interface). Every import shows a **diff before anything is written**. Profiles are auto-selected by filename pattern (e.g. `INTERFACE_EXPORT_*.xls*`).
+
 ### 🧩 Fuzzy symbol matching
 Maps each architecture port to the closest real symbol in the binary using fuzzy string matching with a **configurable confidence threshold** — so you stay in control of how strict the matching is.
 
 ### 📊 Editable, customizable table
 All your data lives in one editable table of ports × columns. A drag-and-drop column customizer lets you add, remove, reorder, and rename columns. Built-in column types cover port/function/variable search, matched symbols, init/cyclic execution info, review status, port state, and per-release validation results.
+
+Cells filled by an import (such as test-case IDs) are **locked 🔒**: they can't be edited by hand, and later imports won't overwrite them — a differing value is flagged in the import diff instead. Unlocking is an explicit right-click action recorded in the history.
 
 ### 🔁 Release management, baselining & change detection
 Manage multiple **software releases** in a single project, each carrying its own ELF data. Creating a release **auto-baselines** the previous one; frozen baselines are read-only and **write-protected at the database layer**, and unfreezing requires the project master password. Compare against a baseline to surface changes — differences are colour-coded so you can **approve or reject** them release over release, and every freeze/unfreeze is recorded in history.
