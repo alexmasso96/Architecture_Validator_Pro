@@ -2,6 +2,7 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -19,6 +20,7 @@ import type {
   SourceResponse,
 } from "../api/types";
 import { FolderPicker } from "../components/FolderPicker";
+import { persistKey } from "../prefs";
 
 type ListState = "loading" | "ready" | "needs-build" | "error";
 
@@ -42,14 +44,78 @@ function useMonacoTheme(): "vs" | "vs-dark" {
 
 // ---------------------------------------------------------------------------
 // Call-graph SVG — manual column layout: callers on the left, focus in the
-// centre, callees on the right (one column per graph level). Double-clicking a
-// caller/callee node re-focuses on it.
+// centre, callees on the right (one column per graph level). The variables the
+// focus reads sit above it and the ones it writes below it, joined by arcs.
+// Edges are curved arrows; double-clicking a function node re-focuses on it.
 // ---------------------------------------------------------------------------
-const NODE_W = 150;
 const NODE_H = 34;
-const COL_GAP = 56;
-const ROW_GAP = 16;
-const PAD = 20;
+const COL_GAP = 76;
+const ROW_GAP = 14;
+const PARAM_GAP = 22; // focus ↔ first variable row
+const PAD = 24;
+const CHAR_W = 7.3; // 12px monospace advance
+const MIN_W = 120;
+const MAX_W = 320;
+const ACCESS_TAG_W = 26; // "R" / "W" / "RW" tag inside variable nodes
+const MIN_SCALE = 0.5; // shrink big graphs to fit, but never below this
+
+const ACCESS_TAG = { read: "R", write: "W", readwrite: "RW" } as const;
+const ACCESS_TEXT = {
+  read: "read by",
+  write: "written by",
+  readwrite: "read and written by",
+} as const;
+
+function nodeWidth(n: GraphNode): number {
+  const tag = n.type === "param" ? ACCESS_TAG_W : 0;
+  return Math.min(MAX_W, Math.max(MIN_W, n.name.length * CHAR_W + 26 + tag));
+}
+
+function fitLabel(name: string, room: number): string {
+  const max = Math.max(4, Math.floor(room / CHAR_W));
+  return name.length > max ? name.slice(0, max - 1) + "…" : name;
+}
+
+type Box = { x: number; y: number; w: number; node: GraphNode };
+
+// Cubic path between two boxes. Forward edges leave the right side and enter
+// the left side; back/same-column edges and self-calls loop underneath.
+function edgePath(a: Box, b: Box): string {
+  if (a === b) {
+    const x = a.x + a.w - 18;
+    const y = a.y + NODE_H;
+    return `M ${x} ${y} C ${x} ${y + 26}, ${x + 30} ${y + 18}, ${a.x + a.w} ${a.y + NODE_H / 2 + 4}`;
+  }
+  if (b.x > a.x + a.w) {
+    const x1 = a.x + a.w;
+    const y1 = a.y + NODE_H / 2;
+    const x2 = b.x;
+    const y2 = b.y + NODE_H / 2;
+    const dx = Math.max(28, (x2 - x1) / 2);
+    return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+  }
+  const x1 = a.x + a.w / 2;
+  const x2 = b.x + b.w / 2;
+  const y1 = a.y + NODE_H;
+  const y2 = b.y + NODE_H;
+  const dip = Math.max(y1, y2) + 28 + Math.abs(x2 - x1) * 0.08;
+  return `M ${x1} ${y1} C ${x1} ${dip}, ${x2} ${dip}, ${x2} ${y2}`;
+}
+
+// Arc between the focus and one of its variables, bulging out on the left
+// (read: variable → focus) or the right (write: focus → variable).
+function paramArc(focus: Box, v: Box, kind: "read" | "write"): string {
+  const above = v.y < focus.y;
+  const fy = focus.y + (above ? 9 : NODE_H - 9);
+  const vy = v.y + NODE_H / 2;
+  const k = Math.min(COL_GAP * 0.85, 22 + Math.abs(vy - fy) * 0.22);
+  if (kind === "read") {
+    const x = focus.x;
+    return `M ${x} ${vy} C ${x - k} ${vy}, ${x - k} ${fy}, ${x} ${fy}`;
+  }
+  const x = focus.x + focus.w;
+  return `M ${x} ${fy} C ${x + k} ${fy}, ${x + k} ${vy}, ${x} ${vy}`;
+}
 
 function CallGraph({
   graph,
@@ -60,113 +126,439 @@ function CallGraph({
   focus: string | null;
   onFocus: (name: string) => void;
 }) {
+  const uid = useId().replace(/:/g, "");
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [hover, setHover] = useState<string | null>(null);
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() =>
+      setBox({ w: el.clientWidth, h: el.clientHeight }),
+    );
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const layout = useMemo(() => {
     if (!graph || graph.nodes.length === 0) return null;
-    // Group nodes by level, columns ordered left→right by ascending level.
+    // Functions grouped by level, columns ordered left→right by ascending level.
     const byLevel = new Map<number, GraphNode[]>();
+    const reads: GraphNode[] = [];
+    const writes: GraphNode[] = [];
     for (const n of graph.nodes) {
+      if (n.type === "param") {
+        (n.access === "read" ? reads : writes).push(n);
+        continue;
+      }
       const arr = byLevel.get(n.level) ?? [];
       arr.push(n);
       byLevel.set(n.level, arr);
     }
+    if (!byLevel.has(0)) return null;
     const levels = [...byLevel.keys()].sort((a, b) => a - b);
     for (const lvl of levels) {
       byLevel.get(lvl)!.sort((a, b) => a.name.localeCompare(b.name));
     }
-    const maxRows = Math.max(...levels.map((l) => byLevel.get(l)!.length));
-    const width = PAD * 2 + levels.length * NODE_W + (levels.length - 1) * COL_GAP;
-    const height = PAD * 2 + maxRows * NODE_H + (maxRows - 1) * ROW_GAP;
+    reads.sort((a, b) => a.name.localeCompare(b.name));
+    writes.sort((a, b) => a.name.localeCompare(b.name));
 
-    const pos = new Map<string, { x: number; y: number; node: GraphNode }>();
+    // One width per column (widest label, clamped) so columns stay aligned.
+    const colW = levels.map((lvl) =>
+      Math.max(
+        ...byLevel.get(lvl)!.map(nodeWidth),
+        ...(lvl === 0 ? [...reads, ...writes].map(nodeWidth) : []),
+      ),
+    );
+    const stack = (k: number) => (k ? k * NODE_H + (k - 1) * ROW_GAP + PARAM_GAP : 0);
+    const colH = (k: number) => k * NODE_H + (k - 1) * ROW_GAP;
+    // The focus stays vertically centred, so its column needs room for the
+    // taller of the two variable stacks on both sides.
+    const centreH = NODE_H + 2 * Math.max(stack(reads.length), stack(writes.length));
+    const height =
+      PAD * 2 +
+      Math.max(centreH, ...levels.map((l) => colH(byLevel.get(l)!.length)));
+    const width =
+      PAD * 2 + colW.reduce((s, w) => s + w, 0) + (levels.length - 1) * COL_GAP;
+
+    const pos = new Map<string, Box>();
+    let x = PAD;
     levels.forEach((lvl, ci) => {
+      const w = colW[ci];
       const col = byLevel.get(lvl)!;
-      const x = PAD + ci * (NODE_W + COL_GAP);
-      const colHeight = col.length * NODE_H + (col.length - 1) * ROW_GAP;
-      const y0 = (height - colHeight) / 2;
+      const y0 = (height - colH(col.length)) / 2;
       col.forEach((node, ri) => {
-        pos.set(node.name, { x, y: y0 + ri * (NODE_H + ROW_GAP), node });
+        pos.set(node.name, { x, y: y0 + ri * (NODE_H + ROW_GAP), w, node });
       });
+      if (lvl === 0) {
+        const fy = (height - NODE_H) / 2;
+        reads.forEach((node, i) => {
+          const fromFocus = reads.length - i;
+          pos.set(node.name, {
+            x, w, node,
+            y: fy - PARAM_GAP - fromFocus * NODE_H - (fromFocus - 1) * ROW_GAP,
+          });
+        });
+        writes.forEach((node, i) => {
+          pos.set(node.name, {
+            x, w, node,
+            y: fy + NODE_H + PARAM_GAP + i * (NODE_H + ROW_GAP),
+          });
+        });
+      }
+      x += w + COL_GAP;
     });
 
-    const edges = graph.edges
-      .map((e) => ({ a: pos.get(e.source), b: pos.get(e.target), verified: e.verified }))
-      .filter((e) => e.a && e.b) as {
-      a: { x: number; y: number };
-      b: { x: number; y: number };
-      verified?: boolean;
-    }[];
+    const centre = [...pos.values()].find((p) => p.node.type === "center")!;
+    const edges = graph.edges.flatMap((e) => {
+      const a = pos.get(e.source);
+      const b = pos.get(e.target);
+      if (!a || !b) return [];
+      const isParam = e.kind === "read" || e.kind === "write";
+      const v = e.kind === "read" ? a : b;
+      return [
+        {
+          a,
+          b,
+          kind: e.kind,
+          verified: e.verified,
+          d: isParam ? paramArc(centre, v, e.kind as "read" | "write") : edgePath(a, b),
+        },
+      ];
+    });
 
     return { pos, edges, width, height };
   }, [graph]);
 
   if (!layout) {
-    return <div className="cm-graph-empty">No call graph for this function.</div>;
+    return (
+      <div className="cm-graph-body" ref={bodyRef}>
+        <div className="cm-graph-empty">No call graph for this function.</div>
+      </div>
+    );
   }
 
   const { pos, edges, width, height } = layout;
+  // 1:1 when it fits; otherwise shrink (down to MIN_SCALE) and let it scroll.
+  const scale =
+    box.w && box.h
+      ? Math.max(MIN_SCALE, Math.min(1, (box.w - 8) / width, (box.h - 8) / height))
+      : 1;
+  const verification = !!graph?.edge_verification;
+
+  const edgeClass = (e: (typeof edges)[number]) => {
+    if (e.kind === "read") return "cm-edge-read";
+    if (e.kind === "write") return "cm-edge-write";
+    // #6C: with a .o dataset present, compiler-confirmed edges render solid
+    // and source-only edges dashed. Without a dataset every edge stays plain —
+    // no false "unverified" signal.
+    if (!verification) return "cm-edge-plain";
+    return e.verified ? "cm-edge-verified" : "cm-edge-unverified";
+  };
+  const markerFor = (cls: string) =>
+    `url(#${uid}-${cls === "cm-edge-unverified" ? "cm-edge-plain" : cls})`;
 
   return (
-    <svg
-      className="cm-graph-svg"
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="xMidYMid meet"
-      width="100%"
-      height="100%"
-    >
-      <g className="cm-edges">
-        {edges.map((e, i) => (
-          <line
-            key={i}
-            // #6C: with a .o dataset present, compiler-confirmed edges render
-            // solid and source-only edges dashed. Without a dataset every
-            // edge stays plain — no false "unverified" signal.
-            className={
-              graph?.edge_verification
-                ? e.verified
-                  ? "cm-edge-verified"
-                  : "cm-edge-unverified"
-                : undefined
-            }
-            x1={e.a.x + NODE_W}
-            y1={e.a.y + NODE_H / 2}
-            x2={e.b.x}
-            y2={e.b.y + NODE_H / 2}
-          >
-            {graph?.edge_verification && (
-              <title>
-                {e.verified
-                  ? "Verified by the object files (compiler-confirmed call)"
-                  : "Seen in source only — not confirmed by the object files " +
-                    "(possibly disabled by #ifdef, or an intra-file call the " +
-                    "relocations cannot see)"}
-              </title>
-            )}
-          </line>
-        ))}
-      </g>
-      <g className="cm-nodes">
-        {[...pos.values()].map(({ x, y, node }) => {
-          const isFocus = node.type === "center" || node.name === focus;
-          return (
-            <g
-              key={node.name}
-              className={"cm-node " + node.type + (isFocus ? " focus" : "")}
-              transform={`translate(${x},${y})`}
-              onDoubleClick={() => !isFocus && onFocus(node.name)}
-            >
-              <title>
-                {node.name}
-                {isFocus ? "" : " — double-click to focus"}
-              </title>
-              <rect rx={7} width={NODE_W} height={NODE_H} />
-              <text x={NODE_W / 2} y={NODE_H / 2}>
-                {node.name.length > 20 ? node.name.slice(0, 19) + "…" : node.name}
-              </text>
-            </g>
-          );
-        })}
-      </g>
+    <div className="cm-graph-body" ref={bodyRef}>
+      <svg
+        className={"cm-graph-svg" + (hover ? " hovering" : "")}
+        viewBox={`0 0 ${width} ${height}`}
+        width={width * scale}
+        height={height * scale}
+      >
+        <defs>
+          {["cm-edge-plain", "cm-edge-verified", "cm-edge-read", "cm-edge-write"].map(
+            (cls) => (
+              <marker
+                key={cls}
+                id={`${uid}-${cls}`}
+                className={"cm-arrow " + cls}
+                viewBox="0 0 10 10"
+                refX={9}
+                refY={5}
+                markerUnits="userSpaceOnUse"
+                markerWidth={10}
+                markerHeight={10}
+                orient="auto-start-reverse"
+              >
+                <path d="M1.5 1.5 L9 5 L1.5 8.5 Q3.6 5 1.5 1.5 Z" />
+              </marker>
+            ),
+          )}
+        </defs>
+        <g className="cm-edges">
+          {edges.map((e, i) => {
+            const cls = edgeClass(e);
+            const lit = hover !== null && (e.a.node.name === hover || e.b.node.name === hover);
+            return (
+              <path
+                key={i}
+                className={cls + (lit ? " lit" : "")}
+                d={e.d}
+                markerEnd={markerFor(cls)}
+              >
+                {(cls === "cm-edge-verified" || cls === "cm-edge-unverified") && (
+                  <title>
+                    {e.verified
+                      ? "Verified by the object files (compiler-confirmed call)"
+                      : "Seen in source only — not confirmed by the object files " +
+                        "(possibly disabled by #ifdef, or an intra-file call the " +
+                        "relocations cannot see)"}
+                  </title>
+                )}
+              </path>
+            );
+          })}
+        </g>
+        <g className="cm-nodes">
+          {[...pos.values()].map(({ x, y, w, node }) => {
+            const isParam = node.type === "param";
+            const isFocus = !isParam && (node.type === "center" || node.name === focus);
+            const tagW = isParam ? ACCESS_TAG_W : 0;
+            const access = node.access ?? "read";
+            return (
+              <g
+                key={node.type + ":" + node.name}
+                className={"cm-node " + node.type + (isFocus ? " focus" : "")}
+                transform={`translate(${x},${y})`}
+                onMouseEnter={() => setHover(node.name)}
+                onMouseLeave={() => setHover(null)}
+                onDoubleClick={() => !isFocus && !isParam && onFocus(node.name)}
+              >
+                <title>
+                  {isParam
+                    ? `${node.name} — variable ${ACCESS_TEXT[access]} ${focus ?? "the focus"}`
+                    : node.name + (isFocus ? "" : " — double-click to focus")}
+                </title>
+                <rect rx={isParam ? NODE_H / 2 : 8} width={w} height={NODE_H} />
+                {isParam && (
+                  <text className="cm-access" x={8 + tagW / 2} y={NODE_H / 2}>
+                    {ACCESS_TAG[access]}
+                  </text>
+                )}
+                <text x={tagW + (w - tagW) / 2} y={NODE_H / 2}>
+                  {fitLabel(node.name, w - tagW - 20)}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+      {graph?.truncated && (
+        <div className="cm-graph-note">
+          Showing {graph.max_nodes} of {graph.total_nodes} functions — reduce the
+          layers to see the full neighbourhood.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Call-graph view options (the sliders button in the graph header). Persisted
+// like the other UI prefs: localStorage + the durable backend mirror.
+// ---------------------------------------------------------------------------
+interface GraphOptions {
+  callers: boolean;
+  callees: boolean;
+  params: boolean;
+  back: number;
+  fwd: number;
+}
+
+const GRAPH_OPTS_KEY = "arch.codemap.graph";
+const MAX_LAYERS = 5; // backend cap on back/fwd
+const DEFAULT_GRAPH_OPTS: GraphOptions = {
+  callers: true,
+  callees: true,
+  params: true,
+  back: 1,
+  fwd: 1,
+};
+
+function loadGraphOptions(): GraphOptions {
+  try {
+    const raw = localStorage.getItem(GRAPH_OPTS_KEY);
+    return raw ? { ...DEFAULT_GRAPH_OPTS, ...JSON.parse(raw) } : DEFAULT_GRAPH_OPTS;
+  } catch {
+    return DEFAULT_GRAPH_OPTS;
+  }
+}
+
+function saveGraphOptions(o: GraphOptions) {
+  const v = JSON.stringify(o);
+  try {
+    localStorage.setItem(GRAPH_OPTS_KEY, v);
+  } catch {
+    /* storage disabled — the backend mirror still has it */
+  }
+  persistKey(GRAPH_OPTS_KEY, v);
+}
+
+function SlidersIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth="1.5" strokeLinecap="round">
+      <path d="M2 4h7M13 4h1M2 12h1M7 12h7" />
+      <circle cx="11" cy="4" r="2" />
+      <circle cx="5" cy="12" r="2" />
     </svg>
+  );
+}
+
+function LayerStepper({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: number;
+  disabled: boolean;
+  onChange: (n: number) => void;
+}) {
+  return (
+    <span className={"cm-stepper" + (disabled ? " off" : "")}>
+      <button
+        disabled={disabled || value <= 1}
+        onClick={() => onChange(value - 1)}
+        aria-label="Fewer layers"
+      >
+        −
+      </button>
+      <span className="cm-stepper-val">{value}</span>
+      <button
+        disabled={disabled || value >= MAX_LAYERS}
+        onClick={() => onChange(value + 1)}
+        aria-label="More layers"
+      >
+        +
+      </button>
+    </span>
+  );
+}
+
+function GraphOptionsPopover({
+  opts,
+  onChange,
+  onClose,
+}: {
+  opts: GraphOptions;
+  onChange: (o: GraphOptions) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (ref.current?.contains(t) || t.closest(".cm-opts-btn")) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  const set = (patch: Partial<GraphOptions>) => onChange({ ...opts, ...patch });
+  const toggle = (k: "callers" | "callees" | "params", label: string) => (
+    <label className="cm-opt-toggle">
+      <input type="checkbox" checked={opts[k]} onChange={(e) => set({ [k]: e.target.checked })} />
+      <span className="cm-switch" />
+      {label}
+    </label>
+  );
+
+  return (
+    <div className="cm-opts" ref={ref} role="dialog" aria-label="Call graph options">
+      <div className="cm-opts-title">Call Graph View</div>
+      <div className="cm-opt-row">
+        {toggle("callers", "Show callers")}
+        <LayerStepper value={opts.back} disabled={!opts.callers}
+          onChange={(back) => set({ back })} />
+      </div>
+      <div className="cm-opt-row">
+        {toggle("callees", "Show called")}
+        <LayerStepper value={opts.fwd} disabled={!opts.callees}
+          onChange={(fwd) => set({ fwd })} />
+      </div>
+      <div className="cm-opt-row">
+        {toggle("params", "Show parameters")}
+      </div>
+      <div className="cm-opts-foot">
+        <span>Layers = call levels followed in each direction.</span>
+        <button className="link-btn" onClick={() => onChange(DEFAULT_GRAPH_OPTS)}>
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Draggable divider between the Code Map panes. Widths persist across launches.
+// ---------------------------------------------------------------------------
+const LAYOUT_KEY = "arch.codemap.layout";
+const SIDEBAR_W = 240;
+
+function loadPaneLayout(): { sidebar: number; graph: number | null } {
+  try {
+    const raw = localStorage.getItem(LAYOUT_KEY);
+    const v = raw ? JSON.parse(raw) : {};
+    return {
+      sidebar: typeof v.sidebar === "number" ? v.sidebar : SIDEBAR_W,
+      graph: typeof v.graph === "number" ? v.graph : null,
+    };
+  } catch {
+    return { sidebar: SIDEBAR_W, graph: null };
+  }
+}
+
+function Splitter({
+  start,
+  onResize,
+  onDone,
+  onReset,
+}: {
+  // Width of the pane left of the divider when the drag begins.
+  start: () => number;
+  onResize: (w: number) => void;
+  onDone: () => void;
+  onReset: () => void;
+}) {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    const w0 = start();
+    const x0 = e.clientX;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("dragging");
+    document.body.style.cursor = "col-resize";
+    const move = (ev: PointerEvent) => onResize(w0 + ev.clientX - x0);
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      el.classList.remove("dragging");
+      document.body.style.cursor = "";
+      onDone();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  };
+  return (
+    <div
+      className="cm-splitter"
+      role="separator"
+      aria-orientation="vertical"
+      title="Drag to resize · double-click to reset"
+      onPointerDown={onPointerDown}
+      onDoubleClick={onReset}
+    />
   );
 }
 
@@ -295,6 +687,44 @@ export function CodeMap({
   } | null>(null);
   const [objPickerOpen, setObjPickerOpen] = useState(false);
 
+  const [graphOpts, setGraphOpts] = useState<GraphOptions>(loadGraphOptions);
+  const [optsOpen, setOptsOpen] = useState(false);
+  const updateGraphOpts = useCallback((o: GraphOptions) => {
+    setGraphOpts(o);
+    saveGraphOptions(o);
+  }, []);
+  const closeOpts = useCallback(() => setOptsOpen(false), []);
+
+  // Pane widths: function list (px) and call graph (px, null = default split).
+  const [panes, setPanes] = useState(loadPaneLayout);
+  const panesRef = useRef(panes);
+  panesRef.current = panes;
+  const sidebarRef = useRef<HTMLElement>(null);
+  const centerRef = useRef<HTMLDivElement>(null);
+  const graphPanelRef = useRef<HTMLDivElement>(null);
+  const savePanes = useCallback(() => {
+    const v = JSON.stringify(panesRef.current);
+    try {
+      localStorage.setItem(LAYOUT_KEY, v);
+    } catch {
+      /* ignore */
+    }
+    persistKey(LAYOUT_KEY, v);
+  }, []);
+  const resizeSidebar = (w: number) =>
+    setPanes((p) => ({
+      ...p,
+      sidebar: Math.round(Math.min(Math.max(w, 160), window.innerWidth * 0.45)),
+    }));
+  const resizeGraph = (w: number) => {
+    const total = centerRef.current?.clientWidth ?? 0;
+    setPanes((p) => ({
+      ...p,
+      // Keep both the graph and the source pane usable.
+      graph: Math.round(Math.min(Math.max(w, 240), Math.max(240, total - 300))),
+    }));
+  };
+
   const theme = useMonacoTheme();
 
   // Function-name set, read by the Monaco link provider / navigation (kept in a
@@ -375,20 +805,38 @@ export function CodeMap({
     onFocusConsumed?.();
   }, [focusTarget, onFocusConsumed]);
 
-  // Fetch graph + details + source whenever the focused function changes.
+  // Fetch the graph whenever the focus or the graph view options change.
+  const { callers, callees, params, back, fwd } = graphOpts;
+  useEffect(() => {
+    if (listState !== "ready" || !focused) return;
+    let alive = true;
+    const q = new URLSearchParams({
+      fn: focused,
+      back: String(callers ? back : 0),
+      fwd: String(callees ? fwd : 0),
+      params: String(params),
+    });
+    api
+      .get<CodeMapGraph>(`/codemap/graph?${q}`)
+      .then((g) => alive && setGraph(g))
+      .catch((e) => alive && toast(`Code Map: ${(e as Error).message}`));
+    return () => {
+      alive = false;
+    };
+  }, [focused, listState, callers, callees, params, back, fwd, toast]);
+
+  // Fetch details + source whenever the focused function changes.
   useEffect(() => {
     if (listState !== "ready" || !focused) return;
     let alive = true;
     const fn = encodeURIComponent(focused);
     (async () => {
       try {
-        const [g, d, s] = await Promise.all([
-          api.get<CodeMapGraph>(`/codemap/graph?fn=${fn}&back=1&fwd=1`),
+        const [d, s] = await Promise.all([
           api.get<FunctionDetail>(`/codemap/function/${fn}`),
           api.get<SourceResponse>(`/source/function/${fn}`),
         ]);
         if (!alive) return;
-        setGraph(g);
         setDetail(d);
         setSource(s);
       } catch (e) {
@@ -649,7 +1097,7 @@ export function CodeMap({
 
   return (
     <div className="cm-root">
-      <aside className="cm-sidebar">
+      <aside className="cm-sidebar" ref={sidebarRef} style={{ flexBasis: panes.sidebar }}>
         <div className="cm-status">
           <span
             className={"cm-stat-badge " + (relHasSource ? "on" : "off")}
@@ -717,21 +1165,46 @@ export function CodeMap({
           )}
         </div>
       </aside>
+      <Splitter
+        start={() => sidebarRef.current?.offsetWidth ?? panes.sidebar}
+        onResize={resizeSidebar}
+        onDone={savePanes}
+        onReset={() => {
+          setPanes((p) => ({ ...p, sidebar: SIDEBAR_W }));
+          setTimeout(savePanes);
+        }}
+      />
 
-      <div className="cm-center">
-        <div className="cm-graph-panel">
+      <div className="cm-center" ref={centerRef}>
+        <div
+          className="cm-graph-panel"
+          ref={graphPanelRef}
+          style={panes.graph != null ? { flex: `0 1 ${panes.graph}px` } : undefined}
+        >
           <div className="cm-panel-head">
             Call Graph
             <div className="cm-legend">
-              <span className="cm-leg caller">
-                <i /> Callers
-              </span>
+              {callers && (
+                <span className="cm-leg caller">
+                  <i /> Callers
+                </span>
+              )}
               <span className="cm-leg center">
                 <i /> Focus
               </span>
-              <span className="cm-leg callee">
-                <i /> Callees
-              </span>
+              {callees && (
+                <span className="cm-leg callee">
+                  <i /> Called
+                </span>
+              )}
+              {params && (
+                <span
+                  className="cm-leg param"
+                  title="Variables the focus reads (R, above) or writes (W, below)"
+                >
+                  <i /> Parameters
+                </span>
+              )}
               {graph?.edge_verification && (
                 <>
                   <span
@@ -749,11 +1222,33 @@ export function CodeMap({
                 </>
               )}
             </div>
+            <button
+              className={"cm-opts-btn" + (optsOpen ? " on" : "")}
+              title="Call graph view options"
+              aria-expanded={optsOpen}
+              onClick={() => setOptsOpen((o) => !o)}
+            >
+              <SlidersIcon />
+            </button>
           </div>
-          <div className="cm-graph-body">
-            <CallGraph graph={graph} focus={focused} onFocus={setFocused} />
-          </div>
+          {optsOpen && (
+            <GraphOptionsPopover
+              opts={graphOpts}
+              onChange={updateGraphOpts}
+              onClose={closeOpts}
+            />
+          )}
+          <CallGraph graph={graph} focus={focused} onFocus={setFocused} />
         </div>
+        <Splitter
+          start={() => graphPanelRef.current?.offsetWidth ?? 400}
+          onResize={resizeGraph}
+          onDone={savePanes}
+          onReset={() => {
+            setPanes((p) => ({ ...p, graph: null }));
+            setTimeout(savePanes);
+          }}
+        />
 
         <div className="cm-ide-panel">
           <div className="cm-panel-head">

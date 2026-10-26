@@ -167,18 +167,20 @@ export interface CodeMapResponse {
   define_count: number;
 }
 
-export type GraphNodeType = "center" | "caller" | "callee";
+export type GraphNodeType = "center" | "caller" | "callee" | "param";
 
 export interface GraphNode {
   name: string;
-  level: number; // <0 caller side, 0 focus, >0 callee side
+  level: number; // <0 caller side, 0 focus (and its params), >0 callee side
   type: GraphNodeType;
+  /** Param nodes only: how the focus function accesses the variable. */
+  access?: "read" | "write" | "readwrite";
 }
 
 export interface GraphEdge {
   source: string;
   target: string;
-  kind: "caller" | "callee";
+  kind: "caller" | "callee" | "read" | "write";
   /** #6C: true when the .o dataset confirmed this edge (relocation/inlining). */
   verified?: boolean;
 }

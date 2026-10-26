@@ -2,7 +2,9 @@
 Code Map + source router (plan §3.2).
 
     GET /api/codemap                        → function list + counts for a model/release map
-    GET /api/codemap/graph?fn=&back=&fwd=   → depth-limited call-graph nodes + edges
+    GET /api/codemap/graph?fn=&back=&fwd=&params=
+                                            → depth-limited call-graph nodes + edges
+                                              (+ the focus's read/written variables)
     GET /api/codemap/function/{name}        → function details (callers/callees/globals/tooltip)
     GET /api/source/function/{name}         → extracted source block for a function
 
@@ -15,6 +17,7 @@ implementation.
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -81,6 +84,32 @@ def _matched_globals(dataset: dict, fname: str) -> list[dict]:
     return sorted(out, key=lambda g: g["name"])[:50]
 
 
+# Cap on variable ("parameter") nodes added around the focus — keeps a
+# global-heavy function from swamping the call graph.
+MAX_PARAM_NODES = 30
+
+
+def _focus_variables(dataset: dict, fname: str) -> list[tuple[str, str]]:
+    """The variables `fname` reads/writes as ``[(name, access)]`` with access
+    "read" | "write" | "readwrite". The source scan also picks up macros and
+    enum constants, so #defines and function names are dropped, and when the
+    map knows its globals only accesses rooted at a known global are kept."""
+    f = dataset["functions"].get(fname, {})
+    reads = set(f.get("reads_vars") or [])
+    writes = set(f.get("writes_vars") or [])
+    known = dataset.get("global_variables", {})
+    skip = set(dataset.get("defines", {})) | set(dataset["functions"])
+    out = []
+    for name in sorted(reads | writes):
+        root = re.split(r"\s*(?:\.|->|\[)", name, maxsplit=1)[0].strip()
+        if name in skip or root in skip or (known and root not in known):
+            continue
+        access = ("readwrite" if name in reads and name in writes
+                  else "read" if name in reads else "write")
+        out.append((name, access))
+    return out[:MAX_PARAM_NODES]
+
+
 @router.get("/codemap")
 def codemap(model_id: Optional[int] = None, release_id: Optional[int] = None,
             state: AppState = Depends(get_state)) -> dict:
@@ -99,8 +128,9 @@ def codemap(model_id: Optional[int] = None, release_id: Optional[int] = None,
 
 @router.get("/codemap/graph")
 def codemap_graph(fn: Optional[str] = None,
-                  back: int = Query(1, ge=1, le=5),
-                  fwd: int = Query(1, ge=1, le=5),
+                  back: int = Query(1, ge=0, le=5),
+                  fwd: int = Query(1, ge=0, le=5),
+                  params: bool = False,
                   model_id: Optional[int] = None, release_id: Optional[int] = None,
                   state: AppState = Depends(get_state)) -> dict:
     def go():
@@ -132,6 +162,19 @@ def codemap_graph(fn: Optional[str] = None,
                     kind = "callee" if node_levels[v] >= 0 else "caller"
                     edges.append({"source": u, "target": v, "kind": kind,
                                   "verified": v in verified_set})
+
+        # Variables the focus reads (var → focus) and writes (focus → var),
+        # drawn as their own node kind beside the focus.
+        if params:
+            for var, access in _focus_variables(ds, focus):
+                if var in node_levels:
+                    continue
+                nodes.append({"name": var, "level": 0, "type": "param",
+                              "access": access})
+                if access != "write":
+                    edges.append({"source": var, "target": focus, "kind": "read"})
+                if access != "read":
+                    edges.append({"source": focus, "target": var, "kind": "write"})
 
         return {
             "focus": focus,

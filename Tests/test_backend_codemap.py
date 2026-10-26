@@ -50,7 +50,13 @@ CODE_MAP = {
                  "line_start": 17, "calls": ["func_a", "func_b"],
                  "return_type": "int", "signature": "int main(void)"},
         "func_a": {"address": 0x1100, "size": 32, "file": "src/main.c",
-                   "line_start": 7, "calls": ["func_c"], "return_type": "int"},
+                   "line_start": 7, "calls": ["func_c"], "return_type": "int",
+                   # Source scan output: a real global (read+write), a struct
+                   # path rooted at a global, a macro, and an unknown local-ish
+                   # identifier — only the first two are variables.
+                   "reads_vars": ["func_a_count", "main_status.mode", "MAX_LEN",
+                                  "tmp"],
+                   "writes_vars": ["func_a_count"]},
         "func_b": {"address": 0x1200, "size": 8, "file": "src/main.c",
                    "line_start": 13, "calls": []},
         "func_c": {"address": 0x1300, "size": 8, "file": "src/main.c",
@@ -124,6 +130,27 @@ def test_graph_backward_callers(client):
     assert {"func_c", "func_a", "main"} <= names
     caller = next(n for n in body["nodes"] if n["name"] == "func_a")
     assert caller["type"] == "caller"
+
+
+def test_graph_zero_depth_hides_a_side(client):
+    # back=0 → no callers of func_a; fwd=0 → no callees.
+    body = client.get("/api/codemap/graph?fn=func_a&back=0&fwd=1", headers=AUTH).json()
+    assert {n["name"] for n in body["nodes"]} == {"func_a", "func_c"}
+    body = client.get("/api/codemap/graph?fn=func_a&back=1&fwd=0", headers=AUTH).json()
+    assert {n["name"] for n in body["nodes"]} == {"func_a", "main"}
+
+
+def test_graph_params_adds_focus_variables(client):
+    body = client.get("/api/codemap/graph?fn=func_a", headers=AUTH).json()
+    assert all(n["type"] != "param" for n in body["nodes"])   # off by default
+
+    body = client.get("/api/codemap/graph?fn=func_a&params=true", headers=AUTH).json()
+    params = {n["name"]: n["access"] for n in body["nodes"] if n["type"] == "param"}
+    assert params == {"func_a_count": "readwrite", "main_status.mode": "read"}
+    kinds = {(e["source"], e["target"], e["kind"]) for e in body["edges"]}
+    assert ("func_a_count", "func_a", "read") in kinds
+    assert ("func_a", "func_a_count", "write") in kinds
+    assert ("main_status.mode", "func_a", "read") in kinds
 
 
 def test_function_details(client):

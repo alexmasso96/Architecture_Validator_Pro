@@ -3596,6 +3596,7 @@ button.update-pill:hover {
 /* ---- Left sidebar: searchable function list ---- */
 .cm-sidebar {
   flex: 0 0 240px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -3667,6 +3668,7 @@ button.update-pill:hover {
 }
 .cm-ide-panel {
   flex: 1 1 56%;
+  min-width: 260px;
 }
 .cm-panel-head {
   flex: none;
@@ -3695,9 +3697,13 @@ button.update-pill:hover {
   min-height: 0;
   overflow: auto;
   background: var(--v-raised);
+  display: flex;
+  position: relative;
 }
 .cm-graph-svg {
   display: block;
+  flex: none;
+  margin: auto; /* centred, but still scrollable when larger than the pane */
 }
 .cm-graph-empty,
 .cm-nosource {
@@ -3705,22 +3711,63 @@ button.update-pill:hover {
   color: var(--muted);
   font-size: 12px;
 }
-.cm-edges line {
+.cm-graph-note {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.cm-edges path {
+  fill: none;
   stroke: var(--cm-edge);
-  stroke-width: 1.4;
-  opacity: 0.6;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  opacity: 0.75;
+  transition: opacity 0.12s ease, stroke-width 0.12s ease;
 }
 /* #6C: edge verification against the .o dataset (only applied when a dataset
    was present at build time). Verified = compiler-confirmed; unverified =
    seen in source only (possibly an #ifdef ghost). */
-.cm-edges line.cm-edge-verified {
+.cm-edges path.cm-edge-verified {
   stroke: var(--accent, #2f7d4f);
-  opacity: 0.85;
+  opacity: 0.9;
   stroke-width: 1.7;
 }
-.cm-edges line.cm-edge-unverified {
+.cm-edges path.cm-edge-unverified {
   stroke-dasharray: 5 4;
-  opacity: 0.45;
+  opacity: 0.5;
+}
+.cm-edges path.cm-edge-read {
+  stroke: var(--cm-param);
+}
+.cm-edges path.cm-edge-write {
+  stroke: var(--cm-write);
+}
+/* Hovering a node spotlights its own edges. */
+.cm-graph-svg.hovering .cm-edges path {
+  opacity: 0.18;
+}
+.cm-graph-svg.hovering .cm-edges path.lit {
+  opacity: 1;
+  stroke-width: 2.2;
+}
+.cm-arrow path {
+  fill: var(--cm-edge);
+  stroke: none;
+}
+.cm-arrow.cm-edge-verified path {
+  fill: var(--accent, #2f7d4f);
+}
+.cm-arrow.cm-edge-read path {
+  fill: var(--cm-param);
+}
+.cm-arrow.cm-edge-write path {
+  fill: var(--cm-write);
 }
 .cm-node rect {
   fill: var(--card);
@@ -3741,6 +3788,23 @@ button.update-pill:hover {
 .cm-node.caller rect,
 .cm-node.callee rect {
   cursor: pointer;
+}
+.cm-node.param rect {
+  fill: var(--cm-param-bg);
+  stroke: var(--cm-param);
+  stroke-dasharray: 4 2.5;
+}
+.cm-node.param:hover rect {
+  fill: var(--cm-param-bg-h);
+}
+.cm-node.param text {
+  font-size: 11.5px;
+}
+.cm-node text.cm-access {
+  fill: var(--cm-param);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
 }
 .cm-node.caller rect {
   fill: var(--cm-caller-bg);
@@ -3828,7 +3892,7 @@ button.update-pill:hover {
 }
 .cm-det-cols {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 .cm-det-h {
@@ -3853,6 +3917,11 @@ button.update-pill:hover {
   font-family: var(--v-mono);
   font-size: 11px;
   cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
 }
 .cm-chip:hover {
   background: var(--hover);
@@ -4783,7 +4852,11 @@ button.update-pill:hover {
   --cm-callee-bg: #ece9fc;
   --cm-callee-bg-h: #e0dbf9;
   --cm-focus: var(--accent);
-  --cm-edge: #bcb9b4;
+  --cm-edge: #a9a6a0;
+  --cm-param: #c27803;
+  --cm-param-bg: #fdf4e3;
+  --cm-param-bg-h: #fae8c6;
+  --cm-write: #d9467a;
 }
 :root[data-theme="dark"] {
   --cm-caller: #2dd4bf;
@@ -4792,12 +4865,17 @@ button.update-pill:hover {
   --cm-callee: #a78bfa;
   --cm-callee-bg: rgba(167, 139, 250, 0.16);
   --cm-callee-bg-h: rgba(167, 139, 250, 0.28);
-  --cm-edge: #56565c;
+  --cm-edge: #6a6a72;
+  --cm-param: #fbbf24;
+  --cm-param-bg: rgba(251, 191, 36, 0.12);
+  --cm-param-bg-h: rgba(251, 191, 36, 0.24);
+  --cm-write: #f472b6;
 }
 
 /* Availability badges (Source / Mind Map) in the Code Map sidebar. */
 .cm-status {
   display: flex;
+  flex-wrap: wrap;
   gap: 7px;
   padding: 8px 10px 2px;
 }
@@ -5108,6 +5186,172 @@ button.update-pill:hover {
 .cm-leg.callee i {
   background: var(--cm-callee-bg);
   border-color: var(--cm-callee);
+}
+.cm-leg.param i {
+  background: var(--cm-param-bg);
+  border: 1.4px dashed var(--cm-param);
+  border-radius: 6px;
+}
+
+/* Draggable pane dividers (function list | call graph | source). */
+.cm-splitter {
+  flex: none;
+  width: 5px;
+  margin: 0 -2px;
+  position: relative;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+}
+.cm-splitter::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  transition: background 0.12s ease;
+}
+.cm-splitter:hover::after,
+.cm-splitter.dragging::after {
+  background: var(--accent);
+}
+/* Call-graph options button + popover. */
+.cm-graph-panel {
+  position: relative;
+}
+.cm-opts-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.cm-opts-btn:hover,
+.cm-opts-btn.on {
+  color: var(--text);
+  background: var(--hover);
+  border-color: var(--border);
+}
+.cm-opts {
+  position: absolute;
+  top: 34px;
+  right: 8px;
+  z-index: 20;
+  width: 250px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  font-size: 12px;
+  color: var(--text);
+}
+.cm-opts-title {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.cm-opt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 30px;
+}
+.cm-opt-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.cm-opt-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.cm-switch {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--grey, #bbb);
+  transition: background 0.15s ease;
+  flex: none;
+}
+.cm-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+.cm-opt-toggle input:checked + .cm-switch {
+  background: var(--accent);
+}
+.cm-opt-toggle input:checked + .cm-switch::after {
+  transform: translateX(12px);
+}
+.cm-opt-toggle input:focus-visible + .cm-switch {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.cm-stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cm-stepper.off {
+  opacity: 0.45;
+}
+.cm-stepper button {
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.cm-stepper button:hover:not(:disabled) {
+  background: var(--hover);
+}
+.cm-stepper button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.cm-stepper-val {
+  min-width: 22px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+.cm-opts-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 7px;
+  border-top: 1px solid var(--sep);
+  font-size: 10.5px;
+  color: var(--muted);
 }
 
 /* ============================================================ */
