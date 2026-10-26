@@ -8,6 +8,7 @@ import type {
 } from "../api/types";
 import { FileIcon, FolderIcon } from "./Icons";
 import { getFileExplorer } from "../settings";
+import { SYMBOL_IMPORT_EXTS } from "../fileTypes";
 import { isDesktop, nativePickFile, nativePickFolder, nativeSaveFile } from "../native";
 
 const DEFAULT_COL_W = 236;
@@ -16,7 +17,7 @@ type PickerMode = "open" | "new" | "import" | "folder";
 
 function extsFor(mode: PickerMode, exts?: string[]): string {
   if (exts && exts.length) return exts.join(",");
-  if (mode === "import") return ".elf,.json";
+  if (mode === "import") return SYMBOL_IMPORT_EXTS.join(",");
   // "folder" navigates directories only — pass a sentinel that matches no file
   // so the listing surfaces folders alone (dirs are always listed by /api/fs).
   if (mode === "folder") return ".__no_files__";
@@ -77,7 +78,7 @@ export function FolderPicker({
           // The native Save dialog may return a name without our extension.
           if (path && !path.toLowerCase().endsWith(".arch")) path += ".arch";
         } else {
-          path = await nativePickFile(exts ?? (mode === "import" ? [".elf", ".json"] : [".arch"]));
+          path = await nativePickFile(exts ?? (mode === "import" ? SYMBOL_IMPORT_EXTS : [".arch"]));
         }
         if (cancelled) return;
         // Native open has no view/edit toggle — match the custom picker's
@@ -252,7 +253,7 @@ export function FolderPicker({
   const headerTitle =
     title ??
     (mode === "open" ? "Open Project"
-      : mode === "import" ? "Import — choose an .elf or .json"
+      : mode === "import" ? "Import — choose an ELF image (.elf/.out/.abs/.axf) or .json"
         : mode === "folder" ? "Choose a source folder"
           : "New Project — choose location");
 
@@ -416,7 +417,7 @@ export function FolderPicker({
             <span className="picker-mode">
               {selectedFile
                 ? selectedFile.split(/[\\/]/).pop()
-                : hint ?? "Select an .elf or .json file"}
+                : hint ?? "Select an ELF image (.elf/.out/.abs/.axf) or a .json cache"}
             </span>
           )}
           <div className="spacer" />

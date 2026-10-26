@@ -3,15 +3,22 @@ import { api, ApiError } from "../api/client";
 import type { ColumnSpec, ModelsResponse } from "../api/types";
 import { SEARCH_KEYS } from "../columns";
 import { FolderPicker } from "./FolderPicker";
+import { isSymbolFileName, stripSymbolExt, SYMBOL_IMPORT_EXTS } from "../fileTypes";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Poll a started job until it terminates; throw on failure/cancel.
-async function waitForJob(jobId: string, failMsg: string): Promise<void> {
+// Poll a started job until it terminates; throw on failure/cancel. Returns the
+// job's result payload.
+async function waitForJob(
+  jobId: string,
+  failMsg: string,
+): Promise<Record<string, unknown> | undefined> {
   for (;;) {
     await sleep(250);
-    const j = await api.get<{ status: string; error?: string }>(`/jobs/${jobId}`);
-    if (j.status === "done") return;
+    const j = await api.get<{ status: string; error?: string; result?: Record<string, unknown> }>(
+      `/jobs/${jobId}`,
+    );
+    if (j.status === "done") return j.result;
     if (j.status === "failed" || j.status === "cancelled")
       throw new Error(j.error || failMsg);
   }
@@ -20,7 +27,7 @@ const DONT = "__ignore"; // sentinel: do not import this column
 const CREATE = "__create"; // sentinel: create a new column named after the source
 
 interface AnalyzeResult {
-  format: "excel" | "interface_export" | "csv";
+  format: "excel" | "interface_export" | "csv" | "elf";
   sheets?: string[];
   columns?: string[];
   path_col?: string;
@@ -85,29 +92,37 @@ export function ImportWizard({
   const searchCol = columns.find((c) => SEARCH_KEYS.includes(c.type))?.name ?? null;
 
   // ---- entry: file chosen ----
+  // A new ELF is a new software version. If a release (ELF) already exists,
+  // offer to baseline the current table+ELF first; otherwise go straight to
+  // naming the release (first/onboarding import — nothing to baseline yet).
+  function startReleaseImport(path: string) {
+    const base = path.split(/[\\/]/).pop() ?? "release";
+    const name = stripSymbolExt(base);
+    if (currentRelease) {
+      // Pre-fill a valid baseline name so Create Baseline is active immediately.
+      // The snapshot is mandatory (ASPICE) — there is no skip.
+      setBaselineName(`${currentRelease} (baseline)`);
+      setStep({ k: "elf_baseline", file: path, name });
+    } else {
+      setStep({ k: "release", file: path, name });
+    }
+  }
+
   async function onFile(path: string) {
     setErr(null);
-    const lower = path.toLowerCase();
-    if (lower.endsWith(".elf") || lower.endsWith(".json")) {
-      // A new ELF is a new software version. If a release (ELF) already exists,
-      // offer to baseline the current table+ELF first; otherwise go straight to
-      // naming the release (first/onboarding import — nothing to baseline yet).
-      const base = path.split(/[\\/]/).pop() ?? "release";
-      const name = base.replace(/\.(elf|json)$/i, "");
-      if (currentRelease) {
-        // Pre-fill a valid baseline name so Create Baseline is active immediately.
-        // The snapshot is mandatory (ASPICE) — there is no skip.
-        setBaselineName(`${currentRelease} (baseline)`);
-        setStep({ k: "elf_baseline", file: path, name });
-      } else {
-        setStep({ k: "release", file: path, name });
-      }
+    if (isSymbolFileName(path)) {
+      startReleaseImport(path);
       return;
     }
     // tabular → analyze (detects InterfaceExport multi-model), then straight to mapping.
     setStep({ k: "analyzing" });
     try {
       const a = await api.post<AnalyzeResult>("/import/analyze", { file_path: path });
+      if (a.format === "elf") {
+        // An ELF image without a recognised extension (some toolchains write none).
+        startReleaseImport(path);
+        return;
+      }
       setAnalysis(a);
       await gotoMapping(path, a);
     } catch (e) {
@@ -128,7 +143,7 @@ export function ImportWizard({
         file_path: file,
         release_id: rel.id,
       });
-      await waitForJob(started.job_id, "Import failed.");
+      const imported = await waitForJob(started.job_id, "Import failed.");
 
       // Apply the freshly-imported symbols to every model's Match columns so the
       // table is populated immediately — no manual Re-match needed.
@@ -143,7 +158,18 @@ export function ImportWizard({
       }
 
       onChanged();
-      setStep({ k: "done", msg: `Release “${name}” imported and symbols matched.` });
+      const nFn = Number(imported?.functions ?? -1);
+      setStep({
+        k: "done",
+        msg:
+          nFn === 0
+            ? `Release “${name}” imported, but NO functions were found in the file — ` +
+              "function matches will stay empty. Check that it is a linked image with a " +
+              "symbol table (not stripped)."
+            : `Release “${name}” imported (${nFn >= 0 ? `${nFn} functions` : "symbols"}` +
+              `${imported?.symbol_prefix_stripped ? ", leading '_' removed from names" : ""}` +
+              ") and symbols matched.",
+      });
     } catch (e) {
       setErr(e instanceof ApiError ? e.detail : String(e));
       setStep({ k: "release", file, name });
@@ -284,8 +310,8 @@ export function ImportWizard({
     return (
       <FolderPicker
         mode="import"
-        exts={[".elf", ".json", ".xlsx", ".xls", ".csv"]}
-        title="Import — choose a release (.elf/.json) or ports (.xlsx/.csv)"
+        exts={[...SYMBOL_IMPORT_EXTS, ".xlsx", ".xls", ".csv"]}
+        title="Import — choose a release (ELF .elf/.out/.abs/.axf or .json) or ports (.xlsx/.csv)"
         hint="Select an ELF/JSON release or an Excel/CSV port file"
         onCancel={onClose}
         onConfirm={(path) => onFile(path)}

@@ -10,6 +10,11 @@ Open the **Import** toolbar icon in the title bar and pick your file. The import
 
 ## Supported formats
 
+### Firmware images (symbols)
+A linked firmware image is an ELF file, whatever its extension: `.elf`, `.out`, `.abs` (Renesas CC-RH) or `.axf` (Arm/Keil) are all offered in the file pickers, and the Import wizard recognises an ELF by its content, so an image with an unusual or missing extension is imported as a new release too. A `.json` symbol cache exported by the app works the same way.
+
+Some toolchains, notably **Renesas CC-RH / V850 for RH850**, put an underscore in front of every C symbol (`Bms_Init` is stored as `_Bms_Init`). The app detects this per file and removes the one leading underscore, so symbols match your architecture names and the C source; the import result mentions it when it happens. If an import finds no functions at all (for example a stripped image without a symbol table), the result says so.
+
 ### Excel / CSV
 Standard spreadsheets are supported (`.xlsx`, `.xls`, `.csv`). In the classic **sheet-per-model** layout, each worksheet becomes its own architecture model and its rows become ports — handy when you maintain your architecture in Excel.
 

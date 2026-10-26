@@ -62,7 +62,9 @@ export default function App() {
   const toast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToastMsg(null), 2600);
+    // Longer messages (warnings) stay up long enough to be read.
+    const ms = Math.min(12000, Math.max(2600, msg.length * 60));
+    toastTimer.current = window.setTimeout(() => setToastMsg(null), ms);
   }, []);
 
   // Lock / takeover events flip the project to view-only — refresh status so the
@@ -197,6 +199,7 @@ export default function App() {
           onOpenPrefs={() => setPrefsOpen(true)}
           update={update}
           onShowChangelog={showChangelog}
+          onNotice={toast}
         />
         {prefsOpen && (
           <Preferences

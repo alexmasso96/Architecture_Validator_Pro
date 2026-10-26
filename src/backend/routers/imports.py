@@ -12,7 +12,8 @@ into per-model row sets (create/append) in a single server-side step — the
 browser can't replicate the P10-filter / operation-expansion / path→model logic.
 
     POST /api/import/analyze {file_path}
-      → {format: "excel"|"interface_export"|"csv", sheets?, path_col?, required_col?, ops_col?, models?}
+      → {format: "elf"|"excel"|"interface_export"|"csv", sheets?, path_col?, required_col?, ops_col?, models?}
+        ("elf" = an ELF image by content, whatever its extension)
     POST /api/import/interface_export {file_path, col_mapping, path_col, ops_col?, required_col?}
       → {models: [{name, created, added}], total_models, total_added, model_ids}
 """
@@ -66,6 +67,9 @@ def analyze(body: AnalyzeBody) -> dict:
     )
 
     try:
+        with open(path, "rb") as fh:
+            if fh.read(4) == b"\x7fELF":
+                return {"format": "elf"}
         is_interface_export, path_col = detect_interface_export_format(path)
         if is_interface_export:
             columns, rows = read_file(path)

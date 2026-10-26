@@ -119,6 +119,58 @@ def is_compiler_internal(name: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Leading-underscore symbol convention
+# ---------------------------------------------------------------------------
+# Some embedded toolchains — notably Renesas CC-RH / NEC V850 for RH850 —
+# prefix EVERY C symbol with "_" in the ELF symbol table (`Bms_Init` → `_Bms_Init`)
+# while the DWARF debug info keeps the plain C name. Left alone, the "_" makes
+# every function look compiler-internal (dropped by keep_function_name), the
+# DWARF parameter join misses, and nothing matches the architecture's C names.
+# Detected per file; when present, ONE leading "_" is stripped from symbol
+# names so everything downstream sees the C names.
+LEADING_UNDERSCORE_MIN_RATIO = 0.9
+LEADING_UNDERSCORE_MIN_FUNCS = 3
+
+
+def uses_leading_underscore(func_names) -> bool:
+    """True when (nearly) all defined function symbols start with '_' — the
+    signature of a leading-underscore toolchain. Ordinary ELFs have only a few
+    (``_start``, ``__aeabi_*``…)."""
+    names = [n for n in func_names if n]
+    if len(names) < LEADING_UNDERSCORE_MIN_FUNCS:
+        return False
+    under = sum(1 for n in names if n.startswith("_"))
+    return under / len(names) >= LEADING_UNDERSCORE_MIN_RATIO
+
+
+def strip_leading_underscore(name: str) -> str:
+    return name[1:] if name and name.startswith("_") and len(name) > 1 else name
+
+
+def normalize_native_output(data: dict) -> bool:
+    """Apply the leading-underscore normalization to rust_elf_parser JSON in
+    place (symbols, functions, call edges). Returns True when names were
+    rewritten; records it as ``data["symbol_prefix_stripped"]``. DWARF-derived
+    names (structures, globals, inlined functions) are already plain."""
+    defined_funcs = [s.get("name", "") for s in data.get("symbols") or []
+                     if s.get("symbol_type") == "STT_FUNC"
+                     and s.get("section") not in ("UNDEF", "ABS", "", None)]
+    if not uses_leading_underscore(defined_funcs):
+        return False
+    for s in data.get("symbols") or []:
+        s["name"] = strip_leading_underscore(s.get("name", ""))
+    for f in data.get("functions") or []:
+        f["name"] = strip_leading_underscore(f.get("name", ""))
+    for e in data.get("call_edges") or []:
+        e["from"] = strip_leading_underscore(e.get("from", ""))
+        e["to"] = strip_leading_underscore(e.get("to", ""))
+    data["symbol_prefix_stripped"] = "_"
+    logger.info("Leading-underscore symbol convention detected (e.g. Renesas "
+                "CC-RH): stripped one '_' from symbol names.")
+    return True
+
+
 def keep_function_name(name: str) -> bool:
     """Whether a function symbol should be kept in the Code Map function set.
 
@@ -196,6 +248,9 @@ class ELFParser:
         self._machine_arch: Optional[str] = None
         self.md5_hash = None
         self.parser_backend = "pyelftools"
+        # Leading-underscore symbol convention (Renesas CC-RH style): None until
+        # determined for the loaded file; True → names were stripped of one "_".
+        self.symbol_prefix_stripped: Optional[bool] = None
 
         # DB-backed mode (set after flush_to_db or load_from_db)
         self._db = None
@@ -204,6 +259,7 @@ class ELFParser:
     def load_elf(self, elf_path: str):
         """Loads and parses an ELF file."""
         self.elf_path = Path(elf_path)
+        self.symbol_prefix_stripped = None
         
         # Bypass existence/validation in test mode if file is missing or invalid (Feature 6)
         if getattr(self, 'test_mode', False):
@@ -462,6 +518,7 @@ class ELFParser:
         try:
             json_str = rust_elf_parser.parse_elf(str(self.elf_path))
             data = json.loads(json_str)
+            self.symbol_prefix_stripped = normalize_native_output(data)
             if not self._native_result_is_sane(data):
                 logger.warning(
                     "Native parser output for %s failed the sanity check "
@@ -563,6 +620,7 @@ class ELFParser:
             return
         logger.info("Extracting symbols from ELF file")
         elffile = self.elf_file
+        strip = self._detect_leading_underscore()
         for section in elffile.iter_sections():
             if isinstance(section, SymbolTableSection):
                 for symbol in section.iter_symbols():
@@ -574,10 +632,30 @@ class ELFParser:
                         except: section_name = 'UNKNOWN'
                     
                     yield Symbol(
-                        name=symbol.name, address=symbol['st_value'], size=symbol['st_size'],
+                        name=(strip_leading_underscore(symbol.name) if strip
+                              else symbol.name),
+                        address=symbol['st_value'], size=symbol['st_size'],
                         symbol_type=symbol['st_info']['type'], binding=symbol['st_info']['bind'],
                         section=section_name
                     )
+
+    def _detect_leading_underscore(self) -> bool:
+        """Python-backend twin of normalize_native_output: one pass over the
+        symbol table's defined functions (cached per file)."""
+        if self.symbol_prefix_stripped is not None:
+            return self.symbol_prefix_stripped
+        names = []
+        for section in self.elf_file.iter_sections():
+            if isinstance(section, SymbolTableSection):
+                for sym in section.iter_symbols():
+                    if (sym.name and sym['st_info']['type'] == 'STT_FUNC'
+                            and sym['st_shndx'] not in ('SHN_UNDEF', 'SHN_ABS')):
+                        names.append(sym.name)
+        self.symbol_prefix_stripped = uses_leading_underscore(names)
+        if self.symbol_prefix_stripped:
+            logger.info("Leading-underscore symbol convention detected (e.g. "
+                        "Renesas CC-RH): stripped one '_' from symbol names.")
+        return self.symbol_prefix_stripped
 
     def extract_symbols(self):
         """Public method to populate symbols list."""
@@ -934,6 +1012,7 @@ class ELFParser:
                 json_str = rust_elf_parser.parse_elf(str(self.elf_path))
                 logger.info("Decoding parsed ELF data…")
                 data = json.loads(json_str)
+                self.symbol_prefix_stripped = normalize_native_output(data)
 
                 if not self._native_result_is_sane(data):
                     # KI-01: corrupted-but-parseable output (a stale pre-fix

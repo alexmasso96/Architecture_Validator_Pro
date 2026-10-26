@@ -872,9 +872,14 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
     let mut inlined_functions: Vec<InlinedCall> = inlined_set.into_iter().collect();
     inlined_functions.sort();
 
-    // Populate function parameters in the sequential output list
+    // Populate function parameters in the sequential output list. DWARF names
+    // are plain C names; toolchains that prefix symbols with "_" (Renesas
+    // CC-RH / V850) need the fallback or no function would get parameters.
     for func in &mut functions {
-        if let Some(params) = func_params_map.get(&func.name) {
+        let params = func_params_map.get(&func.name).or_else(|| {
+            func.name.strip_prefix('_').and_then(|plain| func_params_map.get(plain))
+        });
+        if let Some(params) = params {
             func.parameters = params.clone();
         }
     }

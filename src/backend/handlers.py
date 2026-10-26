@@ -429,6 +429,9 @@ def _make_import_objects(state: AppState):
                 content_hash = hashlib.md5(content).hexdigest()
                 del content
                 data = _json.loads(rust_elf_parser.parse_elf(str(p)))
+                # Renesas-style "_name" symbols → plain C names, so the edges
+                # line up with the code map and the ELF's normalized names.
+                ep.normalize_native_output(data)
             except ValueError as e:
                 status = ("lto" if "LTO object" in str(e)
                           else f"error: {str(e)[:200]}")
@@ -559,9 +562,10 @@ def _detect_import_kind(file_path: str) -> str:
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".json":
         return "json"
-    if ext == ".elf":
+    if ext in (".elf", ".out", ".abs", ".axf"):
         return "elf"
-    raise ProjectError("Unsupported import file — expected an .elf binary or a .json symbol cache.")
+    raise ProjectError("Unsupported import file — expected an ELF image "
+                       "(.elf/.out/.abs/.axf) or a .json symbol cache.")
 
 
 def _make_import_symbols(state: AppState):
@@ -598,5 +602,6 @@ def _make_import_symbols(state: AppState):
                     break
         state._matchers.pop(elf_hash, None)
         return {"kind": kind, "elf_hash": elf_hash, "functions": fn_count,
-                "release_id": release_id}
+                "release_id": release_id,
+                "symbol_prefix_stripped": bool(getattr(parser, "symbol_prefix_stripped", False))}
     return handler

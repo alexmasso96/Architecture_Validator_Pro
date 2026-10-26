@@ -81,11 +81,13 @@ export function StartScreen({
   onOpenPrefs,
   update,
   onShowChangelog,
+  onNotice,
 }: {
   onOpened: (s: ProjectStatus) => void;
   onOpenPrefs: () => void;
   update: UpdateInfo;
   onShowChangelog: () => void;
+  onNotice?: (msg: string) => void;
 }) {
   const [recents, setRecents] = useState<RecentProject[]>(getRecents());
   const [picker, setPicker] = useState<"open" | "new" | null>(null);
@@ -156,17 +158,29 @@ export function StartScreen({
         file_path: file,
         release_id: rel.id,
       });
+      let functions = -1;
       for (;;) {
         await sleep(250);
-        const j = await api.get<{ status: string; error?: string }>(
-          `/jobs/${started.job_id}`,
-        );
-        if (j.status === "done") break;
+        const j = await api.get<{
+          status: string;
+          error?: string;
+          result?: { functions?: number };
+        }>(`/jobs/${started.job_id}`);
+        if (j.status === "done") {
+          functions = Number(j.result?.functions ?? -1);
+          break;
+        }
         if (j.status === "failed" || j.status === "cancelled")
           throw new Error(j.error || "Import failed.");
       }
       setPhase(null);
       await finishOpen(createdPath);
+      if (functions === 0) {
+        onNotice?.(
+          "Imported, but NO functions were found in the file — function matches will " +
+            "stay empty. Check that it is a linked image with a symbol table (not stripped).",
+        );
+      }
     } catch (e) {
       setErr(e instanceof ApiError ? e.detail : String(e));
       setImportMsg(null);
@@ -299,7 +313,9 @@ export function StartScreen({
               <button className="choose-card" disabled={busy} onClick={() => setPhase("import")}>
                 <span className="choose-icon">⇪</span>
                 <span className="choose-title">Import</span>
-                <span className="choose-sub">Load symbols from an .elf or .json.</span>
+                <span className="choose-sub">
+                  Load symbols from an ELF image (.elf/.out/.abs/.axf) or a .json cache.
+                </span>
               </button>
             </div>
           </div>

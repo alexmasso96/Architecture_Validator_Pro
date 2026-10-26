@@ -47,6 +47,20 @@ In on-machine validation. Version numbers are bumped when the release is cut.
 ## 🐛 Fixed (table)
 - Renaming a release **Result** column no longer loses its link to the release.
 
+## 🐛 Fixed (Renesas RH850 images)
+- **Functions from Renesas CC-RH / V850 builds are no longer dropped.** These
+  toolchains prefix every C symbol with `_` (`Bms_Init` → `_Bms_Init`), which
+  made every function look compiler-internal: nothing was imported and all
+  function matches stayed empty. The convention is now detected per file and
+  one leading `_` is removed, so names match the architecture, the C source and
+  the debug info. Parameters attach again, and the native parser is no longer
+  mistaken for corrupted output (no slow fallback).
+- **`.out`, `.abs` and `.axf` images** are offered in every file picker next to
+  `.elf`. The Import wizard recognises an ELF by its content, so an image with
+  an unusual or missing extension is imported as a release instead of being
+  read as a spreadsheet.
+- An import that finds **no functions** now says so instead of reporting success.
+
 ## 🤖 New: self-hosted AI (Ollama and vLLM)
 - Point AI Generation and AI Chat at your own **Ollama** or **vLLM** server
   (Preferences → AI Settings) so source code never leaves your infrastructure.
