@@ -5982,3 +5982,35 @@ button.update-pill:hover {
 .demo-chat-typing { color: var(--muted); }
 .demo-chat-composer { flex: none; display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-top: 1px solid var(--border); }
 .demo-chat-input { flex: 1 1 auto; padding: 6px 10px; font-size: 11px; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+
+/* Self-hosted AI providers (Ollama / vLLM) */
+.ai-selfhost {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ai-selfhost-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ai-selfhost-opts label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.ai-prov-key.ai-selfhost-ctx {
+  flex: none;
+  width: 90px;
+}
+.ai-selfhost-test {
+  font-size: 12px;
+}
+.ai-selfhost-test.ok {
+  color: var(--green, #2f7d4f);
+}
+.ai-selfhost-test.err {
+  color: var(--red);
+}

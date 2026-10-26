@@ -13,6 +13,10 @@ Providers (see AI_INTEGRATION_PLAN.md, Phase 2):
   * AnthropicProvider — Claude direct, by API key (api.anthropic.com).
   * OpenAIProvider    — GPT direct, by API key (api.openai.com).
   * GeminiProvider    — Google Gemini, by API key (generativelanguage.googleapis).
+  * OllamaProvider    — self-hosted Ollama via its native /api/chat (base URL;
+                        context size configurable — see the class docstring).
+  * VLLMProvider      — self-hosted vLLM via its OpenAI-compatible API (base
+                        URL + optional key).
 
 Secrets come from Logic_AI_Credentials (encrypted per-user store) — never from
 the project DB.
@@ -726,6 +730,239 @@ class GeminiProvider(AIProvider):
 
 
 # ---------------------------------------------------------------------------
+# Self-hosted (Ollama / vLLM)
+# ---------------------------------------------------------------------------
+# Configured per machine with a base URL instead of an API account. Source sent
+# to a self-hosted model stays on infrastructure the user controls — the reason
+# these exist alongside the cloud providers.
+
+_DISCOVERY_TIMEOUT = 3      # an unreachable server must not stall the settings UI
+_DISCOVERY_TTL = 60.0       # seconds a discovered model list is reused
+_DISCOVERY_FAIL_TTL = 15.0  # an unreachable server is retried at most this often
+
+
+def normalize_base_url(url: str) -> str:
+    """Strip whitespace, trailing slashes and a trailing /v1 so callers can
+    append API paths uniformly (users paste both forms)."""
+    u = (url or "").strip().rstrip("/")
+    if u.endswith("/v1"):
+        u = u[:-3]
+    return u
+
+
+def validate_base_url(url: str) -> Optional[str]:
+    """Error message for an unusable base URL, or None when it is fine."""
+    u = normalize_base_url(url)
+    if not re.match(r"^https?://[^\s/]+", u):
+        return "Base URL must start with http:// or https:// (e.g. http://localhost:11434)."
+    return None
+
+
+class SelfHostedProvider(AIProvider):
+    """Shared plumbing: endpoint config from the credential store, optional
+    API key, opt-in native tool calling, proxy bypass, live model discovery."""
+    default_base_url = ""
+
+    def __init__(self) -> None:
+        # (fetched_at, models); fetched_at 0 = never fetched. Empty results are
+        # cached too (shorter TTL) so a down server doesn't cost the full
+        # discovery timeout on every provider-list request.
+        self._model_cache: Tuple[float, List[Dict]] = (0.0, [])
+
+    # --- config ---
+    def endpoint(self) -> Dict:
+        return creds.get_endpoint(self.id) or {}
+
+    def base_url(self) -> str:
+        return normalize_base_url(self.endpoint().get("base_url") or self.default_base_url)
+
+    def is_configured(self) -> bool:
+        return bool(self.endpoint().get("base_url"))
+
+    @property
+    def SUPPORTS_TOOLS(self) -> bool:  # type: ignore[override]
+        # Off by default: Ollama models without tool support and vLLM servers
+        # started without --enable-auto-tool-choice reject a tools param with
+        # HTTP 400. The bracket-tag text fallback works with any model.
+        return bool(self.endpoint().get("supports_tools"))
+
+    def _headers(self) -> Dict:
+        h = {"Content-Type": "application/json"}
+        key = creds.get_key(self.id)
+        if key:
+            h["Authorization"] = f"Bearer {key}"
+        return h
+
+    def _proxies(self) -> Optional[Dict]:
+        # Default: connect directly. A model server on the company LAN is
+        # internal; the corporate proxy usually only routes to the internet.
+        # Empty strings (not None) are kept by requests' env merge and select
+        # "no proxy" for both schemes.
+        if self.endpoint().get("use_proxy"):
+            return None
+        return {"http": "", "https": ""}
+
+    # --- network ---
+    def _post_and_json(self, url, headers, body, stop_check=None):
+        if stop_check and stop_check():
+            raise AIStopped("Stopped before request.")
+        if not self.is_configured():
+            raise AIAuthError(f"{self.label} is not configured — set its base URL "
+                              "in Preferences → AI Settings.")
+        try:
+            resp = requests.post(url, headers=headers, json=body,
+                                 timeout=_HTTP_TIMEOUT, proxies=self._proxies())
+        except requests.RequestException as e:
+            raise AIGenerationError(
+                f"Cannot reach {self.label} at {self.base_url()}: {e}")
+        self._raise_for_status(resp)
+        try:
+            return resp.json()
+        except ValueError:
+            raise AIGenerationError(f"{self.label} returned a non-JSON response.")
+
+    def _get_json(self, path: str, timeout: float = _DISCOVERY_TIMEOUT):
+        resp = requests.get(self.base_url() + path, headers=self._headers(),
+                            timeout=timeout, proxies=self._proxies())
+        self._raise_for_status(resp)
+        return resp.json()
+
+    def list_models(self) -> List[Dict]:
+        """Live, cached: a self-hosted server's models are whatever is
+        installed, so a static catalogue would be wrong."""
+        if not self.is_configured():
+            return []
+        at, cached = self._model_cache
+        ttl = _DISCOVERY_TTL if cached else _DISCOVERY_FAIL_TTL
+        if at and time.time() - at < ttl:
+            return list(cached)
+        found = self.discover_models()
+        self._model_cache = (time.time(), found)
+        return list(found)
+
+    def refresh_models(self) -> List[Dict]:
+        self._model_cache = (0.0, [])
+        return self.list_models()
+
+
+class OllamaProvider(SelfHostedProvider):
+    """Ollama via its native /api/chat — NOT the OpenAI-compatible endpoint,
+    which cannot set the context size: Ollama would silently truncate prompts
+    to its small default window, breaking mind-map-grounded chat."""
+    id = "ollama"
+    label = "Ollama (self-hosted)"
+    default_base_url = "http://localhost:11434"
+    DEFAULT_NUM_CTX = 16384
+
+    def num_ctx(self) -> int:
+        try:
+            n = int(self.endpoint().get("num_ctx") or self.DEFAULT_NUM_CTX)
+        except (TypeError, ValueError):
+            n = self.DEFAULT_NUM_CTX
+        return max(2048, n)
+
+    def build_request(self, messages, model, system_prompt, tools_param=None):
+        system, convo = _split_system(messages, system_prompt)
+        msgs = ([{"role": "system", "content": system}] if system else []) + list(convo)
+        body = {"model": model, "messages": msgs, "stream": False,
+                "options": {"temperature": _DEFAULT_TEMPERATURE,
+                            "num_ctx": self.num_ctx()}}
+        if tools_param:
+            body["tools"] = tools_param
+        return self.base_url() + "/api/chat", self._headers(), body
+
+    def parse_response(self, data):
+        try:
+            return (data.get("message") or {}).get("content") or ""
+        except AttributeError:
+            return ""
+
+    # Ollama takes OpenAI-style tool definitions; calls come back with
+    # arguments as an object (not a JSON string) and usually without ids.
+    def build_tools_param(self, tools):
+        return [{"type": "function",
+                 "function": {"name": t.name, "description": t.description,
+                              "parameters": t.input_schema}} for t in tools]
+
+    def parse_tool_calls(self, data):
+        out = []
+        calls = ((data or {}).get("message") or {}).get("tool_calls") or []
+        for i, tc in enumerate(calls):
+            fn = (tc or {}).get("function") or {}
+            args = fn.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args or "{}")
+                except ValueError:
+                    args = {}
+            if fn.get("name"):
+                out.append(ToolCall(id=tc.get("id") or f"call_{i}",
+                                    name=fn["name"], input=args))
+        return out
+
+    def capture_assistant_turn(self, data):
+        msg = dict((data or {}).get("message") or {})
+        msg.setdefault("role", "assistant")
+        msg.setdefault("content", "")
+        return msg
+
+    def format_tool_results(self, results):
+        return [{"role": "tool", "content": out, "tool_name": name}
+                for _cid, (name, out) in results.items()]
+
+    def discover_models(self):
+        try:
+            data = self._get_json("/api/tags")
+        except (requests.RequestException, ValueError, AIError):
+            return []
+        out = []
+        for m in (data or {}).get("models", []) or []:
+            name = (m or {}).get("name") or (m or {}).get("model")
+            if not name or "embed" in name.lower():
+                continue
+            out.append({"id": name, "name": name, "context_tokens": self.num_ctx()})
+        return out
+
+
+class VLLMProvider(SelfHostedProvider):
+    """vLLM's OpenAI-compatible server (/v1/chat/completions)."""
+    id = "vllm"
+    label = "vLLM (self-hosted)"
+    default_base_url = "http://localhost:8000"
+
+    def build_request(self, messages, model, system_prompt, tools_param=None):
+        system, convo = _split_system(messages, system_prompt)
+        msgs = ([{"role": "system", "content": system}] if system else []) + list(convo)
+        # No max_tokens: vLLM rejects requests whose prompt + max_tokens exceed
+        # the model's max_model_len, and its default already uses what's left.
+        body = {"model": model, "messages": msgs,
+                "temperature": _DEFAULT_TEMPERATURE}
+        if tools_param:
+            body["tools"] = tools_param
+        return self.base_url() + "/v1/chat/completions", self._headers(), body
+
+    # Same wire format as OpenAI for responses and tool calls.
+    parse_response = OpenAIProvider.parse_response
+    build_tools_param = OpenAIProvider.build_tools_param
+    parse_tool_calls = OpenAIProvider.parse_tool_calls
+    capture_assistant_turn = OpenAIProvider.capture_assistant_turn
+    format_tool_results = OpenAIProvider.format_tool_results
+
+    def discover_models(self):
+        try:
+            data = self._get_json("/v1/models")
+        except (requests.RequestException, ValueError, AIError):
+            return []
+        out = []
+        for m in (data or {}).get("data", []) or []:
+            mid = (m or {}).get("id")
+            if mid:
+                out.append({"id": mid, "name": mid,
+                            "context_tokens": int(m.get("max_model_len") or 0)})
+        return out
+
+
+# ---------------------------------------------------------------------------
 # Registry / dispatch
 # ---------------------------------------------------------------------------
 
@@ -735,6 +972,8 @@ _REGISTRY: Dict[str, AIProvider] = {
         AnthropicProvider(),
         OpenAIProvider(),
         GeminiProvider(),
+        OllamaProvider(),
+        VLLMProvider(),
     )
 }
 

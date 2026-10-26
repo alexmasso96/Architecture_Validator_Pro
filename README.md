@@ -46,7 +46,7 @@ Reads compiled `.elf` files and pulls out the symbols, functions, structures, an
 The native parser handles **relocatable objects (`.o`)** as well as linked images, and its output is sanity-checked: if it ever looks corrupted, the app discards it and re-parses with `pyelftools` rather than trusting it. The Release Manager shows which backend produced each release's data (**⚙ native** / **⚙ python**), and `ARCH_PARSER_BACKEND=python` forces the Python backend for troubleshooting.
 
 ### 🤖 AI test-case generation, agentic chat & mind maps
-Generate **low-level, HiL-debugger-style test designs** from your high-level test cases and the real C source, across **GitHub Copilot, Anthropic, OpenAI, and Gemini** (keys stored encrypted, per-user, never in the project). An **Advanced AI Chat** indexes your source into a compact **mind map** and answers questions agentically with read-only, sandboxed tools (`read_file`, `search_code`, `get_call_graph`, …) — grounded in the actual code. Import requirements (CSV/XLSX) and compute file-by-file source diffs between releases.
+Generate **low-level, HiL-debugger-style test designs** from your high-level test cases and the real C source, across **GitHub Copilot, Anthropic, OpenAI, and Gemini** — or a **self-hosted Ollama or vLLM** server, so source code never leaves your infrastructure (keys and endpoints stored encrypted, per-user, never in the project). An **Advanced AI Chat** indexes your source into a compact **mind map** and answers questions agentically with read-only, sandboxed tools (`read_file`, `search_code`, `get_call_graph`, …) — grounded in the actual code. Import requirements (CSV/XLSX) and compute file-by-file source diffs between releases.
 
 ![AI Test Generation — low-level HiL test designs from high-level cases](/Media/images/ai_test_generation.png "AI Test Generation — generate low-level, HiL-debugger-style test designs from your high-level test cases and the real C source")
 
@@ -119,7 +119,7 @@ A project is one portable `.arch` file (a SQLite database under the hood), keepi
 | C++ demangling | `cpp_demangle` |
 | Fuzzy matching | `rapidfuzz` |
 | Spreadsheet import | `pandas`, `openpyxl` |
-| AI providers | Copilot / Anthropic / OpenAI / Gemini over `requests` |
+| AI providers | Copilot / Anthropic / OpenAI / Gemini, self-hosted Ollama / vLLM, over `requests` |
 | Project storage | SQLite |
 | Security | `bcrypt` (master password), `cryptography` (encrypted AI credentials, history protection) |
 | Packaging | `PyInstaller` onedir desktop bundle (Windows/macOS/Linux) |

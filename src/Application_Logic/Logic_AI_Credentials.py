@@ -259,6 +259,40 @@ def clear_network_proxy() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Public API — self-hosted endpoint config (Ollama / vLLM)
+# ---------------------------------------------------------------------------
+# Base URLs can name internal hosts, so they live in this encrypted store with
+# the keys rather than in the plaintext prefs file. Stored as a JSON string
+# under a reserved dunder field so list_configured() ignores it.
+
+def _endpoint_field(provider: str) -> str:
+    return f"__endpoint_{provider}__"
+
+
+def get_endpoint(provider: str) -> Optional[Dict]:
+    raw = _load().get(_endpoint_field(provider))
+    if not raw:
+        return None
+    try:
+        cfg = json.loads(raw)
+    except ValueError:
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def set_endpoint(provider: str, cfg: Dict) -> None:
+    data = _load()
+    data[_endpoint_field(provider)] = json.dumps(cfg)
+    _save(data)
+
+
+def clear_endpoint(provider: str) -> None:
+    data = _load()
+    if data.pop(_endpoint_field(provider), None) is not None:
+        _save(data)
+
+
+# ---------------------------------------------------------------------------
 # Maintenance helpers
 # ---------------------------------------------------------------------------
 

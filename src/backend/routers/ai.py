@@ -49,13 +49,88 @@ class SetKeyBody(BaseModel):
 
 
 def _provider_view(p) -> dict:
-    return {
+    view = {
         "id": p.id,
         "label": p.label,
         "configured": p.is_configured(),
         "supports_tools": getattr(p, "SUPPORTS_TOOLS", False),
         "models": p.list_models(),
+        "kind": "self_hosted" if isinstance(p, providers.SelfHostedProvider) else "cloud",
     }
+    if isinstance(p, providers.SelfHostedProvider):
+        ep = p.endpoint()
+        view["endpoint"] = {
+            "base_url": ep.get("base_url") or "",
+            "default_base_url": p.default_base_url,
+            "supports_tools": bool(ep.get("supports_tools")),
+            "use_proxy": bool(ep.get("use_proxy")),
+            "num_ctx": ep.get("num_ctx"),
+            "has_api_key": bool(creds.get_key(p.id)),  # never the key itself
+        }
+    return view
+
+
+class EndpointBody(BaseModel):
+    base_url: str
+    # None = keep the stored key; "" = clear it (vLLM --api-key; Ollama: unused).
+    api_key: Optional[str] = None
+    supports_tools: bool = False
+    use_proxy: bool = False
+    num_ctx: Optional[int] = None
+
+
+def _self_hosted(provider_id: str):
+    try:
+        p = providers.get_provider(provider_id)
+    except providers.AIError:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_id}")
+    if not isinstance(p, providers.SelfHostedProvider):
+        raise HTTPException(status_code=400,
+                            detail=f"{p.label} is not a self-hosted provider.")
+    return p
+
+
+@router.put("/providers/{provider_id}/endpoint")
+def set_provider_endpoint(provider_id: str, body: EndpointBody) -> dict:
+    """Configure a self-hosted provider (Ollama / vLLM)."""
+    p = _self_hosted(provider_id)
+    err = providers.validate_base_url(body.base_url)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    if body.num_ctx is not None and not (2048 <= body.num_ctx <= 1_048_576):
+        raise HTTPException(status_code=400,
+                            detail="Context size must be between 2048 and 1048576 tokens.")
+    cfg = {"base_url": providers.normalize_base_url(body.base_url),
+           "supports_tools": body.supports_tools, "use_proxy": body.use_proxy}
+    if body.num_ctx is not None:
+        cfg["num_ctx"] = body.num_ctx
+    creds.set_endpoint(provider_id, cfg)
+    if body.api_key is not None:
+        creds.set_key(provider_id, body.api_key)   # "" clears
+    p.refresh_models()
+    return _provider_view(p)
+
+
+@router.delete("/providers/{provider_id}/endpoint")
+def clear_provider_endpoint(provider_id: str) -> dict:
+    p = _self_hosted(provider_id)
+    creds.clear_endpoint(provider_id)
+    creds.delete_key(provider_id)
+    p.refresh_models()
+    return _provider_view(p)
+
+
+@router.post("/providers/{provider_id}/test")
+def test_provider_endpoint(provider_id: str) -> dict:
+    """Live connection check: re-discover the model list now."""
+    p = _self_hosted(provider_id)
+    if not p.is_configured():
+        raise HTTPException(status_code=400, detail="Set a base URL first.")
+    models = p.refresh_models()
+    return {"ok": bool(models), "models": models,
+            "detail": (f"Connected — {len(models)} model(s) available." if models
+                       else f"No models found at {p.base_url()} — is the server "
+                            "running and reachable, and does it have a model loaded?")}
 
 
 @router.get("/providers")

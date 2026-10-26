@@ -328,12 +328,24 @@ export interface AIModel {
   [k: string]: unknown;
 }
 
+export interface SelfHostedEndpoint {
+  base_url: string;
+  default_base_url: string;
+  supports_tools: boolean;
+  use_proxy: boolean;
+  num_ctx?: number | null;
+  has_api_key: boolean;
+}
+
 export interface AIProvider {
   id: string;
   label: string;
   configured: boolean;
   supports_tools: boolean;
   models: AIModel[];
+  /** "self_hosted" = Ollama / vLLM, configured by base URL. */
+  kind?: "cloud" | "self_hosted";
+  endpoint?: SelfHostedEndpoint;
 }
 
 export interface ProvidersResponse {

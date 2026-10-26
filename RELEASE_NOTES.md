@@ -31,6 +31,15 @@ In on-machine validation. Version numbers are bumped when the release is cut.
   debug info and offered in the match picker tagged *inlined*.
 - LTO objects are detected and skipped with a clear reason.
 
+## 🤖 New: self-hosted AI (Ollama and vLLM)
+- Point AI Generation and AI Chat at your own **Ollama** or **vLLM** server
+  (Preferences → AI Settings) so source code never leaves your infrastructure.
+- Models are listed live from the server; **Save & test** checks the connection.
+- Ollama uses its native API so the **context size** can be set (its OpenAI-style
+  endpoint silently truncates prompts to a small default).
+- Connects directly by default (a LAN/local server isn't behind the corporate
+  proxy); native tool calling is opt-in, with the text fallback otherwise.
+
 ## 🔍 Parser
 - **Relocatable objects parse correctly** with the native parser (KI-01): ELF REL
   relocations' in-place addends are now applied. Output is sanity-checked and falls

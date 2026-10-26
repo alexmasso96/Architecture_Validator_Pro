@@ -12,7 +12,7 @@ The [Test Design](05-test-case-design.md) view produces the *high-level* test ca
 
 ## Connecting a provider
 
-AI keys are linked once per machine in **Preferences → AI Settings**. You only need one provider:
+AI keys and self-hosted endpoints are linked once per machine in **Preferences → AI Settings**. You only need one provider:
 
 | Provider | What you need | Notes |
 |---|---|---|
@@ -20,6 +20,13 @@ AI keys are linked once per machine in **Preferences → AI Settings**. You only
 | **Anthropic (Claude)** | An API key from console.anthropic.com | Direct, billed to your account. |
 | **OpenAI** | An API key from platform.openai.com | Direct. |
 | **Google Gemini** | An API key from aistudio.google.com | Direct. |
+| **Ollama** (self-hosted) | An Ollama server, on this machine or the network | Enter its base URL (default `http://localhost:11434`). Models are listed live from the server. Set **Context** to the window the model should use — Ollama otherwise cuts prompts at a small default. |
+| **vLLM** (self-hosted) | A vLLM OpenAI-compatible server | Enter its base URL (default `http://localhost:8000`) and, only if the server was started with `--api-key`, the key. Models and their context lengths come from the server. |
+
+> **Self-hosted servers keep your source in-house.** With Ollama or vLLM, prompts — including source code and the mind map — go only to the server you configure, never to a cloud service. **Save & test** checks the connection and lists the available models.
+>
+> - **Native tool calling** is off by default; the agent then uses a text-based fallback that works with any model. Turn it on only if the model supports function calling and (for vLLM) the server was started with `--enable-auto-tool-choice --tool-call-parser …` — otherwise the server rejects the request.
+> - **Use network proxy** is off by default: the app connects to the server directly, which is right for a server on this machine or the company LAN. Turn it on only if the server is reachable solely through the proxy configured in **Preferences → Network**.
 
 > **Where are my keys stored?** Encrypted, on **this computer only**, in a `credentials.aikeys` file in your user config dir — never inside the `.arch` project and never in plain text. Configure once and it works across all your projects. Unconfigured providers are flagged in the view so you don't get stuck.
 

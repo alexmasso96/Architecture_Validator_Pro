@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { AIProvider, ProvidersResponse } from "../api/types";
+import type { AIProvider, AIModel, ProvidersResponse } from "../api/types";
 
 // Providers that authenticate with a pasted API key (vs. Copilot's device flow).
 const KEY_PROVIDERS = new Set(["anthropic", "openai", "gemini"]);
@@ -101,8 +101,11 @@ export function AISettings() {
     }
   }
 
-  async function load() {
-    setLoading(true);
+  // silent: refresh after a mutation without swapping the screen for the
+  // loading spinner (that unmounts the cards and drops their local state,
+  // e.g. the self-hosted connection-test result).
+  async function load(silent = false) {
+    if (!silent) setLoading(true);
     try {
       const r = await api.get<ProvidersResponse>("/ai/providers");
       setProviders(r.providers);
@@ -173,7 +176,9 @@ export function AISettings() {
       <div className="prefs-field">
         <div className="prefs-label">AI Providers</div>
         <p className="prefs-hint">
-          Link an AI account by storing its API key. Credentials are kept in the
+          Link an AI account by storing its API key, or point the app at a
+          self-hosted Ollama / vLLM server so source code never leaves your
+          infrastructure. Credentials and endpoints are kept in the
           machine-global encrypted store, independent of the open project.
         </p>
       </div>
@@ -195,7 +200,13 @@ export function AISettings() {
                 <span className="ai-prov-models">{p.models.length} models</span>
               </div>
 
-              {keyed ? (
+              {p.kind === "self_hosted" && p.endpoint ? (
+                <SelfHostedConfig
+                  provider={p}
+                  onChanged={() => load(true)}
+                  onNote={setNote}
+                />
+              ) : keyed ? (
                 <div className="ai-prov-keyrow">
                   <input
                     type="password"
@@ -288,6 +299,150 @@ export function AISettings() {
       </div>
 
       {note && <div className="ai-prov-toast">{note}</div>}
+    </div>
+  );
+}
+
+// Ollama / vLLM: a base URL instead of an account. Optional API key (vLLM
+// --api-key), opt-in native tool calling, proxy routing, and (Ollama) the
+// context size — Ollama truncates prompts to a small default otherwise.
+function SelfHostedConfig({
+  provider,
+  onChanged,
+  onNote,
+}: {
+  provider: AIProvider;
+  onChanged: () => Promise<void> | void;
+  onNote: (msg: string | null) => void;
+}) {
+  const ep = provider.endpoint!;
+  const isOllama = provider.id === "ollama";
+  const [baseUrl, setBaseUrl] = useState(ep.base_url || ep.default_base_url);
+  const [apiKey, setApiKey] = useState("");
+  const [tools, setTools] = useState(ep.supports_tools);
+  const [useProxy, setUseProxy] = useState(ep.use_proxy);
+  const [numCtx, setNumCtx] = useState<string>(String(ep.num_ctx ?? 16384));
+  const [busy, setBusy] = useState(false);
+  const [test, setTest] = useState<{ ok: boolean; detail: string } | null>(null);
+
+  async function save() {
+    setBusy(true);
+    setTest(null);
+    onNote(null);
+    try {
+      await api.put(`/ai/providers/${provider.id}/endpoint`, {
+        base_url: baseUrl.trim(),
+        // Only send a key when one was typed — empty input keeps the stored key.
+        ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+        supports_tools: tools,
+        use_proxy: useProxy,
+        ...(isOllama ? { num_ctx: Number(numCtx) || 16384 } : {}),
+      });
+      setApiKey("");
+      onNote(`Saved ${provider.label} endpoint.`);
+      await onChanged();
+      await runTest();
+    } catch (e) {
+      onNote(`Save failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runTest() {
+    try {
+      const r = await api.post<{ ok: boolean; detail: string; models: AIModel[] }>(
+        `/ai/providers/${provider.id}/test`,
+      );
+      setTest({ ok: r.ok, detail: r.detail });
+    } catch (e) {
+      setTest({ ok: false, detail: (e as Error).message });
+    }
+  }
+
+  async function clear() {
+    setBusy(true);
+    setTest(null);
+    try {
+      await api.del(`/ai/providers/${provider.id}/endpoint`);
+      onNote(`Removed ${provider.label} endpoint.`);
+      await onChanged();
+    } catch (e) {
+      onNote(`Clear failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="ai-selfhost">
+      <div className="ai-prov-keyrow">
+        <input
+          className="ai-prov-key"
+          placeholder={ep.default_base_url}
+          spellCheck={false}
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          title="Base URL of the server (with or without /v1)"
+        />
+        {!isOllama && (
+          <input
+            type="password"
+            className="ai-prov-key"
+            placeholder={ep.has_api_key ? "API key set — type to replace" : "API key (optional)"}
+            autoComplete="off"
+            spellCheck={false}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            title="Only needed if the vLLM server was started with --api-key"
+          />
+        )}
+      </div>
+      <div className="ai-selfhost-opts">
+        <label title="Turn on only if the model and server support function calling (vLLM: --enable-auto-tool-choice --tool-call-parser …). Off uses a text-based fallback that works with any model.">
+          <input type="checkbox" checked={tools} onChange={(e) => setTools(e.target.checked)} />
+          Native tool calling
+        </label>
+        <label title="Off: connect directly (typical for a server on this machine or the company LAN). On: route through the configured network proxy.">
+          <input type="checkbox" checked={useProxy} onChange={(e) => setUseProxy(e.target.checked)} />
+          Use network proxy
+        </label>
+        {isOllama && (
+          <label title="Context window Ollama allocates per request (num_ctx). Larger fits more source/mind-map context but needs more GPU/RAM.">
+            Context
+            <input
+              type="number"
+              className="ai-prov-key ai-selfhost-ctx"
+              min={2048}
+              step={2048}
+              value={numCtx}
+              onChange={(e) => setNumCtx(e.target.value)}
+            />
+            tokens
+          </label>
+        )}
+      </div>
+      <div className="ai-copilot-actions">
+        <button className="save-btn" disabled={busy || !baseUrl.trim()} onClick={save}>
+          {busy ? "…" : "Save & test"}
+        </button>
+        {provider.configured && (
+          <>
+            <button className="scope-btn" disabled={busy} onClick={runTest}>
+              Test connection
+            </button>
+            <button className="scope-btn" disabled={busy} onClick={clear}>
+              Remove
+            </button>
+          </>
+        )}
+        {test && (
+          <span className={"ai-selfhost-test " + (test.ok ? "ok" : "err")}>
+            {test.ok ? "✓ " : "⚠ "}
+            {test.detail}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

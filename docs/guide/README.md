@@ -18,7 +18,7 @@ If you're new, read it top to bottom. If you're looking for one thing, jump stra
 | 4 | [Releases & Baselines](04-releases-and-baselines.md) | Managing software releases, baselines, and change detection across releases |
 | 5 | [Test Design](05-test-case-design.md) | The Markdown template language, live preview, grouping, and exports |
 | 6 | [Collaboration & Safety](06-collaboration-and-safety.md) | Exclusive-edit locking, view-only mode, master-password encryption, and change history |
-| 7 | [AI Test Generation](07-ai-test-generation.md) | Connecting Copilot / Claude / OpenAI / Gemini and generating low-level tests |
+| 7 | [AI Test Generation](07-ai-test-generation.md) | Connecting Copilot / Claude / OpenAI / Gemini / self-hosted Ollama or vLLM and generating low-level tests |
 | 8 | [AI Chat](08-advanced-ai-chat.md) | Source mind maps and agentic, source-grounded chat |
 | 9 | [Code Map](09-code-map.md) | The visual call-graph + read-only IDE joining the ELF to your C source |
 | 10 | [Change Log](10-change-log.md) | Side-by-side release diffs and the AI change-log summary |

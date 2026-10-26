@@ -182,7 +182,7 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 - `Logic_History.py` — `HistoryManager`: release-scoped change history, obfuscated at rest and protected by an append-only HMAC hash-chain (`verify_history_chain()`).
 
 **AI subsystem**
-- `Logic_AI_Providers.py` — adapters for Copilot / Anthropic / OpenAI / Gemini behind one interface (`generate`, `generate_with_tools`), a per-provider tool-calling capability matrix, model context windows, and circuit breakers (turns / calls / bytes).
+- `Logic_AI_Providers.py` — adapters for Copilot / Anthropic / OpenAI / Gemini and the self-hosted Ollama / vLLM behind one interface (`generate`, `generate_with_tools`), a per-provider tool-calling capability matrix, model context windows, and circuit breakers (turns / calls / bytes). Self-hosted providers are configured by base URL (stored encrypted via `Logic_AI_Credentials.set_endpoint`), discover their models live (short timeout, cached), connect directly unless told to use the proxy, and use native tool calling only when opted in — otherwise the text-tag fallback. Ollama uses its native `/api/chat` so the context size (`num_ctx`) can be set; vLLM uses its OpenAI-compatible API.
 - `Logic_AI_Credentials.py` — per-user Fernet-encrypted credential store (`credentials.aikeys` in the OS config dir). API keys + the Copilot OAuth token; **the project file never stores keys**.
 - `Logic_AI_Context.py` — pure builders: `build_mind_map`/`mind_map_to_text`, source hashing/diffing, staleness checks, requirements parsing, prompt/rules meta.
 - `Logic_AI_Tools.py` — `ToolExecutor` with sandboxed read-only tools (`read_file`, `search_code`, `get_call_graph`, …) confined by a realpath path-jail to the source root.

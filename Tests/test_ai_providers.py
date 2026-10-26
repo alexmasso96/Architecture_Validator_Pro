@@ -41,7 +41,7 @@ class FakeResp:
 def test_registry(env):
     prov, _ = env
     ids = {p.id for p in prov.list_providers()}
-    assert ids == {"copilot", "anthropic", "openai", "gemini"}
+    assert ids == {"copilot", "anthropic", "openai", "gemini", "ollama", "vllm"}
     with pytest.raises(prov.AIError):
         prov.get_provider("nope")
 
