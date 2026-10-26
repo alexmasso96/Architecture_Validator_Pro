@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { PortRow } from "../api/types";
+import type { Cell, PortRow, TestColumnStatus } from "../api/types";
 import {
   cellText,
   confClass,
@@ -18,6 +18,10 @@ import {
   REVIEW_CLASS,
   REVIEW_OPTIONS,
   scoreTone,
+  isTestStale,
+  TEST_CLASS,
+  TEST_MANUAL_OPTIONS,
+  TEST_NOT_RUN,
   type ResolvedColumn,
   type Tone,
 } from "../columns";
@@ -44,6 +48,30 @@ interface PillTarget {
   colName: string;
   options: string[];
   current: string;
+  // Call-tree Test cell: the tool's own verdict (for "Reset to tool verdict").
+  testAuto?: string;
+}
+
+// Hover text for a Test cell: verdict, why, callers (✓ = verified by .o files).
+function testTooltip(cell: Cell | undefined, stale: boolean): string {
+  if (!cell?.tested_at) return "Not run yet — use ▶ in the column header.";
+  const lines: string[] = [];
+  const auto = String(cell.auto ?? "");
+  if (cell.user_changed) {
+    lines.push(`Set manually to ${cell.text} by ${cell.override_by ?? "?"} ` +
+               `(tool verdict: ${auto}).`);
+  }
+  if (cell.function) lines.push(`Function: ${cell.function}`);
+  if (cell.reason) lines.push(String(cell.reason));
+  const callers = (cell.callers as { name: string; verified: boolean }[] | undefined) ?? [];
+  const total = Number(cell.callers_total ?? 0);
+  if (callers.length) {
+    lines.push("Callers: " + callers.map((c) => (c.verified ? "✓ " : "") + c.name).join(", ") +
+               (total > callers.length ? ` … (+${total - callers.length} more)` : ""));
+  }
+  lines.push(`Tested ${cell.tested_at}${cell.strict ? " (strict: verified calls only)" : ""}`);
+  if (stale) lines.push("⟳ Stale — the code map was rebuilt after this run. Run again.");
+  return lines.join("\n");
 }
 
 export function PortsTable({
@@ -56,6 +84,8 @@ export function PortsTable({
   onUnlockCell,
   canEdit,
   modelStatus,
+  testStatus,
+  onRunTest,
 }: {
   columns: ResolvedColumn[];
   rows: PortRow[];
@@ -66,6 +96,8 @@ export function PortsTable({
   onUnlockCell?: (rowIndex: number, colName: string) => void;
   canEdit: boolean;
   modelStatus: string;
+  testStatus?: Record<string, TestColumnStatus>;
+  onRunTest?: (colName: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pill, setPill] = useState<PillTarget | null>(null);
@@ -176,6 +208,7 @@ export function PortsTable({
     rowIndex: number,
     col: ResolvedColumn,
     current: string,
+    testAuto?: string,
   ) {
     if (!canEdit) return;
     e.stopPropagation();
@@ -190,8 +223,11 @@ export function PortsTable({
           ? PORT_STATE_OPTIONS
           : col.role === "result"
             ? RESULT_OPTIONS
-            : REVIEW_OPTIONS,
+            : col.role === "calltest"
+              ? TEST_MANUAL_OPTIONS
+              : REVIEW_OPTIONS,
       current,
+      testAuto: testAuto ?? undefined,
     });
   }
 
@@ -281,6 +317,31 @@ export function PortsTable({
           title={editable ? undefined : v === NO_RESULT ? "Not applicable" : "Locked — not the active release"}
         >
           {v}
+        </button>
+      );
+    }
+
+    if (col.role === "calltest") {
+      const cell = row.cells[col.name];
+      const v = cell?.tested_at ? value || TEST_NOT_RUN : TEST_NOT_RUN;
+      const cls = TEST_CLASS[v] ?? "p-grey";
+      const stale = isTestStale(cell, testStatus?.[col.name]?.code_map_built_at);
+      const editable =
+        canEdit && !!col.test?.is_active && !col.test?.is_baselined && !!cell?.tested_at;
+      return (
+        <button
+          className={`cell-btn ${cls}${editable ? " editable" : ""}`}
+          disabled={!editable}
+          onClick={
+            editable
+              ? (e) => openPill(e, row.row_index, col, v, String(cell?.auto ?? ""))
+              : undefined
+          }
+          title={testTooltip(cell, stale)}
+        >
+          {v}
+          {cell?.user_changed && <span className="test-mark" title="Set manually"> ✎</span>}
+          {stale && <span className="test-mark"> ⟳</span>}
         </button>
       );
     }
@@ -380,11 +441,22 @@ export function PortsTable({
   }
 
   const pillMenuItems: MenuItem[] = pill
-    ? pill.options.map((opt) => ({
-        label: opt,
-        checked: opt === pill.current,
-        onClick: () => onEditCell(pill.rowIndex, pill.colName, opt),
-      }))
+    ? [
+        ...pill.options.map((opt) => ({
+          label: opt,
+          checked: opt === pill.current,
+          onClick: () => onEditCell(pill.rowIndex, pill.colName, opt),
+        })),
+        ...(pill.testAuto
+          ? [
+              { separator: true },
+              {
+                label: `Reset to tool verdict (${pill.testAuto})`,
+                onClick: () => onEditCell(pill.rowIndex, pill.colName, ""),
+              },
+            ]
+          : []),
+      ]
     : [];
 
   return (
@@ -400,6 +472,23 @@ export function PortsTable({
             {columns.map((c) => (
               <th key={c.name}>
                 {c.name}
+                {c.role === "calltest" && onRunTest && canEdit &&
+                  c.test?.is_active && !c.test?.is_baselined && (
+                    <button
+                      className="test-run-btn"
+                      title={
+                        testStatus?.[c.name]?.has_code_map === false
+                          ? "No code map for this model and release — build it first"
+                          : `Run call-tree test against ${c.test.release_name}'s code map`
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRunTest(c.name);
+                      }}
+                    >
+                      ▶
+                    </button>
+                  )}
                 <span
                   className="col-resizer"
                   title="Drag to resize"

@@ -179,6 +179,9 @@ class ColumnSpec(BaseModel):
     type: str
     visible: Optional[bool] = True  # True=Show, False=Hide, None=Auto (Init/Cyclic)
     width: int = 100
+    # CallTreeTestColumn only: {"release_id", "match_col", "strict"} for a Test
+    # column created in this save (existing ones keep their stored binding).
+    test_binding: Optional[dict] = None
 
 
 class PutColumnsBody(BaseModel):
@@ -210,27 +213,54 @@ def _result_bindings(db) -> dict:
         return {}
 
 
+def _release_flags(rm, rid):
+    """(release, is_active, is_baselined) for a bound release, or (None, …).
+    A release is locked once it is itself a baseline or has a baseline frozen
+    from it (matches the Qt ReleaseResultColumn locking rule)."""
+    rel = next((r for r in rm.releases if r.id == rid), None) if rm else None
+    if rel is None:
+        return None, False, False
+    active = rm.get_active_release()
+    is_baselined = rel.is_baseline or any(
+        r.is_baseline and not r.is_deleted and r.parent_release_name == rel.name
+        for r in rm.releases)
+    return rel, bool(active and active.id == rid), bool(is_baselined)
+
+
 def _result_columns_meta(db, rm) -> list:
     """Per result column: its bound release plus the flags the UI needs to derive
     values and gate editing (active release? release baselined?)."""
     bindings = _result_bindings(db)
     layout_names = {c[0] for c in db.load_column_layout()}
-    active = rm.get_active_release() if rm is not None else None
-    active_id = active.id if active else None
     out = []
     for col_name, rid in bindings.items():
         if col_name not in layout_names:
             continue
-        rel = next((r for r in rm.releases if r.id == rid), None) if rm else None
+        rel, is_active, is_baselined = _release_flags(rm, rid)
         if rel is None:
             continue
-        # Locked once the release is itself a baseline or has a baseline frozen
-        # from it (matches the Qt ReleaseResultColumn locking rule).
-        is_baselined = rel.is_baseline or any(
-            r.is_baseline and not r.is_deleted and r.parent_release_name == rel.name
-            for r in rm.releases)
         out.append({"name": col_name, "release_id": rid, "release_name": rel.name,
-                    "is_active": rid == active_id, "is_baselined": bool(is_baselined)})
+                    "is_active": is_active, "is_baselined": is_baselined})
+    return out
+
+
+def _test_bindings(db) -> dict:
+    from Application_Logic import Logic_CallTree_Test as ct
+    return ct.parse_bindings(db.get_meta(ct.BINDINGS_KEY, "{}"))
+
+
+def _test_columns_meta(db, rm) -> list:
+    """Per call-tree Test column: binding + the flags gating Run and overrides."""
+    layout_names = {c[0] for c in db.load_column_layout()}
+    out = []
+    for col_name, b in _test_bindings(db).items():
+        if col_name not in layout_names:
+            continue
+        rel, is_active, is_baselined = _release_flags(rm, b["release_id"])
+        out.append({"name": col_name, "release_id": b["release_id"],
+                    "release_name": rel.name if rel else "(deleted release)",
+                    "match_col": b["match_col"], "strict": b["strict"],
+                    "is_active": is_active, "is_baselined": is_baselined})
     return out
 
 
@@ -239,7 +269,8 @@ def get_columns(state: AppState = Depends(get_state)) -> dict:
     def go():
         db = state.require_open()
         rm = state.release_manager
-        return {**_columns_payload(db), "result_columns": _result_columns_meta(db, rm)}
+        return {**_columns_payload(db), "result_columns": _result_columns_meta(db, rm),
+                "test_columns": _test_columns_meta(db, rm)}
     return _guard(go)
 
 
@@ -259,6 +290,7 @@ def get_columns_editor(state: AppState = Depends(get_state)) -> dict:
             **_columns_payload(db),
             "locked": sorted(compute_locked_columns(layout, rows)),
             "addable_types": ADDABLE_TYPES,
+            "test_columns": _test_columns_meta(db, state.release_manager),
         }
     return _guard(go)
 
@@ -283,6 +315,22 @@ def put_columns(body: PutColumnsBody, state: AppState = Depends(get_state),
         renames = {k: v for k, v in body.renames.items() if k != v}
         removed = diff_layout(old_names, [c[0] for c in new_layout], renames)
 
+        # Column bindings keyed by name must follow renames. Validate the Test
+        # column bindings BEFORE touching any rows.
+        import json as _json
+        from Application_Logic import Logic_CallTree_Test as ct
+        rm = state.release_manager
+        incoming = {c.name: c.test_binding for c in body.columns
+                    if c.type == ct.TEST_COLUMN_TYPE and c.test_binding}
+        try:
+            test_bindings = ct.reconcile_bindings(
+                _test_bindings(db), new_layout, renames, incoming,
+                [r.id for r in rm.releases] if rm else [])
+        except ValueError as e:
+            raise ProjectError(str(e)) from e
+        result_bindings = ct.rename_name_keyed_bindings(
+            _result_bindings(db), renames, [c[0] for c in new_layout])
+
         # Migrate cell keys across every model (layout is project-global; cells
         # are per-model and keyed by column name).
         if renames or removed:
@@ -294,6 +342,8 @@ def put_columns(body: PutColumnsBody, state: AppState = Depends(get_state),
                 db.save_model_rows(m.id, rows)
 
         db.save_column_layout(new_layout)
+        db.set_meta(ct.BINDINGS_KEY, ct.dump_bindings(test_bindings))
+        db.set_meta(RESULT_BINDINGS_KEY, _json.dumps(result_bindings))
         db.commit()
         bus.publish("db-changed", {"reason": "columns-updated"})
         return _columns_payload(db)
@@ -368,12 +418,38 @@ def patch_port(model_id: int, row_index: int, body: CellUpdate,
                 raise ProjectError(
                     f"'{col}' was populated by an import and is locked. "
                     "Unlock the cell explicitly to edit it.")
+        # Call-tree Test columns: a tester may override the verdict only while
+        # the bound release is active and not baselined; the value becomes a
+        # full cell keeping the tool verdict + evidence ('' = reset).
+        updates = dict(body.updates)
+        test_bindings = _test_bindings(db)
+        for col in list(updates):
+            if col not in test_bindings:
+                continue
+            from Application_Logic import Logic_CallTree_Test as ct
+            from Application_Logic.Logic_File_Locking import FileLockManager
+            import datetime as _dt
+            _rel, is_active, is_baselined = _release_flags(
+                state.release_manager, test_bindings[col]["release_id"])
+            if not is_active or is_baselined:
+                raise ProjectError(
+                    f"'{col}' can only be changed while its release is active "
+                    "and not baselined.")
+            val = updates[col]
+            val = val.get("text", "") if isinstance(val, dict) else str(val or "")
+            try:
+                updates[col] = ct.apply_manual_override(
+                    rows[row_index].get(col), val,
+                    user=FileLockManager.get_username(),
+                    at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"))
+            except ValueError as e:
+                raise ProjectError(str(e)) from e
         # Snapshot the displayed text of each touched column BEFORE applying —
         # a shallow row copy shares the inner cell dicts, so _apply_updates would
         # otherwise mutate them in place and erase the "old" value.
         from Application_Logic.Logic_Architecture_Models import _cell_text
-        before_text = {col: _cell_text(rows[row_index].get(col)) for col in body.updates}
-        updated = _apply_updates(dict(rows[row_index]), body.updates)
+        before_text = {col: _cell_text(rows[row_index].get(col)) for col in updates}
+        updated = _apply_updates(dict(rows[row_index]), updates)
         db.upsert_model_row(model_id, row_index, updated)
         db.commit()
         # Append one history entry per column whose displayed text actually
@@ -658,4 +734,26 @@ def get_history(model_name: Optional[str] = None,
                        if needle and needle in (e.get("description") or "").lower()]
         entries.reverse()                          # newest first for display
         return {"entries": entries, "release_id": rel_id}
+    return _guard(go)
+
+
+# ---------------------------------------------------------------------------
+# Call-tree Test columns — per-model status (drives the Run button + the stale
+# marker: a verdict recorded before the current code-map build is stale).
+# ---------------------------------------------------------------------------
+@router.get("/models/{model_id}/calltree-tests")
+def calltree_test_status(model_id: int, state: AppState = Depends(get_state)) -> dict:
+    def go():
+        db = state.require_open()
+        state.model_index_by_id(model_id)
+        out = []
+        for meta in _test_columns_meta(db, state.release_manager):
+            cm = db.get_model_code_map(model_id, release_id=meta["release_id"])
+            out.append({
+                **meta,
+                "has_code_map": bool(cm and cm.get("functions")),
+                "code_map_built_at": (cm or {}).get("built_at", ""),
+                "has_objects": db.has_release_objects(meta["release_id"]),
+            })
+        return {"model_id": model_id, "tests": out}
     return _guard(go)

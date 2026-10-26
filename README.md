@@ -78,6 +78,8 @@ Maps each architecture port to the closest real symbol in the binary using fuzzy
 ### 📊 Editable, customizable table
 All your data lives in one editable table of ports × columns. A drag-and-drop column customizer lets you add, remove, reorder, and rename columns. Built-in column types cover port/function/variable search, matched symbols, init/cyclic execution info, review status, port state, and per-release validation results.
 
+**Call-tree Test columns** check automatically whether each port's matched function is really called in a release: add one per release and Match column, run it with ▶, and every port gets *Passed* (with its callers), *Entry point* or *Failed*, based on the release's call tree and, when imported, the compiler's `.o` records (so calls from assembly start-up code count too). Verdicts are recorded with their evidence, flagged ⟳ when the call tree is rebuilt, and can be overridden by a tester until the release is baselined.
+
 Cells filled by an import (such as test-case IDs) are **locked 🔒**: they can't be edited by hand, and later imports won't overwrite them — a differing value is flagged in the import diff instead. Unlocking is an explicit right-click action recorded in the history.
 
 ### 🔁 Release management, baselining & change detection

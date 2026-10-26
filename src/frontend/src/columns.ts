@@ -3,7 +3,7 @@
 // (e.g. "Port Search", "PortStateColumn", "Review Status"). The React table
 // derives per-column rendering from that logic_key — no Qt column classes.
 
-import type { Cell, ColumnSpec, ResultColumnMeta, Row } from "./api/types";
+import type { Cell, ColumnSpec, ResultColumnMeta, Row, TestColumnMeta } from "./api/types";
 
 export const SEARCH_KEYS = ["Port Search", "Function Search", "Variable Search"];
 
@@ -43,6 +43,7 @@ export type ColRole =
   | "cyclic"
   | "result"
   | "lastresult"
+  | "calltest"
   | "text";
 
 export interface ResolvedColumn extends ColumnSpec {
@@ -55,6 +56,41 @@ export interface ResolvedColumn extends ColumnSpec {
   // For a "result" column: the bound release flags (drive derivation + editing).
   resultActive?: boolean;
   resultBaselined?: boolean;
+  // For a "calltest" column: its binding + release flags (Run / override gating).
+  test?: TestColumnMeta;
+}
+
+// ---- Call-tree Test column — mirrors Logic_CallTree_Test.py ----
+export const TEST_COLUMN_TYPE = "CallTreeTestColumn";
+export const TEST_MANUAL_OPTIONS = ["Passed", "Failed", "Entry point"];
+export const TEST_NOT_RUN = "Not Run";
+export const TEST_CLASS: Record<string, string> = {
+  Passed: "p-green",
+  Failed: "p-red",
+  "Entry point": "p-blue",
+  "No Match": "p-grey",
+  "No Data": "p-grey",
+  "No Result": "p-grey",
+  [TEST_NOT_RUN]: "p-grey",
+};
+
+// A recorded verdict is stale when the code map was rebuilt after the run.
+export function isTestStale(cell: Cell | undefined, currentBuiltAt: string | undefined): boolean {
+  const ran = (cell?.code_map_built_at as string | undefined) ?? "";
+  if (!cell?.tested_at || !currentBuiltAt) return false;
+  return ran !== currentBuiltAt;
+}
+
+// Match columns a Test column may bind to: the one right after a Port/Function
+// Search column (variables are not "called").
+export function functionMatchColumns(cols: { name: string; type: string }[]): string[] {
+  const out: string[] = [];
+  cols.forEach((c, i) => {
+    if ((c.type === "Port Search" || c.type === "Function Search") && i + 1 < cols.length) {
+      out.push(cols[i + 1].name);
+    }
+  });
+  return out;
 }
 
 // ---- Release-result column (ASPICE SWE.6) — mirrors Logic_Release_Results.py ----
@@ -101,6 +137,7 @@ export function isResultEditable(
 export function resolveColumns(
   columns: ColumnSpec[],
   resultMeta: ResultColumnMeta[] = [],
+  testMeta: TestColumnMeta[] = [],
 ): ResolvedColumn[] {
   // match column index → its source search column
   const matchSource = new Map<number, ColumnSpec>();
@@ -110,6 +147,7 @@ export function resolveColumns(
     }
   });
   const metaByName = new Map(resultMeta.map((m) => [m.name, m]));
+  const testByName = new Map(testMeta.map((m) => [m.name, m]));
 
   return columns.map((c, i) => {
     let role: ColRole = "text";
@@ -119,6 +157,7 @@ export function resolveColumns(
     else if (c.type === "CyclicColumn") role = "cyclic";
     else if (c.type === "ReleaseResultColumn") role = "result";
     else if (c.type === "Last Result") role = "lastresult";
+    else if (c.type === TEST_COLUMN_TYPE) role = "calltest";
     else if (SEARCH_KEYS.includes(c.type)) role = "port";
     else if (matchSource.has(i)) role = "match";
     if (c.name === "TC. ID") role = "tcid";
@@ -131,6 +170,9 @@ export function resolveColumns(
       // "Input Port (Init)" / "(Cyclic)" derive from "Input Port (Match)".
       const funcCol = c.name.replace(/ \((Init|Cyclic)\)$/, " (Match)");
       return { ...c, role, funcCol };
+    }
+    if (role === "calltest") {
+      return { ...c, role, test: testByName.get(c.name) };
     }
     if (role === "result") {
       const m = metaByName.get(c.name);

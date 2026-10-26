@@ -166,6 +166,7 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 - `Logic_Release_Manager.py` — `ReleaseManager`: software releases + baselines; ELF shared by `elf_hash`; lazy loading of the active release only.
 - `Logic_Symbol_Matcher.py` — `rapidfuzz` fuzzy matching over DB-loaded name strings (`find_best_match`, `find_top_matches`, threshold). The pool includes functions that exist only as inline expansions (no symbol, no address).
 - `Logic_Release_Results.py` — per-release validation result derivation (Pass / Block / No Result / Not Run).
+- `Logic_CallTree_Test.py` — call-tree Test columns: bindings (`{column: {release_id, match_col, strict}}` in project meta `calltree_test_columns`, reconciled on every layout save so renames are followed and dangling bindings rejected), the merged caller index (code-map edges ∪ the release's `.o` relocation/inline edges), the verdict rules (Passed / Entry point / Failed / No Match / No Data / No Result), and manual overrides that survive re-runs. Results are recorded in the row cells with their evidence and the code-map `built_at` stamp (stale detection). Run by the `run_calltree_tests` job; per-model status at `GET /api/models/{id}/calltree-tests`.
 - `Logic_Release_Source_Picker.py` — shared release-dropdown helper for the source pickers (every "pick a folder" became a release dropdown).
 
 **Source, code map, change log**

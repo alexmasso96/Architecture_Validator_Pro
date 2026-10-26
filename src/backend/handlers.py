@@ -35,6 +35,7 @@ def register_handlers(jobs: JobManager, state: AppState) -> None:
     jobs.register("import_symbols", _make_import_symbols(state))
     jobs.register("import_source", _make_import_source(state))
     jobs.register("import_objects", _make_import_objects(state))
+    jobs.register("run_calltree_tests", _make_run_calltree_tests(state))
 
 
 # ----------------------------------------------------------------------
@@ -465,6 +466,79 @@ def _make_import_objects(state: AppState):
                 "failed": len(objects) - ok,
                 "edges": len({(e[0], e[1]) for e in edges}),
                 "inlined": len(set(inlined)), "dataset_hash": dataset_hash}
+    return handler
+
+
+# ----------------------------------------------------------------------
+# run_calltree_tests — evaluate one call-tree Test column for one or more
+# models against the bound release's code map (+ its .o dataset). Manual only:
+# the user starts it, so a large model's run never surprises an EDR machine.
+# ----------------------------------------------------------------------
+def _make_run_calltree_tests(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        import datetime as _dt
+        from Application_Logic import Logic_CallTree_Test as ct
+        from Application_Logic.Logic_File_Locking import FileLockManager
+        from backend.routers.architecture import _release_flags, _test_bindings
+
+        state.require_table_edit()
+        col_name = params.get("col_name")
+        main_db = state.require_open()
+        binding = _test_bindings(main_db).get(col_name or "")
+        if binding is None:
+            raise ProjectError(f"No call-tree Test column named {col_name!r}.")
+        rel, is_active, is_baselined = _release_flags(state.release_manager,
+                                                      binding["release_id"])
+        if rel is None:
+            raise ProjectError("The Test column's release no longer exists.")
+        if not is_active:
+            raise ProjectError(f"Activate release '{rel.name}' to run this Test "
+                               "column (its rows are that release's ports).")
+        if is_baselined:
+            raise ProjectError(f"Release '{rel.name}' is baselined — its test "
+                               "results are frozen.")
+
+        tested_at = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        user = FileLockManager.get_username()
+        summary = []
+        with _worker_db(state) as wdb:
+            layout = wdb.load_column_layout()
+            port_state_col = next((n for (n, t, _v, _w) in layout
+                                   if t == "PortStateColumn"), None)
+            object_pairs = None
+            if wdb.has_release_objects(binding["release_id"]):
+                object_pairs = set(wdb.get_release_object_edges(binding["release_id"]))
+                for inl in wdb.get_release_inlined_functions(binding["release_id"]):
+                    object_pairs.add((inl["caller"], inl["name"]))
+            model_ids = _resolve_model_ids(state, params, wdb)
+            names = {m.id: m.name for m in state.require_arch().models}
+            for i, mid in enumerate(model_ids, 1):
+                if cancel.is_set():
+                    break
+                progress(f"Testing {names.get(mid, mid)} ({i}/{len(model_ids)})…")
+                code_map = wdb.get_model_code_map(mid, release_id=binding["release_id"])
+                rows = wdb.get_model_rows(mid)
+                counts = ct.run_on_rows(rows, col_name, binding, code_map, object_pairs,
+                                        port_state_col=port_state_col,
+                                        tested_at=tested_at)
+                wdb.save_model_rows(mid, rows)
+                summary.append({"model_id": mid, "model": names.get(mid, ""),
+                                "counts": counts, "has_code_map": bool(code_map)})
+                desc = (f"Call-tree test '{col_name}' run: "
+                        + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())))
+                try:
+                    wdb.add_history_entry(description=desc,
+                                          model_name=names.get(mid, ""),
+                                          username=user,
+                                          release_id=binding["release_id"])
+                except Exception:  # noqa: BLE001 — history must not fail the run
+                    pass
+            wdb.commit()
+
+        state.bus.publish("db-changed", {"reason": "calltree-tests-run",
+                                         "col_name": col_name})
+        return {"col_name": col_name, "tested_at": tested_at, "models": summary,
+                "has_objects": object_pairs is not None}
     return handler
 
 

@@ -111,6 +111,10 @@ def build_code_map_job(db_path, elf_hash, elf_path, source_dir, model_id,
         code_map = build_code_map(wparser, code_index, source_root=source_dir or "",
                                   prefer_source_calls=not has_call_tree,
                                   object_edges=object_edges)
+        # Call-tree Test columns compare this against their run time to flag
+        # verdicts recorded against an older build as stale.
+        import datetime as _dt
+        code_map["built_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
         # Commit on the worker's own connection → durable immediately, no project
         # Save required, nothing lost if the user doesn't hit Save afterwards.

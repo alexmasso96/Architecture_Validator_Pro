@@ -35,6 +35,7 @@ The matrix is fully customizable, and each column has a *type* that defines how 
 | **Port State** | A drop-down: *Released* / *In Work* / *Retired* / *Deleted* |
 | **Last Result / Release Result** | Per-release validation outcomes (see [Releases & Baselines](04-releases-and-baselines.md)) |
 | **Link** | Cross-references between rows |
+| **Call-tree Test** | Per-release automated check: is the matched function actually called? (see below) |
 
 Review Status and Port State are colour-coded so the state of every port is readable at a glance — reviewed rows go green, unreviewed rows red, retired ports grey out, and so on.
 
@@ -45,6 +46,28 @@ Open the **Columns** toolbar icon to add, remove, reorder, rename, and show/hide
 ![Column customizer](../../Media/images/column_customizer.png)
 
 A few rules keep things consistent: `TC. ID` always stays first, and once a row has been **Reviewed**, the columns holding its reviewed data are locked so they can't be deleted out from under a sign-off. You can also choose whether *Retired* and *Deleted* ports stay visible (via the **Filter ▾** menu).
+
+## Call-tree Test columns
+
+A **Call-tree Test** column checks, for every port, whether the function in a chosen Match column is really used in a release's firmware: it looks the function up in that release's [Code Map](09-code-map.md) call tree and records a verdict.
+
+**Adding one.** In **Columns**, click **＋ Test column…**, pick the **Match column** to test (only port/function Match columns are offered: a variable isn't "called") and the **release**, then **Add** and **Apply**. You can add one per release and Match column, so with several Match columns you choose which one each test checks. Tick **verified calls only** to count only calls confirmed by the release's imported `.o` files.
+
+**Running it.** Tests run only when you start them: click **▶** in the column header (shown while the column's release is active). Build the release's Code Map first; a model without one reports *No Data*.
+
+| Verdict | Meaning |
+|---|---|
+| **Passed** | Some function calls it. Hover the cell to see the callers; ✓ marks calls confirmed by the `.o` files. |
+| **Entry point** | Nothing calls it, but it calls other functions, so it is treated as started by the OS, scheduler or startup code. |
+| **Failed** | Nothing calls it and it calls nothing, or the function isn't in the release's call tree at all (the tooltip says which). |
+| **No Match** / **No Data** / **No Result** | The Match cell is empty / there is no code map for this model and release / the port is Retired or Deleted. |
+| **Not Run** | The test hasn't been run yet. |
+
+Calls made from **assembly** (for example a bootloader's start-up code calling a low-level init) are not visible in the C source. Import the release's `.o` files, including the assembled start-up objects, in the Code Map's **Objects** badge and those calls count as real callers.
+
+**Recorded, not live.** A verdict is stored with its evidence and the time it was run, so it doesn't change silently. If the Code Map is rebuilt afterwards, the cell shows **⟳** (stale) until you run the test again.
+
+**Manual verdicts.** While the column's release is active and not baselined, a tester can click a verdict and set it to *Passed*, *Failed* or *Entry point*, for example to accept a function the tool can't see being called. The cell shows **✎**, the tooltip keeps the tool's own verdict, re-running never overwrites a manual verdict, and **Reset to tool verdict** undoes it. Every run and every manual change is recorded in the history. Once the release is baselined, its test results are frozen.
 
 ## Port states & propagation
 

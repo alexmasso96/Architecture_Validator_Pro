@@ -6014,3 +6014,43 @@ button.update-pill:hover {
 .ai-selfhost-test.err {
   color: var(--red);
 }
+
+/* Call-tree Test columns */
+.test-run-btn {
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 16px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+  vertical-align: middle;
+}
+.test-run-btn:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.test-mark {
+  font-size: 10px;
+  opacity: 0.8;
+}
+.cc-testbind {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cc-testform {
+  flex-wrap: wrap;
+  align-items: center;
+}
+.cc-testlbl {
+  font-size: 12px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { useColumns, useModels, usePorts, useReleases } from "../api/hooks";
 import { useSSE } from "../api/useSSE";
-import type { ProjectStatus } from "../api/types";
+import type { ProjectStatus, TestColumnStatus } from "../api/types";
 import {
   cellText,
   initCyclicValue,
@@ -41,7 +41,12 @@ type FilterMode = "all" | "reviewed" | "not-reviewed" | "conflicts" | "broken";
 
 // Background jobs that mutate the port table — when one of these finishes we
 // must refetch so the grid reflects the new matches/symbols.
-const MUTATING_JOBS = new Set(["fuzzy_rematch", "import_symbols", "parse_elf"]);
+const MUTATING_JOBS = new Set([
+  "fuzzy_rematch",
+  "import_symbols",
+  "parse_elf",
+  "run_calltree_tests",
+]);
 
 export function Workspace({
   status,
@@ -155,6 +160,50 @@ export function Workspace({
 
   const ports = usePorts(activeModelId);
 
+  // Call-tree Test columns: per-model status (code-map build stamp for the
+  // stale marker, whether a code map exists for the Run button).
+  const [testStatus, setTestStatus] = useState<Record<string, TestColumnStatus>>({});
+  const testStatusSeq = useRef(0);
+  async function reloadTestStatus() {
+    const seq = ++testStatusSeq.current;
+    if (activeModelId === null || !(columns.data?.test_columns?.length)) {
+      setTestStatus({});
+      return;
+    }
+    try {
+      const r = await api.get<{ tests: TestColumnStatus[] }>(
+        `/models/${activeModelId}/calltree-tests`,
+      );
+      if (seq === testStatusSeq.current) {
+        setTestStatus(Object.fromEntries(r.tests.map((t) => [t.name, t])));
+      }
+    } catch {
+      /* keep the previous status on a transient failure */
+    }
+  }
+  useEffect(() => {
+    reloadTestStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeModelId, columns.data]);
+
+  async function runTest(colName: string) {
+    if (activeModelId === null) return;
+    const st = testStatus[colName];
+    if (st && !st.has_code_map) {
+      toast(`No code map for this model in ${st.release_name} — build it in the Code Map first.`);
+      return;
+    }
+    try {
+      await api.post("/jobs/run_calltree_tests", {
+        col_name: colName,
+        model_ids: [activeModelId],
+      });
+      toast(`Running ${colName}…`);
+    } catch (e) {
+      toast(`Run failed to start: ${(e as Error).message}`);
+    }
+  }
+
   // Refetch on relevant server-side changes (other clients, jobs, our edits).
   function refreshAll() {
     models.reload();
@@ -162,6 +211,7 @@ export function Workspace({
     releases.reload();
     ports.reload();
     onReloadStatus();
+    reloadTestStatus();
   }
 
   // Live-refresh when a port-mutating job finishes (the Re-match Symbols button,
@@ -183,7 +233,11 @@ export function Workspace({
 
   const resolved = useMemo(() => {
     if (!columns.data) return [];
-    return resolveColumns(columns.data.columns, columns.data.result_columns).filter((c) => {
+    return resolveColumns(
+      columns.data.columns,
+      columns.data.result_columns,
+      columns.data.test_columns,
+    ).filter((c) => {
       if (c.visible === true) return true;
       if (c.visible === false) return false;
       // null = "Auto" (Init/Cyclic): show only when some row has a meaningful value.
@@ -610,6 +664,8 @@ export function Workspace({
                 setMatchTarget({ rowIndex, col, x, y })
               }
               onUnlockCell={unlockCell}
+              testStatus={testStatus}
+              onRunTest={runTest}
               canEdit={canEdit}
               modelStatus={activeModel?.status ?? "In Work"}
             />

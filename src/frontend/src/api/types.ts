@@ -48,9 +48,28 @@ export interface ResultColumnMeta {
   is_baselined: boolean;
 }
 
+// Call-tree Test column: bound to one release + one function Match column.
+export interface TestColumnMeta {
+  name: string;
+  release_id: number;
+  release_name: string;
+  match_col: string;
+  strict: boolean;
+  is_active: boolean;
+  is_baselined: boolean;
+}
+
+// GET /api/models/{id}/calltree-tests — per Test column, for the active model.
+export interface TestColumnStatus extends TestColumnMeta {
+  has_code_map: boolean;
+  code_map_built_at: string;
+  has_objects: boolean;
+}
+
 export interface ColumnsResponse {
   columns: ColumnSpec[];
   result_columns?: ResultColumnMeta[];
+  test_columns?: TestColumnMeta[];
 }
 
 // A cell is a dict; "text" is the displayed value, "widget_text" for dropdowns.

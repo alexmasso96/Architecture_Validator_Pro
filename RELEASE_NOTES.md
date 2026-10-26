@@ -31,6 +31,22 @@ In on-machine validation. Version numbers are bumped when the release is cut.
   debug info and offered in the match picker tagged *inlined*.
 - LTO objects are detected and skipped with a clear reason.
 
+## ✅ New: Call-tree Test columns
+- A per-release table column that checks whether each port's matched function
+  is actually called: **Passed** (callers listed), **Entry point** (not called
+  but calls others: OS/scheduler/startup), or **Failed** (never called, or not
+  in the call tree). Bound to a chosen Match column, so projects with several
+  Match columns pick what each test checks.
+- Uses the release's call tree plus, when imported, the `.o` files, so calls
+  from assembly start-up code count as real callers; optional *verified calls
+  only* mode.
+- Run manually with ▶; results are recorded with their evidence, marked ⟳
+  stale after a call-tree rebuild, overridable by a tester until the release is
+  baselined (the tool verdict is kept), and logged in the history.
+
+## 🐛 Fixed (table)
+- Renaming a release **Result** column no longer loses its link to the release.
+
 ## 🤖 New: self-hosted AI (Ollama and vLLM)
 - Point AI Generation and AI Chat at your own **Ollama** or **vLLM** server
   (Preferences → AI Settings) so source code never leaves your infrastructure.

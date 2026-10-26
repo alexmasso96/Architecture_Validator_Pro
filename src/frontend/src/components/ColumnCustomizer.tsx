@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api/client";
+import type { ReleasesResponse, TestColumnMeta } from "../api/types";
+import { functionMatchColumns, TEST_COLUMN_TYPE } from "../columns";
 
 const SEARCH_TYPES = ["Port Search", "Function Search", "Variable Search"];
 const DEP_SUFFIXES = [" (Match)", " (Init)", " (Cyclic)"];
@@ -8,12 +10,19 @@ function isDepName(name: string): boolean {
   return name === "Port State" || DEP_SUFFIXES.some((s) => name.endsWith(s));
 }
 
+interface TestBinding {
+  release_id: number;
+  match_col: string;
+  strict: boolean;
+}
 interface Col {
   id: string; // stable: original name for existing cols, "__newN" for added ones
   name: string;
   type: string;
   visible: boolean | null; // null = Auto (Init/Cyclic only)
   width: number;
+  // Call-tree Test column created in this session (sent with Apply).
+  testBinding?: TestBinding;
 }
 interface Group {
   leader: Col;
@@ -23,6 +32,7 @@ interface EditorResponse {
   columns: { name: string; type: string; visible: boolean | null; width: number }[];
   locked: string[];
   addable_types: string[];
+  test_columns?: TestColumnMeta[];
 }
 
 const isInitCyclic = (type: string) => type === "InitColumn" || type === "CyclicColumn";
@@ -85,6 +95,13 @@ export function ColumnCustomizer({
   const [dropIdx, setDropIdx] = useState<number | null>(null); // hovered drop target
   const [justMovedId, setJustMovedId] = useState<string | null>(null); // brief flash
   const newId = useRef(0);
+  // Call-tree Test columns: existing bindings (by original name) + the add form.
+  const [testMeta, setTestMeta] = useState<Record<string, TestColumnMeta>>({});
+  const [releases, setReleases] = useState<{ id: number; name: string }[]>([]);
+  const [testFormOpen, setTestFormOpen] = useState(false);
+  const [testRelease, setTestRelease] = useState<number | null>(null);
+  const [testMatch, setTestMatch] = useState("");
+  const [testStrict, setTestStrict] = useState(false);
   const renameRef = useRef<HTMLInputElement>(null);
   // FLIP animation: remember each group row's screen position before a reorder
   // so we can slide rows smoothly to their new spots after React re-renders.
@@ -97,6 +114,11 @@ export function ColumnCustomizer({
         const r = await api.get<EditorResponse>("/columns/editor");
         setCols(r.columns.map((c) => ({ id: c.name, ...c })));
         setLocked(new Set(r.locked));
+        setTestMeta(Object.fromEntries((r.test_columns ?? []).map((t) => [t.name, t])));
+        const rel = await api.get<ReleasesResponse>("/releases");
+        const usable = rel.releases.filter((x) => x.selectable !== false);
+        setReleases(usable.map((x) => ({ id: x.id, name: x.name })));
+        setTestRelease(rel.active_release_id ?? usable[0]?.id ?? null);
         setTypes(r.addable_types);
         if (r.addable_types.length) setNewType(r.addable_types[0]);
       } catch (e) {
@@ -264,6 +286,39 @@ export function ColumnCustomizer({
     setNewName("");
   }
 
+  const matchOptions = functionMatchColumns(cols);
+
+  function addTestColumn() {
+    if (testRelease === null || !testMatch) return;
+    const rel = releases.find((r) => r.id === testRelease);
+    if (!rel) return;
+    const dup = cols.some(
+      (c) =>
+        c.type === TEST_COLUMN_TYPE &&
+        ((c.testBinding &&
+          c.testBinding.release_id === testRelease &&
+          c.testBinding.match_col === testMatch) ||
+          (testMeta[c.id] &&
+            testMeta[c.id].release_id === testRelease &&
+            testMeta[c.id].match_col === testMatch)),
+    );
+    if (dup) return toast(`'${testMatch}' already has a Test column for ${rel.name}.`);
+    const base = testMatch.replace(/ \(Match\)$/, "");
+    const name = uniqueName(`Test ${rel.name} · ${base}`);
+    setCols((cs) => [
+      ...cs,
+      {
+        id: `__new${newId.current++}`,
+        name,
+        type: TEST_COLUMN_TYPE,
+        visible: true,
+        width: 130,
+        testBinding: { release_id: testRelease, match_col: testMatch, strict: testStrict },
+      },
+    ]);
+    setTestFormOpen(false);
+  }
+
   async function apply() {
     setSaving(true);
     try {
@@ -278,6 +333,7 @@ export function ColumnCustomizer({
           type: c.type,
           visible: c.visible,
           width: c.width,
+          ...(c.testBinding ? { test_binding: c.testBinding } : {}),
         })),
         renames,
       });
@@ -365,7 +421,22 @@ export function ColumnCustomizer({
             {c.name}
           </span>
         )}
-        <span className="cc-type">{c.type}</span>
+        <span className="cc-type">
+          {c.type === TEST_COLUMN_TYPE ? "Call-tree Test" : c.type}
+        </span>
+        {c.type === TEST_COLUMN_TYPE && (
+          <span className="cc-testbind" title="Release and Match column this test checks">
+            {(() => {
+              const b = c.testBinding ?? testMeta[c.id];
+              if (!b) return "";
+              const relName =
+                "release_name" in b
+                  ? (b as TestColumnMeta).release_name
+                  : releases.find((r) => r.id === b.release_id)?.name ?? "?";
+              return `${relName} · ${b.match_col}${b.strict ? " · strict" : ""}`;
+            })()}
+          </span>
+        )}
         {isLocked && <span className="cc-lock" title="Locked — reviewed data">🔒</span>}
         {isLeader && g && !isTcid && (
           <span className="cc-actions">
@@ -485,6 +556,62 @@ export function ColumnCustomizer({
             </select>
             <button className="cc-addbtn" onClick={addColumn} disabled={!newName.trim()}>
               ＋ Add
+            </button>
+            <button
+              className="cc-addbtn"
+              onClick={() => {
+                setTestFormOpen((o) => !o);
+                if (!testMatch && matchOptions.length) setTestMatch(matchOptions[0]);
+              }}
+              title="Add a per-release call-tree test bound to a Match column"
+            >
+              ＋ Test column…
+            </button>
+          </div>
+        )}
+        {canEdit && testFormOpen && (
+          <div className="cc-add cc-testform">
+            <span className="cc-testlbl">Test</span>
+            <select
+              value={testMatch}
+              onChange={(e) => setTestMatch(e.target.value)}
+              title="Match column whose function is looked up in the call tree"
+            >
+              {matchOptions.length === 0 && <option value="">No function Match columns</option>}
+              {matchOptions.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <span className="cc-testlbl">in release</span>
+            <select
+              value={testRelease ?? ""}
+              onChange={(e) => setTestRelease(e.target.value ? Number(e.target.value) : null)}
+            >
+              {releases.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name}
+                </option>
+              ))}
+            </select>
+            <label
+              className="cc-testlbl"
+              title="Count only calls confirmed by the release's imported .o files"
+            >
+              <input
+                type="checkbox"
+                checked={testStrict}
+                onChange={(e) => setTestStrict(e.target.checked)}
+              />{" "}
+              verified calls only
+            </label>
+            <button
+              className="cc-addbtn"
+              onClick={addTestColumn}
+              disabled={!testMatch || testRelease === null}
+            >
+              Add
             </button>
           </div>
         )}
