@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { isDesktop, nativeSaveFile } from "../native";
 import { useColumns, useModels, usePorts, useReleases } from "../api/hooks";
 import { useSSE } from "../api/useSSE";
 import type { ProjectStatus, TestColumnStatus } from "../api/types";
@@ -201,6 +202,37 @@ export function Workspace({
       toast(`Running ${colName}…`);
     } catch (e) {
       toast(`Run failed to start: ${(e as Error).message}`);
+    }
+  }
+
+  // Call-tree Test column → one self-contained HTML report. Desktop: native
+  // Save dialog, the backend writes the file. Browser (dev): download it.
+  async function reportTest(colName: string) {
+    try {
+      if (isDesktop()) {
+        const safe = colName.replace(/[^\w.\- ]+/g, "_").trim().replace(/\s+/g, "_");
+        const path = await nativeSaveFile(`CallTree_Report_${safe}.html`);
+        if (!path) return;
+        const r = await api.post<{ path: string; entries: number }>("/calltree-tests/report", {
+          col_name: colName,
+          output_path: path,
+        });
+        toast(`Report saved (${r.entries} results) → ${r.path}`);
+      } else {
+        const r = await api.post<{ html: string; filename: string; entries: number }>(
+          "/calltree-tests/report",
+          { col_name: colName },
+        );
+        const url = URL.createObjectURL(new Blob([r.html], { type: "text/html" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = r.filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toast(`Report downloaded (${r.entries} results)`);
+      }
+    } catch (e) {
+      toast(`Report failed: ${(e as Error).message}`);
     }
   }
 
@@ -666,6 +698,7 @@ export function Workspace({
               onUnlockCell={unlockCell}
               testStatus={testStatus}
               onRunTest={runTest}
+              onReportTest={reportTest}
               canEdit={canEdit}
               modelStatus={activeModel?.status ?? "In Work"}
             />

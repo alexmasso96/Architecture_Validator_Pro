@@ -134,8 +134,34 @@ export interface LineageNode {
   elf_hash: string | null;
   parser_backend: string | null;
   has_source: boolean;
+  /** Component symbol files (FBL, APP, …) attached to this release. */
+  symbol_files?: SymbolFileTag[];
   grid_x: number;
   grid_y: number;
+}
+
+export interface SymbolFileTag {
+  component: string;
+  file_name: string;
+}
+
+// GET /api/releases/{id}/symbol-files
+export interface SymbolFileInfo extends SymbolFileTag {
+  elf_hash: string;
+  elf_path: string;
+  added_at: string;
+  functions: number;
+  variables: number;
+  parser_backend: string | null;
+  file_exists: boolean;
+  /** Function names also defined by an earlier component (merged into it). */
+  duplicates_of_earlier: number;
+}
+
+export interface SymbolFilesResponse {
+  release_id: number;
+  files: SymbolFileInfo[];
+  is_frozen: boolean;
 }
 
 export interface LineageResponse {
@@ -213,6 +239,9 @@ export interface FunctionDetail {
   callees: string[];
   globals: GlobalMatch[];
   tooltip_html: string;
+  /** Multi-symbol-file release: the component the address comes from. */
+  component?: string | null;
+  components?: string[];
 }
 
 export interface SourceResponse {

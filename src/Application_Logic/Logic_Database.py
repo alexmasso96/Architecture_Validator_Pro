@@ -52,6 +52,28 @@ def _timed(label: str, **extra):
 
 DB_SCHEMA_VERSION = 4
 
+# Component name given to a release's symbol file when none is chosen — and to
+# the single ELF of a project created before releases had several files.
+DEFAULT_SYMBOL_COMPONENT = "Main"
+
+
+def elf_hash_list(elf_hash) -> list:
+    """One hash or an iterable of hashes → a de-duplicated list (order kept,
+    empties dropped). Lets the ELF-data readers serve one file or the union
+    of a release's component files with the same call."""
+    if not elf_hash:
+        return []
+    items = [elf_hash] if isinstance(elf_hash, str) else list(elf_hash)
+    out = []
+    for h in items:
+        if h and h not in out:
+            out.append(h)
+    return out
+
+
+def _in_params(hashes: list) -> str:
+    return "(" + ",".join("?" * len(hashes)) + ")"
+
 
 class _TxnSerializedConnection:
     """Thin sqlite3.Connection proxy that serializes `with conn:` transaction
@@ -558,6 +580,20 @@ class ProjectDatabase:
                 CREATE INDEX IF NOT EXISTS idx_release_inlined_functions
                     ON release_inlined_functions(release_id);
 
+                -- Several symbol files (ELF/.out/JSON caches) per release, one
+                -- per component (e.g. FBL + APP). The ELF data itself stays
+                -- keyed by elf_hash; releases.elf_hash/elf_path mirror the
+                -- first component (the "primary") for older readers.
+                CREATE TABLE IF NOT EXISTS release_symbol_files (
+                    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+                    component  TEXT    NOT NULL,
+                    elf_hash   TEXT    NOT NULL,
+                    elf_path   TEXT    NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    added_at   TEXT    NOT NULL DEFAULT '',
+                    PRIMARY KEY (release_id, component)
+                );
+
                 CREATE TABLE IF NOT EXISTS elf_index (
                     elf_hash         TEXT PRIMARY KEY,
                     elf_path         TEXT NOT NULL DEFAULT '',
@@ -777,6 +813,19 @@ class ProjectDatabase:
                             (r[0], active_rid, r[1], r[7], r[2], r[3], r[4], r[5], r[6]))
             except sqlite3.OperationalError:
                 pass
+
+            # Multi-symbol-file releases: a release imported before components
+            # existed becomes one DEFAULT_SYMBOL_COMPONENT entry. Idempotent —
+            # only releases with an ELF and no component rows are touched, and
+            # removing a release's last component clears releases.elf_hash, so
+            # the entry never comes back.
+            self._conn.execute(
+                "INSERT INTO release_symbol_files "
+                "(release_id, component, elf_hash, elf_path, sort_order, added_at) "
+                "SELECT r.id, ?, r.elf_hash, COALESCE(r.elf_path, ''), 0, r.timestamp "
+                "FROM releases r WHERE COALESCE(r.elf_hash, '') != '' AND NOT EXISTS "
+                " (SELECT 1 FROM release_symbol_files s WHERE s.release_id = r.id)",
+                (DEFAULT_SYMBOL_COMPONENT,))
 
             # Record / upgrade the schema version on the SAME connection+transaction
             # (must NOT call set_meta here — it opens its own `with self._conn`).
@@ -1282,7 +1331,17 @@ class ProjectDatabase:
                 (name, is_baseline, parent_release_name, description,
                  ts, elf_path, elf_hash, sort_order)
             )
-            return cur.lastrowid
+            rid = cur.lastrowid
+            if elf_hash:
+                # A release created with an ELF starts with it as its one
+                # (default) component; branch/baseline then copy the source's
+                # full component set over it.
+                self._conn.execute(
+                    "INSERT INTO release_symbol_files"
+                    " (release_id, component, elf_hash, elf_path, sort_order, added_at)"
+                    " VALUES (?,?,?,?,0,?)",
+                    (rid, DEFAULT_SYMBOL_COMPONENT, elf_hash, elf_path or "", ts))
+            return rid
 
     def update_release(self, release_id: int, **kwargs):
         allowed = {"name", "is_baseline", "parent_release_name", "description",
@@ -1297,6 +1356,34 @@ class ProjectDatabase:
                 f"UPDATE releases SET {set_clause} WHERE id=?",
                 list(fields.values()) + [release_id]
             )
+            if "elf_hash" in fields:
+                self._apply_primary_elf(release_id, fields["elf_hash"],
+                                        fields.get("elf_path"))
+
+    def _apply_primary_elf(self, release_id: int, elf_hash, elf_path) -> None:
+        """Legacy single-ELF writes (update_release(elf_hash=…)) set the
+        PRIMARY component's file; the component table stays the source of
+        truth, so a None from a caller's stale in-memory copy never drops
+        component files. Call inside a transaction."""
+        if elf_hash:
+            row = self._conn.execute(
+                "SELECT component, elf_hash FROM release_symbol_files"
+                " WHERE release_id=? ORDER BY sort_order, rowid LIMIT 1",
+                (release_id,)).fetchone()
+            if row is None:
+                self._conn.execute(
+                    "INSERT INTO release_symbol_files"
+                    " (release_id, component, elf_hash, elf_path, sort_order, added_at)"
+                    " VALUES (?,?,?,?,0,?)",
+                    (release_id, DEFAULT_SYMBOL_COMPONENT, elf_hash, elf_path or "",
+                     datetime.datetime.now().isoformat(timespec="seconds")))
+            elif row[1] != elf_hash or elf_path:
+                self._conn.execute(
+                    "UPDATE release_symbol_files SET elf_hash=?,"
+                    " elf_path=COALESCE(NULLIF(?, ''), elf_path)"
+                    " WHERE release_id=? AND component=?",
+                    (elf_hash, elf_path or "", release_id, row[0]))
+        self._sync_release_primary_elf(release_id)
 
     def set_active_release(self, release_id: Optional[int]):
         with self._conn:
@@ -1319,6 +1406,156 @@ class ProjectDatabase:
             self._conn.execute(
                 "DELETE FROM ai_release_maps WHERE release_id=?", (release_id,))
             self._conn.execute("DELETE FROM releases WHERE id=?", (release_id,))
+
+    # ------------------------------------------------------------------
+    # Release symbol files — one per component (FBL, APP, …)
+    # ------------------------------------------------------------------
+
+    def get_release_symbol_files(self, release_id: int) -> list:
+        """[{component, elf_hash, elf_path, sort_order, added_at}] in priority
+        order (the first entry is the release's primary file)."""
+        cur = self._conn.execute(
+            "SELECT component, elf_hash, elf_path, sort_order, added_at"
+            " FROM release_symbol_files WHERE release_id=?"
+            " ORDER BY sort_order, rowid", (release_id,))
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_release_elf_hashes(self, release_id: Optional[int]) -> list:
+        if release_id is None:
+            return []
+        return elf_hash_list(f["elf_hash"]
+                             for f in self.get_release_symbol_files(release_id))
+
+    def set_release_symbol_file(self, release_id: int, component: str,
+                                elf_hash: str, elf_path: str = "",
+                                _allow_frozen: bool = False) -> str:
+        """Attach (or replace) the symbol file of one component. Returns
+        'added' or 'replaced'. A component keeps its position on replace."""
+        component = (component or "").strip()
+        if not component:
+            raise ValueError("Component name cannot be empty.")
+        if not elf_hash:
+            raise ValueError("Symbol file has no hash (import failed?).")
+        self._guard_release_writable(release_id, _allow_frozen)
+        files = self.get_release_symbol_files(release_id)
+        clash = next((f for f in files if f["elf_hash"] == elf_hash
+                      and f["component"] != component), None)
+        if clash:
+            raise ValueError(f"That file is already attached to this release "
+                             f"as component '{clash['component']}'.")
+        existing = next((f for f in files if f["component"] == component), None)
+        ts = datetime.datetime.now().isoformat(timespec="seconds")
+        with self._conn:
+            if existing:
+                self._conn.execute(
+                    "UPDATE release_symbol_files SET elf_hash=?, elf_path=?, added_at=?"
+                    " WHERE release_id=? AND component=?",
+                    (elf_hash, elf_path or "", ts, release_id, component))
+            else:
+                order = max((f["sort_order"] for f in files), default=-1) + 1
+                self._conn.execute(
+                    "INSERT INTO release_symbol_files"
+                    " (release_id, component, elf_hash, elf_path, sort_order, added_at)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (release_id, component, elf_hash, elf_path or "", order, ts))
+            self._sync_release_primary_elf(release_id)
+        return "replaced" if existing else "added"
+
+    def remove_release_symbol_file(self, release_id: int,
+                                   component: str) -> Optional[dict]:
+        """Detach one component's file; returns the removed entry (or None)."""
+        self._guard_release_writable(release_id, False)
+        existing = next((f for f in self.get_release_symbol_files(release_id)
+                         if f["component"] == component), None)
+        if existing is None:
+            return None
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM release_symbol_files WHERE release_id=? AND component=?",
+                (release_id, component))
+            self._sync_release_primary_elf(release_id)
+        return existing
+
+    def rename_release_symbol_file(self, release_id: int, old: str, new: str) -> None:
+        new = (new or "").strip()
+        if not new:
+            raise ValueError("Component name cannot be empty.")
+        self._guard_release_writable(release_id, False)
+        names = {f["component"] for f in self.get_release_symbol_files(release_id)}
+        if old not in names:
+            raise ValueError(f"No component '{old}' in this release.")
+        if new != old and new in names:
+            raise ValueError(f"Component '{new}' already exists in this release.")
+        with self._conn:
+            self._conn.execute(
+                "UPDATE release_symbol_files SET component=?"
+                " WHERE release_id=? AND component=?", (new, release_id, old))
+
+    def copy_release_symbol_files(self, src_id: int, dst_id: int) -> None:
+        """Give ``dst`` exactly ``src``'s component files (branch / baseline).
+        The ELF data is shared by hash, so nothing is duplicated."""
+        files = self.get_release_symbol_files(src_id)
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM release_symbol_files WHERE release_id=?", (dst_id,))
+            self._conn.executemany(
+                "INSERT INTO release_symbol_files"
+                " (release_id, component, elf_hash, elf_path, sort_order, added_at)"
+                " VALUES (?,?,?,?,?,?)",
+                [(dst_id, f["component"], f["elf_hash"], f["elf_path"],
+                  f["sort_order"], f["added_at"]) for f in files])
+            self._sync_release_primary_elf(dst_id)
+
+    def _sync_release_primary_elf(self, release_id: int) -> None:
+        """Mirror the first component into releases.elf_hash/elf_path (None
+        when the release has no symbol file left). Call inside a transaction."""
+        row = self._conn.execute(
+            "SELECT elf_hash, elf_path FROM release_symbol_files WHERE release_id=?"
+            " ORDER BY sort_order, rowid LIMIT 1", (release_id,)).fetchone()
+        self._conn.execute(
+            "UPDATE releases SET elf_hash=?, elf_path=? WHERE id=?",
+            (row[0] if row else None, (row[1] or None) if row else None, release_id))
+
+    def is_elf_referenced(self, elf_hash: str) -> bool:
+        """True while any release (or baseline) still uses this ELF's data."""
+        return self._conn.execute(
+            "SELECT 1 FROM release_symbol_files WHERE elf_hash=?"
+            " UNION SELECT 1 FROM releases WHERE elf_hash=? LIMIT 1",
+            (elf_hash, elf_hash)).fetchone() is not None
+
+    def drop_elf_if_unreferenced(self, elf_hash: str) -> bool:
+        """Delete an ELF's symbol data once no release uses it any more (a
+        removed or replaced component file). Returns True if dropped."""
+        if not elf_hash or self.is_elf_referenced(elf_hash):
+            return False
+        self.delete_elf(elf_hash)
+        return True
+
+    def get_symbol_components(self, files: list, names) -> dict:
+        """{name: [components defining it]} for ``names`` (functions or global
+        variables), components in the release's priority order."""
+        names = [n for n in dict.fromkeys(names) if n]
+        if not files or not names:
+            return {}
+        comp_of = {}
+        for f in files:
+            comp_of.setdefault(f["elf_hash"], []).append(f["component"])
+        hashes = list(comp_of)
+        order = {f["component"]: i for i, f in enumerate(files)}
+        out: dict = {}
+        for table in ("elf_functions", "elf_global_vars", "elf_inlined_functions"):
+            cur = self._conn.execute(
+                f"SELECT DISTINCT elf_hash, name FROM {table}"
+                f" WHERE elf_hash IN {_in_params(hashes)} AND name IN {_in_params(names)}",
+                hashes + names)
+            for h, n in cur.fetchall():
+                for comp in comp_of.get(h, []):
+                    lst = out.setdefault(n, [])
+                    if comp not in lst:
+                        lst.append(comp)
+        for lst in out.values():
+            lst.sort(key=lambda c: order.get(c, 0))
+        return out
 
     # ------------------------------------------------------------------
     # #2E — release-keyed source code store (gzip blobs, lazy reads)
@@ -1990,17 +2227,29 @@ class ProjectDatabase:
                  self._enc_text("A", return_type), elf_hash, name)
             )
 
-    def get_function_names(self, elf_hash: str) -> list:
-        cur = self._conn.execute(
-            "SELECT name FROM elf_functions WHERE elf_hash=?", (elf_hash,)
-        )
-        return [r[0] for r in cur.fetchall()]
+    def get_function_names(self, elf_hash) -> list:
+        """Function names of one ELF — or, given several hashes (a release's
+        component files), their union with duplicates listed once."""
+        return self._names_in("elf_functions", elf_hash)
 
-    def get_variable_names(self, elf_hash: str) -> list:
-        cur = self._conn.execute(
-            "SELECT name FROM elf_global_vars WHERE elf_hash=?", (elf_hash,)
-        )
-        return [r[0] for r in cur.fetchall()]
+    def get_variable_names(self, elf_hash) -> list:
+        return self._names_in("elf_global_vars", elf_hash)
+
+    def _names_in(self, table: str, elf_hash) -> list:
+        hashes = elf_hash_list(elf_hash)
+        if len(hashes) == 1:
+            cur = self._conn.execute(
+                f"SELECT name FROM {table} WHERE elf_hash=?", (hashes[0],))
+            return [r[0] for r in cur.fetchall()]
+        # One query per component file, in priority order (deterministic).
+        out, seen = [], set()
+        for h in hashes:
+            for (name,) in self._conn.execute(
+                    f"SELECT name FROM {table} WHERE elf_hash=?", (h,)).fetchall():
+                if name not in seen:
+                    seen.add(name)
+                    out.append(name)
+        return out
 
     def bulk_insert_inlined_functions(self, elf_hash: str, inlined) -> None:
         """#6D: store DWARF inlined-subroutine records ({name, caller} dicts)."""
@@ -2016,16 +2265,22 @@ class ProjectDatabase:
                 "INSERT OR REPLACE INTO elf_inlined_functions"
                 " (elf_hash, name, caller) VALUES (?,?,?)", rows)
 
-    def get_inlined_only_function_names(self, elf_hash: str) -> list:
+    def get_inlined_only_function_names(self, elf_hash) -> list:
         """Functions that exist only as inline expansions — no standalone
         elf_functions row (the optimizer removed their symbol). These are the
-        entries the match picker must offer as 'inlined — no address'."""
+        entries the match picker must offer as 'inlined — no address'.
+        Several hashes: inlined-only in every one of them (a function with an
+        address in any component file has an address)."""
+        hashes = elf_hash_list(elf_hash)
+        if not hashes:
+            return []
+        inn = _in_params(hashes)
         cur = self._conn.execute(
             "SELECT DISTINCT i.name FROM elf_inlined_functions i "
-            "WHERE i.elf_hash=? AND NOT EXISTS "
+            f"WHERE i.elf_hash IN {inn} AND NOT EXISTS "
             " (SELECT 1 FROM elf_functions f "
-            "  WHERE f.elf_hash=i.elf_hash AND f.name=i.name) "
-            "ORDER BY i.name", (elf_hash,))
+            f"  WHERE f.elf_hash IN {inn} AND f.name=i.name) "
+            "ORDER BY i.name", hashes + hashes)
         return [r[0] for r in cur.fetchall()]
 
     def get_inlined_function_callers(self, elf_hash: str, name: str) -> list:

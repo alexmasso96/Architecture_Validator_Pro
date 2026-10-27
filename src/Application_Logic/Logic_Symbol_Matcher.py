@@ -24,11 +24,13 @@ class SymbolMatcher:
     Loads only symbol *names* into RAM — avoids the 7 GB spike from full objects.
     """
 
-    def __init__(self, parser: ELFParser, db=None, elf_hash: Optional[str] = None) -> None:
+    def __init__(self, parser: ELFParser, db=None, elf_hash=None) -> None:
         self.parser: ELFParser = parser
 
         if db is not None and elf_hash:
-            # DB-backed path — load only name strings, not full objects
+            # DB-backed path — load only name strings, not full objects. A list
+            # of hashes (a release's component symbol files) is one union pool;
+            # a name defined in several components is offered once.
             self.all_function_names: List[str] = db.get_function_names(elf_hash)
             self.all_variable_names: List[str] = db.get_variable_names(elf_hash)
             # #6D: functions that exist only as inline expansions (no symbol,

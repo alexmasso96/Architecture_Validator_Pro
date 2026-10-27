@@ -86,6 +86,7 @@ export function PortsTable({
   modelStatus,
   testStatus,
   onRunTest,
+  onReportTest,
 }: {
   columns: ResolvedColumn[];
   rows: PortRow[];
@@ -98,6 +99,7 @@ export function PortsTable({
   modelStatus: string;
   testStatus?: Record<string, TestColumnStatus>;
   onRunTest?: (colName: string) => void;
+  onReportTest?: (colName: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pill, setPill] = useState<PillTarget | null>(null);
@@ -489,6 +491,18 @@ export function PortsTable({
                       ▶
                     </button>
                   )}
+                {c.role === "calltest" && onReportTest && c.test?.is_active && (
+                  <button
+                    className="test-run-btn"
+                    title={`Generate an HTML report of ${c.name} (all models)`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onReportTest(c.name);
+                    }}
+                  >
+                    ⎙
+                  </button>
+                )}
                 <span
                   className="col-resizer"
                   title="Drag to resize"

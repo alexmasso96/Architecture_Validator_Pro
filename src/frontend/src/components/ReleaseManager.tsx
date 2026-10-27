@@ -4,6 +4,7 @@ import { useSSE } from "../api/useSSE";
 import type { LineageNode, LineageResponse } from "../api/types";
 import { FolderPicker } from "./FolderPicker";
 import { BaselineDiff } from "./BaselineDiff";
+import { SymbolFilesDialog } from "./SymbolFilesDialog";
 
 // Tree-view grid geometry (px per cell).
 const COL_W = 168;
@@ -39,6 +40,8 @@ export function ReleaseManager({
   const [pickFor, setPickFor] = useState<LineageNode | null>(null);
   // When set, the table-diff modal is open comparing the active model to this baseline.
   const [compareWith, setCompareWith] = useState<LineageNode | null>(null);
+  // When set, the Symbol Files dialog is open for this release.
+  const [symbolsFor, setSymbolsFor] = useState<LineageNode | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -314,6 +317,17 @@ export function ReleaseManager({
                             ✓ Source
                           </span>
                         )}
+                        {(n.symbol_files?.length ?? 0) > 1 && (
+                          <span
+                            className="mm-tag comp"
+                            title={
+                              "Component symbol files:\n" +
+                              n.symbol_files!.map((f) => `${f.component}: ${f.file_name}`).join("\n")
+                            }
+                          >
+                            ◆ {n.symbol_files!.map((f) => f.component).join(" + ")}
+                          </span>
+                        )}
                         {n.parser_backend && (
                           <span
                             className="mm-tag"
@@ -368,6 +382,13 @@ export function ReleaseManager({
                               Result Col
                             </button>
                           )}
+                          <button
+                            disabled={busy}
+                            title="Symbol files of this release, one per component (FBL, APP, …)"
+                            onClick={() => setSymbolsFor(n)}
+                          >
+                            Symbols{(n.symbol_files?.length ?? 0) > 0 ? ` (${n.symbol_files!.length})` : ""}…
+                          </button>
                           {projectEditable && (
                             <button disabled={busy} onClick={() => importSource(n)}>
                               Import Source
@@ -496,6 +517,21 @@ export function ReleaseManager({
             setPickFor(null);
             if (node) doImportSource(node, path);
           }}
+        />
+      )}
+
+      {symbolsFor && (
+        <SymbolFilesDialog
+          releaseId={symbolsFor.id}
+          releaseName={symbolsFor.name}
+          isActive={symbolsFor.is_active}
+          editable={projectEditable}
+          onClose={() => setSymbolsFor(null)}
+          onChanged={() => {
+            reload();
+            onChanged();
+          }}
+          toast={toast}
         />
       )}
 

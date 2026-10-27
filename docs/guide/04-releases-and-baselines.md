@@ -19,11 +19,26 @@ From here you can:
 | **Activate** | Make a release active — the matrix re-matches against that build's symbols |
 | **Add release** | Bring in another ELF as a new release |
 | **Rename / Delete** | Manage the release list |
+| **Symbols…** | Manage the release's symbol files — one per component (see below) |
 | **Map / Import Source** | Attach a C source folder to the release (stored in the project, keyed by release) |
 | **Branch** | Create a new editable release from an existing one |
 | **Result column** | Add a per-release validation-result column to the matrix |
 
 Only the active release is held in memory, so projects with many large ELF builds stay responsive. Source is imported **once** and stored inside the `.arch` keyed by release — everywhere that used to need a folder picker (Code Map, Change Log, AI) now just reads from a release dropdown.
+
+## Several symbol files per release (FBL, APP, …)
+
+One release can hold **several symbol files**, one per component, for example the bootloader (**FBL**) and the application (**APP**), each built into its own ELF / Renesas `.out` / `.abs` / `.axf` image (a `.json` symbol cache works too). Click **Symbols…** on the release in the Release Manager:
+
+- **Add Symbol File…**: type a component name (left empty, the file's name is used) and pick the file. It is parsed in the background and added to the release.
+- **Replace…**: import a new build for that component; it keeps its place in the list.
+- **Rename** / **Remove**: rename a component, or detach its file. A removed file's symbol data is deleted from the project once no other release or baseline still uses it.
+
+Everything that reads symbols uses **all of a release's files together**: the Match picker (each candidate shows which component it comes from), **Re-match**, the [Code Map](09-code-map.md) (a function's details show its component) and the call-tree Test columns. If the release is active, adding or removing a file re-matches the table automatically.
+
+**Same name in several components.** Names such as `main` or a driver compiled into both images (`Can_Init`) appear once. The entry takes its address, size and signature from the **first** component in the list (marked *primary*) and gets the call edges of **every** component that defines it, so the call tree is the union of all images. The dialog shows how many functions of each file are shared with an earlier one.
+
+Every add, replace, rename and remove is written to the change history. Branches and baselines take a copy of the release's component list; a frozen baseline's list can't be changed. Projects created before this feature open with their single file as one component named **Main**, which you can rename.
 
 ## Baselines
 

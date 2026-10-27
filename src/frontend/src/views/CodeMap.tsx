@@ -588,6 +588,17 @@ function DetailsCard({
         <span title="Address">addr {hexAddr}</span>
         <span title="Size">size {detail.size || 0} B</span>
         {detail.return_type && <span>returns {detail.return_type}</span>}
+        {detail.component && (
+          <span
+            title={
+              (detail.components?.length ?? 0) > 1
+                ? `Defined in ${detail.components!.join(", ")} — merged; address from ${detail.component}`
+                : "Component symbol file"
+            }
+          >
+            ◆ {(detail.components?.length ?? 0) > 1 ? detail.components!.join(" · ") : detail.component}
+          </span>
+        )}
         {detail.file && (
           <span title={detail.file}>
             {detail.file.split(/[\\/]/).pop()}

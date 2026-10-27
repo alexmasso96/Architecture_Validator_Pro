@@ -128,11 +128,82 @@ def elf_has_call_tree(parser, *, sample: int = 12) -> bool:
             disasm_ok = True
     return disasm_ok
 
+class ComponentParsers:
+    """Several symbol files of ONE release (e.g. FBL + APP), each a parser
+    bound to its own ELF, in priority order. Pass it to build_code_map in
+    place of a single parser to map the union of all components' symbols.
+
+    ``parts`` = [(component, parser, has_call_tree)] — has_call_tree may be
+    None to let build_code_map probe that ELF itself.
+
+    Duplicate names (the same symbol in several components) merge into ONE
+    code-map function: address/size/signature come from the first component
+    that defines it, call edges are the union over every component, and the
+    entry lists all its components."""
+
+    def __init__(self, parts):
+        self.parts = [(c, p, t) for (c, p, t) in parts]
+
+    @property
+    def components(self) -> List[str]:
+        return [c for (c, _p, _t) in self.parts]
+
+
+def _load_dwarf(parser) -> Tuple[dict, dict, dict]:
+    """(functions, global vars, structures) of one parser — DB-backed when
+    it is bound to an imported ELF hash, else its in-memory lists."""
+    dwarf_funcs, dwarf_globals, dwarf_structures = {}, {}, {}
+    if getattr(parser, "_db", None) and getattr(parser, "_active_elf_hash", None):
+        # Database-backed parser
+        db = parser._db
+        elf_hash = parser._active_elf_hash
+        try:
+            cur = db.execute(
+                "SELECT name, address, size, parameters, return_type FROM elf_functions WHERE elf_hash=?",
+                (elf_hash,)
+            )
+            for r in cur.fetchall():
+                dec_params = db._dec_text("A", r["parameters"])
+                dwarf_funcs[r["name"]] = {
+                    "address": r["address"],
+                    "size": r["size"],
+                    "parameters": json.loads(dec_params) if dec_params else [],
+                    "return_type": db._dec_text("A", r["return_type"]) or ""
+                }
+
+            cur_g = db.execute(
+                "SELECT name, var_type FROM elf_global_vars WHERE elf_hash=?",
+                (elf_hash,)
+            )
+            for r in cur_g.fetchall():
+                dwarf_globals[r["name"]] = db._dec_text("A", r["var_type"])
+
+            dwarf_structures = db.get_all_structures(elf_hash)
+        except Exception as e:
+            logger.error(f"Failed to query DWARF from DB: {e}")
+    elif parser:
+        # In-memory parser
+        for func in getattr(parser, "functions", []):
+            dwarf_funcs[func.name] = {
+                "address": func.address,
+                "size": func.size,
+                "parameters": func.parameters,
+                "return_type": func.return_type or ""
+            }
+        dwarf_globals = getattr(parser, "global_vars_dwarf", {})
+        dwarf_structures = getattr(parser, "structures", {})
+    return dwarf_funcs, dwarf_globals, dwarf_structures
+
+
 def build_code_map(parser, code_index, *, source_root: str,
                    prefer_source_calls: Optional[bool] = None,
                    object_edges: Optional[set] = None) -> dict:
     """
     Join the static C AST index data with DWARF extraction records.
+
+    ``parser`` is one ELF parser, or a ComponentParsers for a release with
+    several symbol files (each function then also carries "component" — the
+    file its address comes from — and "components", every file defining it).
 
     object_edges (#6C): the release's compiler-verified (caller, callee)
     pairs from the .o enrichment dataset (text relocations + inlined-
@@ -166,61 +237,59 @@ def build_code_map(parser, code_index, *, source_root: str,
         "edge_verification": bool
     }
     """
-    # 1. Retrieve DWARF function and global details from parser
+    # #2C: per parser, decide whether to disassemble for call edges or fall
+    # back to the source-derived call graph. When an ELF carries no usable
+    # call tree (stripped / ET_REL / no Capstone), the per-function
+    # extract_subcalls() calls only return error strings — so skip them and
+    # let the static source edges (ast_func.calls) be the primary graph. The
+    # caller may pass the decision explicitly (the Code Map worker does, to
+    # avoid re-probing); otherwise we auto-detect once per ELF here.
+    if isinstance(parser, ComponentParsers):
+        raw_parts = parser.parts
+    else:
+        raw_parts = [(None, parser, None)] if parser else []
+    parts = []   # (component, parser, use_disasm, functions)
+    multi = len(raw_parts) > 1
+
+    # 1. Retrieve DWARF function and global details from the parser(s);
+    # the first component defining a name wins its address/size/signature.
     dwarf_funcs = {}
     dwarf_globals = {}
     dwarf_structures = {}
-    
-    if parser and getattr(parser, "_db", None) and getattr(parser, "_active_elf_hash", None):
-        # Database-backed parser
-        db = parser._db
-        elf_hash = parser._active_elf_hash
-        try:
-            cur = db.execute(
-                "SELECT name, address, size, parameters, return_type FROM elf_functions WHERE elf_hash=?",
-                (elf_hash,)
-            )
-            for r in cur.fetchall():
-                dec_params = db._dec_text("A", r["parameters"])
-                dwarf_funcs[r["name"]] = {
-                    "address": r["address"],
-                    "size": r["size"],
-                    "parameters": json.loads(dec_params) if dec_params else [],
-                    "return_type": db._dec_text("A", r["return_type"]) or ""
-                }
-            
-            cur_g = db.execute(
-                "SELECT name, var_type FROM elf_global_vars WHERE elf_hash=?",
-                (elf_hash,)
-            )
-            for r in cur_g.fetchall():
-                dwarf_globals[r["name"]] = db._dec_text("A", r["var_type"])
-            
-            dwarf_structures = db.get_all_structures(elf_hash)
-        except Exception as e:
-            logger.error(f"Failed to query DWARF from DB: {e}")
-    elif parser:
-        # In-memory parser
-        for func in getattr(parser, "functions", []):
-            dwarf_funcs[func.name] = {
-                "address": func.address,
-                "size": func.size,
-                "parameters": func.parameters,
-                "return_type": func.return_type or ""
-            }
-        dwarf_globals = getattr(parser, "global_vars_dwarf", {})
-        dwarf_structures = getattr(parser, "structures", {})
+    owners: Dict[str, List[str]] = {}
+    for comp, p, has_tree in raw_parts:
+        if has_tree is not None:
+            use = bool(has_tree)
+        elif prefer_source_calls is not None:
+            use = not prefer_source_calls
+        else:
+            use = elf_has_call_tree(p)
+        funcs, globs, structs = _load_dwarf(p)
+        parts.append((comp, p, use, funcs))
+        for name, df in funcs.items():
+            dwarf_funcs.setdefault(name, df)
+            if comp is not None and comp not in owners.setdefault(name, []):
+                owners[name].append(comp)
+        for name, vtype in globs.items():
+            dwarf_globals.setdefault(name, vtype)
+        for name, fields in structs.items():
+            dwarf_structures.setdefault(name, fields)
 
-    # #2C: decide whether to disassemble for call edges or fall back to the
-    # source-derived call graph. When the ELF carries no usable call tree
-    # (stripped / ET_REL / no Capstone), the per-function extract_subcalls() calls
-    # only return error strings — so skip them and let the static source edges
-    # (ast_func.calls) be the primary graph. The caller may pass the decision
-    # explicitly (the Code Map worker does, to avoid re-probing); otherwise we
-    # auto-detect once here.
-    if prefer_source_calls is None:
-        prefer_source_calls = bool(parser) and not elf_has_call_tree(parser)
-    use_disasm = bool(parser) and not prefer_source_calls
+    def subcalls(name: str) -> List[str]:
+        """Capstone callees of ``name`` — the union over every component
+        that defines it and has a usable call tree."""
+        out = set()
+        for _comp, p, use, funcs in parts:
+            if use and name in funcs:
+                try:
+                    out.update(_strip_capstone_noise(p.extract_subcalls(name)))
+                except Exception as e:
+                    logger.debug(f"Failed to extract subcalls for {name}: {e}")
+        return sorted(out)
+
+    def component_keys(name: Optional[str]) -> dict:
+        comps = owners.get(name) if (multi and name) else None
+        return {"component": comps[0], "components": list(comps)} if comps else {}
 
     # 2. Build mapping tables to resolve mangled/demangled names
     norm_map = {}  # normalized_demangled_name -> original_mangled_name
@@ -286,11 +355,7 @@ def build_code_map(parser, code_index, *, source_root: str,
             
             # Extract subcalls using Capstone — unless the ELF has no usable call
             # tree, in which case we rely on the source-derived edges (#2C).
-            if use_disasm:
-                try:
-                    dwarf_calls = _strip_capstone_noise(parser.extract_subcalls(dwarf_name))
-                except Exception as e:
-                    logger.debug(f"Failed to extract subcalls for {dwarf_name}: {e}")
+            dwarf_calls = subcalls(dwarf_name)
 
         # Combine calls from static AST analysis and dynamic Capstone disassembly
         combined_calls = sorted(list(set(ast_func.calls + dwarf_calls)))
@@ -318,7 +383,8 @@ def build_code_map(parser, code_index, *, source_root: str,
             "writes_vars": ast_func.writes_vars,
             "conditions": ast_func.conditions,
             "parameters": params,
-            "return_type": return_type
+            "return_type": return_type,
+            **component_keys(dwarf_name),
         }
 
     # Add remaining DWARF functions that weren't in the AST (e.g. assembly/stdlib helpers)
@@ -330,12 +396,7 @@ def build_code_map(parser, code_index, *, source_root: str,
         if norm_demangled not in joined_functions and mangled_name not in joined_functions:
             name_to_use = norm_demangled if "::" in norm_demangled else mangled_name
             
-            dwarf_calls = []
-            if use_disasm:
-                try:
-                    dwarf_calls = _strip_capstone_noise(parser.extract_subcalls(mangled_name))
-                except Exception:
-                    pass
+            dwarf_calls = subcalls(mangled_name)
 
             joined_functions[name_to_use] = {
                 "address": df["address"],
@@ -351,7 +412,8 @@ def build_code_map(parser, code_index, *, source_root: str,
                 "writes_vars": [],
                 "conditions": [],
                 "parameters": df["parameters"],
-                "return_type": df["return_type"]
+                "return_type": df["return_type"],
+                **component_keys(mangled_name),
             }
 
     # 4. Join global variables
@@ -368,7 +430,7 @@ def build_code_map(parser, code_index, *, source_root: str,
     # #2D: carry the #define name→value map so hover-tooltips can resolve macros
     # without a re-index. Serialized into code_map_json; absent in older saved maps,
     # so every reader must use dataset.get("defines", {}).
-    return {
+    result = {
         "functions": joined_functions,
         "global_variables": joined_globals,
         "structures": dwarf_structures,
@@ -378,3 +440,6 @@ def build_code_map(parser, code_index, *, source_root: str,
         "edge_verification": object_edges is not None,
         "defines": dict(code_index.defines) if code_index else {}
     }
+    if multi:
+        result["components"] = [c for (c, _p, _u, _f) in parts]
+    return result

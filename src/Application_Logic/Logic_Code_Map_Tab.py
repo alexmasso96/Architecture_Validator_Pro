@@ -43,27 +43,51 @@ def build_code_map_job(db_path, elf_hash, elf_path, source_dir, model_id,
         # Attach the session cipher so DB-stored source / maps decrypt + re-encrypt.
         wdb.set_block_cipher(cipher)
 
-        # Worker-side parser bound to the worker's own connection (DB-backed
-        # DWARF reads) + the ELF path (Capstone reads function bytes from disk).
-        wparser = ELFParser()
-        wparser.elf_path = Path(elf_path) if elf_path else None
-        wparser._db = wdb
-        wparser._active_elf_hash = elf_hash
+        from Application_Logic.Logic_Code_Map import (
+            ComponentParsers, build_code_map, elf_has_call_tree)
 
-        from Application_Logic.Logic_Code_Map import build_code_map, elf_has_call_tree
+        def bound_parser(ehash, epath):
+            # Worker-side parser bound to the worker's own connection (DB-backed
+            # DWARF reads) + the ELF path (Capstone reads function bytes from disk).
+            p = ELFParser()
+            p.elf_path = Path(epath) if epath else None
+            p._db = wdb
+            p._active_elf_hash = ehash
+            return p
 
-        # 2B/2C: probe whether the ELF actually yields a usable call tree
-        # (disassembly recovers real edges). A bare elf_functions row count
-        # isn't enough — a relocatable/ET_REL or stripped ELF has symbols but
-        # no disassemblable call edges. When there's no usable tree we route
-        # to the source-derived call graph as the primary edges (#2C).
-        has_call_tree = (bool(elf_path) and os.path.exists(elf_path)
-                         and elf_has_call_tree(wparser))
-        if has_call_tree:
-            progress_cb("ELF call tree available — joining symbols + disassembly.")
+        def probe(p, epath):
+            # 2B/2C: probe whether the ELF actually yields a usable call tree
+            # (disassembly recovers real edges). A bare elf_functions row count
+            # isn't enough — a relocatable/ET_REL or stripped ELF has symbols but
+            # no disassemblable call edges. When there's no usable tree we route
+            # to the source-derived call graph as the primary edges (#2C).
+            return bool(epath) and os.path.exists(epath) and elf_has_call_tree(p)
+
+        # A release may carry several symbol files (one per component, e.g.
+        # FBL + APP): map the union. Without component rows (no release, or a
+        # caller passing an explicit ELF) fall back to the single given file.
+        files = wdb.get_release_symbol_files(release_id) if release_id is not None else []
+        if len(files) > 1:
+            parts = []
+            for f in files:
+                p = bound_parser(f["elf_hash"], f["elf_path"])
+                tree = probe(p, f["elf_path"])
+                progress_cb(f"{f['component']}: "
+                            + ("ELF call tree available." if tree else
+                               "no ELF call tree — using source-derived calls."))
+                parts.append((f["component"], p, tree))
+            wparser = ComponentParsers(parts)
+            has_call_tree = any(t for (_c, _p, t) in parts)
         else:
-            progress_cb("No ELF call tree available — building the call graph "
-                        "from the source code.")
+            if files:
+                elf_hash, elf_path = files[0]["elf_hash"], files[0]["elf_path"]
+            wparser = bound_parser(elf_hash, elf_path)
+            has_call_tree = probe(wparser, elf_path)
+            if has_call_tree:
+                progress_cb("ELF call tree available — joining symbols + disassembly.")
+            else:
+                progress_cb("No ELF call tree available — building the call graph "
+                            "from the source code.")
 
         code_index = None
         from Application_Logic.Logic_Code_Index import build_index
@@ -107,7 +131,8 @@ def build_code_map_job(db_path, elf_hash, elf_path, source_dir, model_id,
                 object_edges.add((inl["caller"], inl["name"]))
 
         progress_cb("Building code map (call graph & symbol join)…")
-        # Pass the probe result so build_code_map doesn't re-disassemble to decide.
+        # Pass the probe result so build_code_map doesn't re-disassemble to decide
+        # (per component, a ComponentParsers carries its own probe results).
         code_map = build_code_map(wparser, code_index, source_root=source_dir or "",
                                   prefer_source_calls=not has_call_tree,
                                   object_edges=object_edges)

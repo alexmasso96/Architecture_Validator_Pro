@@ -800,3 +800,79 @@ def calltree_test_status(model_id: int, state: AppState = Depends(get_state)) ->
             })
         return {"model_id": model_id, "tests": out}
     return _guard(go)
+
+
+class CallTreeReportBody(BaseModel):
+    col_name: str
+    # Where to write the .html (the native Save dialog's choice). Omitted →
+    # the document comes back in the response (browser download fallback).
+    output_path: Optional[str] = None
+
+
+@router.post("/calltree-tests/report")
+def calltree_test_report(body: CallTreeReportBody,
+                         state: AppState = Depends(get_state)) -> dict:
+    """One self-contained HTML report of a call-tree Test column: header,
+    then a chapter per model with every valid result row, each linking to a
+    detail view (verdict reasoning + call-tree snapshot). Read-only — works
+    in view mode too."""
+    def go():
+        import datetime as _dt
+        import os
+        from Application_Logic import Logic_CallTree_Report as rep
+        from Application_Logic.Logic_File_Locking import FileLockManager
+
+        db = state.require_open()
+        mgr = state.require_arch()
+        binding = _test_bindings(db).get(body.col_name)
+        if binding is None:
+            raise ProjectError(f"No call-tree Test column named {body.col_name!r}.")
+        rel, is_active, _baselined = _release_flags(state.release_manager,
+                                                    binding["release_id"])
+        if rel is None:
+            raise ProjectError("The Test column's release no longer exists.")
+        if not is_active:
+            raise ProjectError(f"Activate release '{rel.name}' to report this Test "
+                               "column (its rows are that release's ports).")
+        # Each model's working rows — the same rows the Run job evaluated.
+        rid = binding["release_id"]
+        layout = db.load_column_layout()
+        port_state_col = next((n for (n, t, _v, _w) in layout
+                               if t == "PortStateColumn"), None)
+        object_pairs = None
+        if db.has_release_objects(rid):
+            object_pairs = set(db.get_release_object_edges(rid))
+            for inl in db.get_release_inlined_functions(rid):
+                object_pairs.add((inl["caller"], inl["name"]))
+        models = [(m.name, db.get_model_rows(m.id),
+                   db.get_model_code_map(m.id, release_id=rid))
+                  for m in mgr.models if m.id is not None and not m.is_deleted]
+        files = db.get_release_symbol_files(rid)
+        now = _dt.datetime.now().astimezone()
+        project = os.path.splitext(os.path.basename(state.project_path or ""))[0]
+        data = rep.build_report(
+            project=project, release=rel.name, col_name=body.col_name,
+            binding=binding, author=FileLockManager.get_username(),
+            created_at=now.strftime("%Y-%m-%d %H:%M %Z").strip(),
+            layout=layout, models=models, object_pairs=object_pairs,
+            port_state_col=port_state_col,
+            components=[f["component"] for f in files] if len(files) > 1 else None)
+        doc = rep.render_html(data)
+        filename = rep.report_filename(project, rel.name, body.col_name,
+                                       now.date().isoformat())
+        out = {"filename": filename, "entries": data["entry_count"],
+               "models": len(data["chapters"])}
+        if body.output_path:
+            path = body.output_path
+            if not path.lower().endswith((".html", ".htm")):
+                path += ".html"
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(doc)
+            except OSError as e:
+                raise ProjectError(f"Could not write the report: {e}") from e
+            out["path"] = path
+        else:
+            out["html"] = doc
+        return out
+    return _guard(go)

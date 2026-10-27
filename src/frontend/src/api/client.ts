@@ -65,3 +65,22 @@ export const api = {
 export function eventsUrl(): string {
   return `/api/events?token=${encodeURIComponent(getToken())}`;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Poll a started job until it terminates; throw on failure/cancel. Returns the
+// job's result payload.
+export async function waitForJob(
+  jobId: string,
+  failMsg: string,
+): Promise<Record<string, unknown> | undefined> {
+  for (;;) {
+    await sleep(250);
+    const j = await api.get<{ status: string; error?: string; result?: Record<string, unknown> }>(
+      `/jobs/${jobId}`,
+    );
+    if (j.status === "done") return j.result;
+    if (j.status === "failed" || j.status === "cancelled")
+      throw new Error(j.error || failMsg);
+  }
+}

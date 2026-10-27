@@ -51,6 +51,17 @@ class ImportSourceBody(BaseModel):
     source_dir: str
 
 
+def _symbol_file_tags(db, r) -> list:
+    """[{component, file_name}] — the compact per-release list the release
+    views show as tags (the full detail is GET /{id}/symbol-files)."""
+    import os
+    if r.id is None:
+        return []
+    return [{"component": f["component"],
+             "file_name": os.path.basename(f["elf_path"] or "")}
+            for f in db.get_release_symbol_files(r.id)]
+
+
 def _release_view(rm, db, r, active_id) -> dict:
     has_source = db.has_release_source(r.id) if r.id is not None else False
     return {
@@ -66,6 +77,7 @@ def _release_view(rm, db, r, active_id) -> dict:
         # KI-02 provenance: which backend produced this release's ELF data.
         "parser_backend": db.get_parser_backend(r.elf_hash) if r.elf_hash else None,
         "has_source": has_source,
+        "symbol_files": _symbol_file_tags(db, r),
         "is_active": r.id == active_id,
         # 'selectable' = a real release offered in pickers (#2E).
         "selectable": (not r.is_baseline and not r.is_deleted),
@@ -168,6 +180,7 @@ def release_lineage(state: AppState = Depends(get_state)) -> dict:
                 "elf_hash": r.elf_hash,
                 "parser_backend": db.get_parser_backend(r.elf_hash) if r.elf_hash else None,
                 "has_source": db.has_release_source(r.id) if r.id is not None else False,
+                "symbol_files": _symbol_file_tags(db, r),
                 "grid_x": gx,
                 "grid_y": gy,
             })
@@ -517,4 +530,136 @@ def drop_release_source(release_id: int, state: AppState = Depends(get_state),
         bus.publish("db-changed",
                     {"reason": "source-dropped", "release_id": release_id})
         return {"release_id": release_id, "result": "source dropped"}
+    return _guard(go)
+
+
+# ---------------------------------------------------------------------------
+# Symbol files — several per release, one per component (FBL, APP, …). The
+# symbol search, matching, Code Map and call-tree tests use their union.
+# ---------------------------------------------------------------------------
+class AddSymbolFileBody(BaseModel):
+    component: str
+    file_path: str
+
+
+class RenameSymbolFileBody(BaseModel):
+    name: str
+
+
+def _log_symbol_change(state: AppState, db, release_id: int, desc: str) -> None:
+    from Application_Logic.Logic_File_Locking import FileLockManager
+    from backend.handlers import _log_release_history
+    _log_release_history(db, state, release_id, desc, FileLockManager.get_username())
+
+
+def _symbol_files_payload(db, release_id: int) -> dict:
+    """Per component: file, stats, and how many of its function names also
+    appear in an EARLIER component (those merge into the earlier entry)."""
+    import os
+    files = db.get_release_symbol_files(release_id)
+    out, earlier = [], set()
+    for f in files:
+        names = set(db.get_function_names(f["elf_hash"]))
+        out.append({
+            "component": f["component"],
+            "elf_hash": f["elf_hash"],
+            "elf_path": f["elf_path"],
+            "file_name": os.path.basename(f["elf_path"] or ""),
+            "added_at": f["added_at"],
+            "functions": len(names),
+            "variables": len(db.get_variable_names(f["elf_hash"])),
+            "parser_backend": db.get_parser_backend(f["elf_hash"]),
+            "file_exists": bool(f["elf_path"]) and os.path.exists(f["elf_path"]),
+            "duplicates_of_earlier": len(names & earlier),
+        })
+        earlier |= names
+    return {"release_id": release_id, "files": out,
+            "is_frozen": db.is_release_frozen(release_id)}
+
+
+@router.get("/{release_id}/symbol-files")
+def list_symbol_files(release_id: int, state: AppState = Depends(get_state)) -> dict:
+    def go():
+        db = state.require_open()
+        state.release_index_by_id(release_id)
+        return _symbol_files_payload(db, release_id)
+    return _guard(go)
+
+
+@router.post("/{release_id}/symbol-files")
+def add_symbol_file(release_id: int, body: AddSymbolFileBody,
+                    state: AppState = Depends(get_state),
+                    jobs: JobManager = Depends(get_jobs)) -> dict:
+    """Attach a symbol file (ELF/.out/.abs/.axf or a .json cache) to this
+    release as ``component`` — added, or replacing that component's file.
+    Parsing runs as the ``import_symbols`` background job."""
+    def go():
+        db = state.require_edit()
+        state.release_index_by_id(release_id)
+        comp = body.component.strip()
+        if not comp:
+            raise ProjectError("Component name is required.")
+        if not body.file_path:
+            raise ProjectError("file_path is required.")
+        if db.is_release_frozen(release_id):
+            raise ProjectError("That release is a frozen baseline — its symbol "
+                               "files cannot change.")
+        job = jobs.start("import_symbols", {"release_id": release_id,
+                                            "file_path": body.file_path,
+                                            "component": comp})
+        return job.public()
+    return _guard(go)
+
+
+@router.patch("/{release_id}/symbol-files/{component}")
+def rename_symbol_file(release_id: int, component: str, body: RenameSymbolFileBody,
+                       state: AppState = Depends(get_state),
+                       bus: EventBus = Depends(get_bus)) -> dict:
+    def go():
+        from Application_Logic.Logic_Database import BaselineLockedError
+        db = state.require_edit()
+        state.release_index_by_id(release_id)
+        new = body.name.strip()
+        try:
+            db.rename_release_symbol_file(release_id, component, new)
+        except (ValueError, BaselineLockedError) as e:
+            raise ProjectError(str(e)) from e
+        if new != component:
+            _log_symbol_change(state, db, release_id,
+                               f"Symbol file component '{component}' renamed to '{new}'")
+        db.commit()
+        bus.publish("db-changed", {"reason": "symbol-files-changed",
+                                   "release_id": release_id})
+        return _symbol_files_payload(db, release_id)
+    return _guard(go)
+
+
+@router.delete("/{release_id}/symbol-files/{component}")
+def remove_symbol_file(release_id: int, component: str,
+                       state: AppState = Depends(get_state),
+                       bus: EventBus = Depends(get_bus)) -> dict:
+    """Detach a component's symbol file. Its symbol data is deleted once no
+    other release (branch/baseline) still uses the same file."""
+    def go():
+        import os
+        from Application_Logic.Logic_Database import BaselineLockedError
+        db = state.require_edit()
+        rm = state.require_releases()
+        state.release_index_by_id(release_id)
+        try:
+            removed = db.remove_release_symbol_file(release_id, component)
+        except BaselineLockedError as e:
+            raise ProjectError(str(e)) from e
+        if removed is None:
+            raise ProjectError(f"No component '{component}' in this release.")
+        db.drop_elf_if_unreferenced(removed["elf_hash"])
+        _log_symbol_change(state, db, release_id,
+                           f"Symbol file for component '{component}' removed: "
+                           f"{os.path.basename(removed['elf_path'] or '')}")
+        db.commit()
+        rm.refresh_elf_mirror(release_id)
+        state._matchers.clear()
+        bus.publish("db-changed", {"reason": "symbol-files-changed",
+                                   "release_id": release_id})
+        return _symbol_files_payload(db, release_id)
     return _guard(go)

@@ -100,6 +100,7 @@ def run_mindmap_job(jobs, current_source, previous_source, db, release_id=None,
     # release when no specific release was pinned.
     active_elf_hash = None
     active_elf_path = None
+    symbol_files = []
     releases = db.get_all_releases()
     for r in releases:
         if r.get("is_deleted", 0) or not r.get("elf_hash"):
@@ -109,6 +110,7 @@ def run_mindmap_job(jobs, current_source, previous_source, db, release_id=None,
         if match:
             active_elf_hash = r["elf_hash"]
             active_elf_path = r["elf_path"]
+            symbol_files = db.get_release_symbol_files(r["id"])
             break
 
     for (mid, name, ports, reqs) in jobs:
@@ -140,6 +142,16 @@ def run_mindmap_job(jobs, current_source, previous_source, db, release_id=None,
                     parser = ELFParser(active_elf_path)
                     parser._db = db
                     parser._active_elf_hash = active_elf_hash
+                    if len(symbol_files) > 1:
+                        # Several component files (FBL + APP …): map their union.
+                        from Application_Logic.Logic_Code_Map import ComponentParsers
+                        comp_parts = []
+                        for f in symbol_files:
+                            cp = ELFParser(f["elf_path"] or None)
+                            cp._db = db
+                            cp._active_elf_hash = f["elf_hash"]
+                            comp_parts.append((f["component"], cp, None))
+                        parser = ComponentParsers(comp_parts)
 
                     # Build static C AST index
                     code_index = build_index(current_source) if current_source else None

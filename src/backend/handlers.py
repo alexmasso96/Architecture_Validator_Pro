@@ -184,7 +184,7 @@ def _make_build_code_map(state: AppState):
 
 # ----------------------------------------------------------------------
 # fuzzy_rematch — re-run symbol matching for a model's rows against the
-# active release's ELF, writing "Name (NN%)" into each (Match) cell.
+# active release's symbol files (every component), writing "Name (NN%)" into each (Match) cell.
 # ----------------------------------------------------------------------
 def _make_fuzzy_rematch(state: AppState):
     def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
@@ -192,13 +192,15 @@ def _make_fuzzy_rematch(state: AppState):
             SymbolMatcher, search_specs_from_layout, rematch_rows,
         )
         state.require_edit()
-        elf_hash = params.get("elf_hash") or state.active_elf_hash()
-        if not elf_hash:
+        # The active release's symbol files — all components, one match pool.
+        hashes = [params["elf_hash"]] if params.get("elf_hash") else state.active_elf_hashes()
+        if not hashes:
             raise ProjectError("No ELF imported for the active release.")
         with _worker_db(state) as wdb:
-            if not wdb.has_elf(elf_hash):
-                raise ProjectError(f"No ELF in project for hash {elf_hash}.")
-            matcher = SymbolMatcher(None, db=wdb, elf_hash=elf_hash)
+            for h in hashes:
+                if not wdb.has_elf(h):
+                    raise ProjectError(f"No ELF in project for hash {h}.")
+            matcher = SymbolMatcher(None, db=wdb, elf_hash=hashes)
             specs = search_specs_from_layout(wdb.load_column_layout())
             model_ids = _resolve_model_ids(state, params, wdb)
             total = 0
@@ -309,33 +311,99 @@ def _make_generate_tests(state: AppState):
 # ----------------------------------------------------------------------
 def _make_parse_elf(state: AppState):
     def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
-        from Application_Logic.Logic_New_Project import ElfImportTask
-        state.require_edit()
-        file_path = params.get("file_path")
-        release_id = params.get("release_id")
-        if not file_path or release_id is None:
-            raise ProjectError("file_path and release_id are required.")
-
-        with _worker_db(state) as wdb:
-            progress("Parsing ELF…")
-            task = ElfImportTask(project_db=wdb, db_path=None)
-            parser = task.import_elf(file_path)
-            elf_hash = getattr(parser, "md5_hash", None) or getattr(parser, "_active_elf_hash", None)
-            wdb.update_release(release_id, elf_path=file_path, elf_hash=elf_hash)
-            wdb.commit()
-            fn_count = len(wdb.get_function_names(elf_hash)) if elf_hash else 0
-
-        # Reflect the new ELF on the in-memory release so the symbols endpoint's
-        # active_elf_hash() sees it without a reopen (a plain attribute set).
-        if state.release_manager is not None:
-            for r in state.release_manager.releases:
-                if r.id == release_id:
-                    r.elf_path = file_path
-                    r.elf_hash = elf_hash
-                    break
-        state._matchers.pop(elf_hash, None)
-        return {"elf_hash": elf_hash, "functions": fn_count, "release_id": release_id}
+        result = _import_symbol_file(state, params, progress, kind="elf")
+        result.pop("kind", None)
+        return result
     return handler
+
+
+MAX_COMPONENT_NAME = 64
+
+
+def _import_symbol_file(state: AppState, params: dict, progress: Callable[..., None],
+                        kind: str) -> dict:
+    """Parse one symbol file into the project and attach it to a release.
+
+    ``component`` given → that component's file (added, or replaced in
+    place). Omitted → the release's primary (first) component, or the
+    default component when the release has none yet — the single-ELF
+    behavior every older caller relies on. Logged in the change history."""
+    import os
+    from Application_Logic.Logic_Database import DEFAULT_SYMBOL_COMPONENT
+    from Application_Logic.Logic_File_Locking import FileLockManager
+    from Application_Logic.Logic_New_Project import ElfImportTask
+    state.require_edit()
+    file_path = params.get("file_path")
+    release_id = params.get("release_id")
+    if not file_path or release_id is None:
+        raise ProjectError("file_path and release_id are required.")
+    component = (params.get("component") or "").strip() or None
+    if component is not None and len(component) > MAX_COMPONENT_NAME:
+        raise ProjectError(f"Component name is too long (max {MAX_COMPONENT_NAME}).")
+    with _worker_db(state) as wdb:
+        if wdb.is_release_frozen(release_id):
+            raise ProjectError("That release is a frozen baseline — its symbol "
+                               "files cannot change.")
+        task = ElfImportTask(project_db=wdb, db_path=None)
+        if kind == "elf":
+            progress("Parsing ELF…")
+            parser = task.import_elf(file_path)
+        else:
+            progress("Loading symbol cache…")
+            parser = task.import_json(file_path)
+        elf_hash = getattr(parser, "md5_hash", None) or getattr(parser, "_active_elf_hash", None)
+        before = wdb.get_release_symbol_files(release_id)
+        if component is None:
+            component = before[0]["component"] if before else DEFAULT_SYMBOL_COMPONENT
+        old = next((f for f in before if f["component"] == component), None)
+        try:
+            action = wdb.set_release_symbol_file(release_id, component, elf_hash,
+                                                 file_path)
+        except ValueError as e:
+            raise ProjectError(str(e)) from e
+        if old and old["elf_hash"] != elf_hash:
+            wdb.drop_elf_if_unreferenced(old["elf_hash"])
+        fn_count = len(wdb.get_function_names(elf_hash)) if elf_hash else 0
+        # Names this file shares with the release's other components (they
+        # merge into one entry — the first component in the list wins).
+        mine = set(wdb.get_function_names(elf_hash)) if elf_hash else set()
+        others = [f["elf_hash"] for f in wdb.get_release_symbol_files(release_id)
+                  if f["component"] != component]
+        shared = len(mine & set(wdb.get_function_names(others))) if others else 0
+        desc = (f"Symbol file for component '{component}' {action}: "
+                f"{os.path.basename(file_path)} ({fn_count} functions)")
+        _log_release_history(wdb, state, release_id, desc,
+                             FileLockManager.get_username())
+        wdb.commit()
+
+    # Reflect the new primary ELF on the in-memory release so the symbols
+    # endpoint's active_elf_hash() sees it without a reopen.
+    if state.release_manager is not None:
+        state.release_manager.refresh_elf_mirror(release_id)
+    state._matchers.clear()
+    state.bus.publish("db-changed", {"reason": "symbol-files-changed",
+                                     "release_id": release_id})
+    return {"kind": kind, "elf_hash": elf_hash, "functions": fn_count,
+            "release_id": release_id, "component": component, "action": action,
+            "shared_functions": shared,
+            "symbol_prefix_stripped": bool(getattr(parser, "symbol_prefix_stripped", False))}
+
+
+def _log_release_history(db, state: AppState, release_id: int, desc: str,
+                         user: str) -> None:
+    """History entry for a release-level change, logged against that release
+    and — when another release is active — the active one too, so it shows
+    on the timeline the user is looking at (as baseline freezes do)."""
+    targets = [release_id]
+    active = db.get_active_release_id()
+    if active is not None and active != release_id:
+        targets.append(active)
+    for rid in targets:
+        try:
+            db.add_history_entry(description=desc, model_name="", username=user,
+                                 release_id=rid)
+        except Exception:  # noqa: BLE001 — history must not fail the change
+            pass
 
 
 # ----------------------------------------------------------------------
@@ -570,39 +638,14 @@ def _detect_import_kind(file_path: str) -> str:
 
 
 def _make_import_symbols(state: AppState):
-    """Auto-detecting symbol import (the new-project 'Import' option). Detects
-    ELF vs JSON and dispatches to the matching ElfImportTask path, then keys the
-    given release to the imported ELF hash. Mirrors parse_elf but type-agnostic."""
+    """Auto-detecting symbol import (the new-project 'Import' option, and
+    adding a component file to a release). Detects ELF vs JSON and dispatches
+    to the matching ElfImportTask path, then attaches the file to the release
+    — as ``component`` when given, else as its primary file."""
     def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
-        from Application_Logic.Logic_New_Project import ElfImportTask
-        state.require_edit()
         file_path = params.get("file_path")
-        release_id = params.get("release_id")
-        if not file_path or release_id is None:
+        if not file_path or params.get("release_id") is None:
             raise ProjectError("file_path and release_id are required.")
         kind = _detect_import_kind(file_path)
-
-        with _worker_db(state) as wdb:
-            task = ElfImportTask(project_db=wdb, db_path=None)
-            if kind == "elf":
-                progress("Parsing ELF…")
-                parser = task.import_elf(file_path)
-            else:
-                progress("Loading symbol cache…")
-                parser = task.import_json(file_path)
-            elf_hash = getattr(parser, "md5_hash", None) or getattr(parser, "_active_elf_hash", None)
-            wdb.update_release(release_id, elf_path=file_path, elf_hash=elf_hash)
-            wdb.commit()
-            fn_count = len(wdb.get_function_names(elf_hash)) if elf_hash else 0
-
-        if state.release_manager is not None:
-            for r in state.release_manager.releases:
-                if r.id == release_id:
-                    r.elf_path = file_path
-                    r.elf_hash = elf_hash
-                    break
-        state._matchers.pop(elf_hash, None)
-        return {"kind": kind, "elf_hash": elf_hash, "functions": fn_count,
-                "release_id": release_id,
-                "symbol_prefix_stripped": bool(getattr(parser, "symbol_prefix_stripped", False))}
+        return _import_symbol_file(state, params, progress, kind=kind)
     return handler

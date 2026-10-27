@@ -57,7 +57,7 @@ class AppState:
         self.master_password_hash: Optional[str] = None
         self.lock_info: dict = {}
         self.lock_lost: bool = False
-        self._matchers: dict = {}   # elf_hash -> SymbolMatcher (name-list cache)
+        self._matchers: dict = {}   # elf_hash | (hash, …) -> SymbolMatcher (name-list cache)
         self._hb_thread: Optional[threading.Thread] = None
         self._hb_stop: Optional[threading.Event] = None
 
@@ -143,26 +143,44 @@ class AppState:
         raise ProjectError(f"No such release: {release_id}")
 
     def active_elf_hash(self) -> Optional[str]:
-        """ELF hash of the active release, or None when no ELF is imported."""
+        """Primary ELF hash of the active release (its first component symbol
+        file), or None when no symbol file is imported."""
         rm = self.release_manager
         if rm is None:
             return None
         active = rm.get_active_release()
         return active.elf_hash if active else None
 
-    def get_symbol_matcher(self, elf_hash: str):
-        """A name-list-only SymbolMatcher for ``elf_hash``, cached per session.
+    def active_elf_hashes(self) -> list:
+        """Every component symbol file's hash of the active release, in
+        priority order — the union symbol search and matching run against."""
+        rm = self.release_manager
+        active = rm.get_active_release() if rm is not None else None
+        if active is None or active.id is None or not self.is_open:
+            return []
+        hashes = self.db.get_release_elf_hashes(active.id)
+        if not hashes and active.elf_hash:
+            hashes = [active.elf_hash]
+        return hashes
+
+    def get_symbol_matcher(self, elf_hash):
+        """A name-list-only SymbolMatcher for one ELF hash — or a list of them
+        (a release's component files, matched as one pool) — cached per session.
 
         The DB-backed matcher loads only symbol *name* strings (not full objects)
         and never touches the parser, so we build it with ``parser=None``.
         """
+        from Application_Logic.Logic_Database import elf_hash_list
         from Application_Logic.Logic_Symbol_Matcher import SymbolMatcher
         db = self.require_open()
-        if not db.has_elf(elf_hash):
-            raise ProjectError(f"No ELF in project for hash {elf_hash}.")
-        if elf_hash not in self._matchers:
-            self._matchers[elf_hash] = SymbolMatcher(None, db=db, elf_hash=elf_hash)
-        return self._matchers[elf_hash]
+        hashes = elf_hash_list(elf_hash)
+        for h in hashes:
+            if not db.has_elf(h):
+                raise ProjectError(f"No ELF in project for hash {h}.")
+        key = hashes[0] if len(hashes) == 1 else tuple(hashes)
+        if key not in self._matchers:
+            self._matchers[key] = SymbolMatcher(None, db=db, elf_hash=hashes)
+        return self._matchers[key]
 
     # ------------------------------------------------------------------
     # Lifecycle

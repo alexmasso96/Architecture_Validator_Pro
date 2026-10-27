@@ -19,6 +19,8 @@ The map is built by joining two sources **by function name**:
 
 The call-graph *edges* come from the source (DWARF has no call edges); the ELF side annotates each node with verified low-level facts. C++ names are demangled before matching. When a binary carries no call tree (stripped or relocatable objects often don't), the map falls back to the **source-derived** call graph automatically.
 
+When the release has [several symbol files](04-releases-and-baselines.md#several-symbol-files-per-release-fbl-app-) (for example FBL and APP), the map uses all of them: every component's functions are in the graph, the call-tree check is made per component, and a function's details show which component it belongs to. A name defined in more than one component is one node, with the address of the first component and the calls of all of them.
+
 ## Verifying the call graph with object files
 
 Source-derived edges come from reading the C text, so they can include calls the compiler never built (inside a disabled `#ifdef`, for example). If you have the build-output **object files (`.o`)** for the release, the Code Map can check every edge against the compiler's own records.

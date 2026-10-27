@@ -211,6 +211,10 @@ def codemap_function(name: str, model_id: Optional[int] = None,
             "callees": f.get("calls", []),
             "globals": _matched_globals(ds, name),
             "tooltip_html": describe_symbol(ds, name),
+            # Release with several symbol files: where the address comes from,
+            # and every component that defines the (merged) name.
+            "component": f.get("component"),
+            "components": f.get("components", []),
         }
     return _guard(go)
 

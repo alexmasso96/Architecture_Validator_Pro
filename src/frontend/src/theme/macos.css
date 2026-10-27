@@ -6311,3 +6311,79 @@ button.update-pill:hover {
   align-items: center;
   gap: 4px;
 }
+
+/* Symbol Files dialog — one symbol file per component of a release. */
+.symfiles {
+  width: 720px;
+  max-width: 96vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+.symfiles-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 12px;
+}
+.symfiles-body .rm-table tr {
+  cursor: default;
+}
+.symfiles-body .mm-tag {
+  margin-left: 6px;
+}
+.symfiles-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.symfiles-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.symfiles-add input {
+  flex: 1 1 auto;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.symfiles-add button {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.symfiles-add button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.symfiles-busy {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.symfiles-err {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--red);
+}
+.mm-tag.comp {
+  background: var(--overlay);
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.rm-table .rm-name {
+  flex-wrap: wrap;
+  row-gap: 3px;
+}

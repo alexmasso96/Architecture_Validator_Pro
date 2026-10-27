@@ -111,6 +111,18 @@ class ReleaseManager:
             self._db.set_active_release(None)
         self._db.commit()
 
+    def refresh_elf_mirror(self, release_id: int) -> None:
+        """Re-read a release's primary ELF (the first component symbol file)
+        after its component files changed in the DB."""
+        if not self._db:
+            return
+        row = next((r for r in self._db.get_all_releases() if r["id"] == release_id), None)
+        for r in self.releases:
+            if r.id == release_id:
+                r.elf_hash = row["elf_hash"] if row else None
+                r.elf_path = row["elf_path"] if row else None
+                break
+
     # ------------------------------------------------------------------
     # Release data persistence
     # ------------------------------------------------------------------
@@ -277,6 +289,7 @@ class ReleaseManager:
             if linked:
                 self._db.save_release_linked_column(new_release.id, linked)
             if src.id is not None:
+                self._db.copy_release_symbol_files(src.id, new_release.id)
                 self._db.copy_release_history(src.id, new_release.id)
             self._db.commit()
 
@@ -354,8 +367,9 @@ class ReleaseManager:
         if results:
             self._db.save_release_results(new_id, results, _allow_frozen=True)
 
-        # Snapshot history to the baseline
+        # Snapshot the component symbol files + history to the baseline
         if src.id is not None:
+            self._db.copy_release_symbol_files(src.id, new_id)
             self._db.copy_release_history(src.id, new_id)
 
         if layout_data:

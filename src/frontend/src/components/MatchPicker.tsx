@@ -7,6 +7,8 @@ interface Candidate {
   score: number;
   /** #6D: exists only as an inline expansion — no symbol, no address. */
   inlined?: boolean;
+  /** Release with several symbol files: the components defining the name. */
+  components?: string[];
 }
 interface SymbolsResponse {
   query: string;
@@ -169,6 +171,18 @@ export function MatchPicker({
               >
                 {c.name}
                 {c.inlined && <span className="mm-tag"> inlined</span>}
+                {c.components && c.components.length > 0 && (
+                  <span
+                    className="mm-tag comp"
+                    title={
+                      c.components.length > 1
+                        ? `Defined in ${c.components.join(", ")} — merged; address from ${c.components[0]}`
+                        : `Defined in ${c.components[0]}`
+                    }
+                  >
+                    {c.components.join(" · ")}
+                  </span>
+                )}
               </span>
               <span className={confClass(c.score)}>{c.score}%</span>
             </button>

@@ -1,28 +1,10 @@
 import { useState } from "react";
-import { api, ApiError } from "../api/client";
+import { api, ApiError, waitForJob } from "../api/client";
 import type { ColumnSpec, ModelsResponse } from "../api/types";
 import { SEARCH_KEYS } from "../columns";
 import { FolderPicker } from "./FolderPicker";
 import { isSymbolFileName, stripSymbolExt, SYMBOL_IMPORT_EXTS } from "../fileTypes";
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// Poll a started job until it terminates; throw on failure/cancel. Returns the
-// job's result payload.
-async function waitForJob(
-  jobId: string,
-  failMsg: string,
-): Promise<Record<string, unknown> | undefined> {
-  for (;;) {
-    await sleep(250);
-    const j = await api.get<{ status: string; error?: string; result?: Record<string, unknown> }>(
-      `/jobs/${jobId}`,
-    );
-    if (j.status === "done") return j.result;
-    if (j.status === "failed" || j.status === "cancelled")
-      throw new Error(j.error || failMsg);
-  }
-}
 const DONT = "__ignore"; // sentinel: do not import this column
 const CREATE = "__create"; // sentinel: create a new column named after the source
 
