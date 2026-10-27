@@ -421,9 +421,9 @@ export function Workspace({
     const name = (
       row && portSearchCol ? cellText(row.cells[portSearchCol.name]) : ""
     ).trim();
-    const port = name || "N/A";
+    const port = name || "(unnamed port)";
     const params = new URLSearchParams();
-    if (activeModel?.name) params.set("model_name", activeModel.name);
+    if (activeModelId !== null) params.set("model_id", String(activeModelId));
     params.set("port", port);
     setHistoryTarget({
       title: "Port History",
@@ -434,7 +434,7 @@ export function Workspace({
 
   function openModelHistory() {
     const params = new URLSearchParams();
-    if (activeModel?.name) params.set("model_name", activeModel.name);
+    if (activeModelId !== null) params.set("model_id", String(activeModelId));
     const qs = params.toString();
     setHistoryTarget({
       title: "Change History",

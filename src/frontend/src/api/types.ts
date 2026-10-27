@@ -244,13 +244,18 @@ export interface ChangelogResponse {
 export interface HistoryEntry {
   timestamp: string;
   user: string;
-  model: string;
+  model: string; // the model's name when the entry was recorded
+  model_id: number | null; // stable attribution — survives model renames
+  model_current: string; // the model's current name ("" if unknown)
   description: string;
 }
 
 export interface HistoryResponse {
   entries: HistoryEntry[];
   release_id: number | null;
+  // Model-scoped queries only: entries recorded under a former model name that
+  // can't be attributed to any model (renamed before renames were logged).
+  unattributed: number;
 }
 
 // Aligned side-by-side diff. Each line is a [text, kind] pair; kind is one of

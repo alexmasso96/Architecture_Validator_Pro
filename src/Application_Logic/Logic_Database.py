@@ -246,11 +246,15 @@ def _deobfuscate_history(stored: str) -> str:
 
 def _history_row_hmac(prev_head: str, timestamp: str, username: str,
                       model_name: str, stored_description: str,
-                      release_id) -> str:
+                      release_id, model_id=None) -> str:
+    fields = [prev_head or "", timestamp or "", username or "", model_name or "",
+              stored_description or "", release_id]
+    # model_id joined the chain later; rows written without one keep the
+    # original payload so pre-existing chains still verify.
+    if model_id is not None:
+        fields.append(model_id)
     payload = json.dumps(
-        [prev_head or "", timestamp or "", username or "", model_name or "",
-         stored_description or "", release_id],
-        ensure_ascii=False, sort_keys=True, default=str,
+        fields, ensure_ascii=False, sort_keys=True, default=str,
     ).encode("utf-8")
     return hmac.new(_HISTORY_HMAC_KEY, payload, hashlib.sha256).hexdigest()
 
@@ -624,7 +628,8 @@ class ProjectDatabase:
                     username    TEXT NOT NULL DEFAULT '',
                     model_name  TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL,
-                    release_id  INTEGER REFERENCES releases(id) ON DELETE CASCADE
+                    release_id  INTEGER REFERENCES releases(id) ON DELETE CASCADE,
+                    model_id    INTEGER
                 );
 
                 -- AI Part 2: per-architecture-model "mind map" index (derived
@@ -737,6 +742,14 @@ class ProjectDatabase:
             # Add entry_hmac column to history if missing (NC-3: tamper-evidence chain)
             try:
                 self._conn.execute("ALTER TABLE history ADD COLUMN entry_hmac TEXT")
+            except sqlite3.OperationalError:
+                pass
+
+            # Add model_id column to history if missing: entries are attributed to
+            # the model's stable id so a rename doesn't orphan its history. No FK —
+            # the log must outlive a hard-deleted model.
+            try:
+                self._conn.execute("ALTER TABLE history ADD COLUMN model_id INTEGER")
             except sqlite3.OperationalError:
                 pass
 
@@ -2119,7 +2132,8 @@ class ProjectDatabase:
         return (row[0] or "") if row else ""
 
     def add_history_entry(self, description: str,
-                          model_name: str = "", username: str = "", release_id: Optional[int] = None):
+                          model_name: str = "", username: str = "", release_id: Optional[int] = None,
+                          model_id: Optional[int] = None):
         # NC-3: obfuscate the description at rest and extend the HMAC hash-chain.
         ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
         # Encrypt under category A when a project cipher is attached; otherwise
@@ -2131,30 +2145,44 @@ class ProjectDatabase:
         with self._conn:
             prev = self._history_chain_head()
             entry_hmac = _history_row_hmac(prev, ts, username, model_name,
-                                           stored_desc, release_id)
+                                           stored_desc, release_id, model_id)
             self._conn.execute(
                 "INSERT INTO history (timestamp, username, model_name, description,"
-                " release_id, entry_hmac) VALUES (?,?,?,?,?,?)",
-                (ts, username, model_name, stored_desc, release_id, entry_hmac)
+                " release_id, entry_hmac, model_id) VALUES (?,?,?,?,?,?,?)",
+                (ts, username, model_name, stored_desc, release_id, entry_hmac, model_id)
             )
 
     def get_history(self, release_id: Optional[int] = None) -> list:
         if release_id is not None:
             cur = self._conn.execute(
-                "SELECT timestamp, username, model_name, description"
+                "SELECT timestamp, username, model_name, description, model_id"
                 " FROM history WHERE release_id=? ORDER BY id",
                 (release_id,)
             )
         else:
             cur = self._conn.execute(
-                "SELECT timestamp, username, model_name, description"
+                "SELECT timestamp, username, model_name, description, model_id"
                 " FROM history WHERE release_id IS NULL ORDER BY id"
             )
         return [
             {"timestamp": r[0], "user": r[1], "model": r[2],
-             "description": self._read_history_desc(r[3])}
+             "description": self._read_history_desc(r[3]), "model_id": r[4]}
             for r in cur.fetchall()
         ]
+
+    def history_model_name_owners(self) -> dict:
+        """{recorded model_name: model_id} from id-attributed history rows, across
+        all releases. The earliest row wins, so a name that was renamed away and
+        later reused by a new model still maps to its original owner — this is how
+        legacy rows (no model_id) are attributed after a rename."""
+        owners: dict = {}
+        cur = self._conn.execute(
+            "SELECT model_name, model_id FROM history"
+            " WHERE model_id IS NOT NULL AND model_name != '' ORDER BY id"
+        )
+        for name, mid in cur.fetchall():
+            owners.setdefault(name, mid)
+        return owners
 
     def _read_history_desc(self, stored: str) -> str:
         """Decode a stored description: category-A ciphertext (``fb1:``) via the
@@ -2168,18 +2196,18 @@ class ProjectDatabase:
         # cloned row so the global hash-chain stays valid past the new inserts.
         with self._conn:
             src = self._conn.execute(
-                "SELECT timestamp, username, model_name, description"
+                "SELECT timestamp, username, model_name, description, model_id"
                 " FROM history WHERE release_id=? ORDER BY id",
                 (src_release_id,)
             ).fetchall()
-            for ts, user, model, stored_desc in src:
+            for ts, user, model, stored_desc, model_id in src:
                 prev = self._history_chain_head()
                 entry_hmac = _history_row_hmac(prev, ts, user, model,
-                                               stored_desc, dst_release_id)
+                                               stored_desc, dst_release_id, model_id)
                 self._conn.execute(
                     "INSERT INTO history (timestamp, username, model_name, description,"
-                    " release_id, entry_hmac) VALUES (?,?,?,?,?,?)",
-                    (ts, user, model, stored_desc, dst_release_id, entry_hmac)
+                    " release_id, entry_hmac, model_id) VALUES (?,?,?,?,?,?,?)",
+                    (ts, user, model, stored_desc, dst_release_id, entry_hmac, model_id)
                 )
 
     def verify_history_chain(self) -> bool:
@@ -2188,13 +2216,14 @@ class ProjectDatabase:
         been edited, deleted, inserted or reordered outside the app. Rows that
         predate the chain (legacy NULL entry_hmac) are skipped, not failed."""
         cur = self._conn.execute(
-            "SELECT timestamp, username, model_name, description, release_id, entry_hmac"
-            " FROM history ORDER BY id"
+            "SELECT timestamp, username, model_name, description, release_id, entry_hmac,"
+            " model_id FROM history ORDER BY id"
         )
         prev = ""
-        for ts, user, model, stored_desc, rel_id, stored_hmac in cur.fetchall():
+        for ts, user, model, stored_desc, rel_id, stored_hmac, model_id in cur.fetchall():
             if stored_hmac is not None:  # skip legacy rows, but still advance the head
-                expected = _history_row_hmac(prev, ts, user, model, stored_desc, rel_id)
+                expected = _history_row_hmac(prev, ts, user, model, stored_desc, rel_id,
+                                             model_id)
                 if not hmac.compare_digest(expected, stored_hmac):
                     return False
             prev = stored_hmac or ""     # matches _history_chain_head() NULL->'' coalescing

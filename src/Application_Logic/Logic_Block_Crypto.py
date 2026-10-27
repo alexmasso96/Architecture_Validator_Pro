@@ -251,19 +251,22 @@ def _migrate_history(conn, cipher: "BlockCipher") -> None:
     """Re-encrypt history.description from the legacy app-key obfuscation to
     category A and rebuild the HMAC chain over the new stored ciphertext."""
     from .Logic_Database import _deobfuscate_history, _history_row_hmac
+    # model_id may not exist yet on a legacy file (added by a later migration).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(history)")}
+    mid_col = "model_id" if "model_id" in cols else "NULL"
     rows = conn.execute(
-        "SELECT id, timestamp, username, model_name, description, release_id "
-        "FROM history ORDER BY id").fetchall()
+        "SELECT id, timestamp, username, model_name, description, release_id, "
+        f"{mid_col} FROM history ORDER BY id").fetchall()
     prev = ""
     updates = []
-    for _id, ts, user, model, desc, rid in rows:
+    for _id, ts, user, model, desc, rid, mid in rows:
         if is_marked_text(desc):
             # already per-block — keep chaining over the stored value
             new_desc = desc
         else:
             plain = _deobfuscate_history(desc)         # "enc:" or legacy plaintext
             new_desc = cipher.encrypt_text("A", plain) if plain else plain
-        new_hmac = _history_row_hmac(prev, ts, user, model, new_desc, rid)
+        new_hmac = _history_row_hmac(prev, ts, user, model, new_desc, rid, mid)
         updates.append((new_desc, new_hmac, _id))
         prev = new_hmac
     if updates:

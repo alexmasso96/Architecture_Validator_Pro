@@ -533,7 +533,8 @@ def _make_run_calltree_tests(state: AppState):
                     wdb.add_history_entry(description=desc,
                                           model_name=names.get(mid, ""),
                                           username=user,
-                                          release_id=binding["release_id"])
+                                          release_id=binding["release_id"],
+                                          model_id=mid)
                 except Exception:  # noqa: BLE001 — history must not fail the run
                     pass
             wdb.commit()

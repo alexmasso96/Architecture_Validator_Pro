@@ -291,3 +291,84 @@ def test_history_newest_first(client):
     entries = client.get("/api/history", headers=AUTH).json()["entries"]
     assert entries[0]["description"].endswith("TC_001a -> TC_001b")
     assert entries[1]["description"].endswith("TC_001 -> TC_001a")
+
+
+# ---------------------------------------------------------------------------
+# History survives model renames (entries are attributed by model id)
+# ---------------------------------------------------------------------------
+def test_model_history_survives_rename(client):
+    mid = _id_of(client, "Arch_A")
+    client.patch(f"/api/models/{mid}/ports/0",
+                 json={"updates": {"Review Status": "Reviewed"}}, headers=AUTH)
+    client.patch(f"/api/models/{mid}", json={"name": "Arch_Renamed"}, headers=AUTH)
+    client.patch(f"/api/models/{mid}/ports/1",
+                 json={"updates": {"TC. ID": "TC_002x"}}, headers=AUTH)
+
+    res = client.get(f"/api/history?model_id={mid}", headers=AUTH).json()
+    descs = [e["description"] for e in res["entries"]]
+    assert len(descs) == 3
+    assert "Model renamed: Arch_A -> Arch_Renamed" in descs
+    assert any("p_speed -> Review Status" in d for d in descs)
+    assert all(e["model_id"] == mid for e in res["entries"])
+    assert all(e["model_current"] == "Arch_Renamed" for e in res["entries"])
+    # The other model's history is unaffected.
+    other = _id_of(client, "Arch_B")
+    assert client.get(f"/api/history?model_id={other}",
+                      headers=AUTH).json()["entries"] == []
+
+
+def test_legacy_history_follows_rename(client):
+    """Rows written before history carried model_id resolve by recorded name —
+    and the rename entry keeps them attributed after the name changes."""
+    mid = _id_of(client, "Arch_A")
+    db = client.app.state.appstate.db
+    db.add_history_entry("legacy edit", model_name="Arch_A", username="u",
+                         release_id=db.get_active_release_id())
+    db.commit()
+    client.patch(f"/api/models/{mid}", json={"name": "Arch_Renamed"}, headers=AUTH)
+
+    res = client.get(f"/api/history?model_id={mid}", headers=AUTH).json()
+    assert "legacy edit" in [e["description"] for e in res["entries"]]
+    assert res["unattributed"] == 0
+    assert db.verify_history_chain()
+
+
+def test_orphaned_legacy_history_is_offered(client):
+    """A legacy row under a name no model owns any more is counted, and
+    included on request, rather than silently disappearing."""
+    mid = _id_of(client, "Arch_A")
+    db = client.app.state.appstate.db
+    db.add_history_entry("orphan edit", model_name="Old_Name", username="u",
+                         release_id=db.get_active_release_id())
+    db.commit()
+
+    res = client.get(f"/api/history?model_id={mid}", headers=AUTH).json()
+    assert res["entries"] == []
+    assert res["unattributed"] == 1
+    res = client.get(f"/api/history?model_id={mid}&include_unattributed=true",
+                     headers=AUTH).json()
+    assert [e["description"] for e in res["entries"]] == ["orphan edit"]
+
+
+def test_history_port_name_from_function_search_column():
+    """A layout whose port column is a 'Function Search' (no 'Port Search')
+    names the port in history instead of a placeholder."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "proj.arch")
+        db = make_project_db(
+            path,
+            layout=[("TC. ID", "Static Text", True),
+                    ("Mapped Func", "Function Search", True)],
+            models=[{"name": "M", "status": "In Work", "rows": [
+                {"TC. ID": {"text": "5"}, "Mapped Func": {"text": "caiSdcGetK115Active"}},
+            ]}],
+        )
+        db.close()
+        app = create_app(token=TOKEN)
+        with TestClient(app) as c:
+            c.post("/api/project/open", json={"path": path, "mode": "exclusive"}, headers=AUTH)
+            mid = _id_of(c, "M")
+            c.patch(f"/api/models/{mid}/ports/0",
+                    json={"updates": {"TC. ID": "6"}}, headers=AUTH)
+            e = c.get("/api/history", headers=AUTH).json()["entries"][0]
+            assert e["description"] == "Row 1 -> caiSdcGetK115Active -> TC. ID -> 5 -> 6"

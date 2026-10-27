@@ -32,6 +32,8 @@ export function HistoryModal({
   const [state, setState] = useState<LoadState>("loading");
   const [error, setError] = useState<string | null>(null);
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
+  const [unattributed, setUnattributed] = useState(0);
+  const [includeOrphans, setIncludeOrphans] = useState(false);
   const [search, setSearch] = useState("");
 
   useEffect(() => {
@@ -45,9 +47,13 @@ export function HistoryModal({
     setState("loading");
     (async () => {
       try {
-        const res = await api.get<HistoryResponse>(`/history${query}`);
+        const url =
+          `/history${query}` +
+          (includeOrphans ? `${query ? "&" : "?"}include_unattributed=true` : "");
+        const res = await api.get<HistoryResponse>(url);
         if (!alive) return;
         setEntries(res.entries);
+        setUnattributed(res.unattributed ?? 0);
         setState("ready");
       } catch (e) {
         if (!alive) return;
@@ -58,7 +64,7 @@ export function HistoryModal({
     return () => {
       alive = false;
     };
-  }, [query]);
+  }, [query, includeOrphans]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -67,7 +73,8 @@ export function HistoryModal({
       (e) =>
         e.description.toLowerCase().includes(q) ||
         e.user.toLowerCase().includes(q) ||
-        e.model.toLowerCase().includes(q),
+        e.model.toLowerCase().includes(q) ||
+        e.model_current.toLowerCase().includes(q),
     );
   }, [entries, search]);
 
@@ -93,6 +100,19 @@ export function HistoryModal({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+          {unattributed > 0 ? (
+            <label
+              className="hist-orphans"
+              title="Entries recorded under a model name that no model has any more (renamed before renames were tracked). They can't be attributed automatically."
+            >
+              <input
+                type="checkbox"
+                checked={includeOrphans}
+                onChange={(e) => setIncludeOrphans(e.target.checked)}
+              />
+              Include {unattributed} from former model names
+            </label>
+          ) : null}
           <span className="hist-count">
             {filtered.length}
             {filtered.length !== entries.length ? ` / ${entries.length}` : ""}{" "}
@@ -127,7 +147,12 @@ export function HistoryModal({
                   <tr key={i}>
                     <td className="hist-ts">{formatTs(e.timestamp)}</td>
                     <td>{e.user}</td>
-                    <td>{e.model || "N/A"}</td>
+                    <td>
+                      {e.model_current || e.model || "—"}
+                      {e.model && e.model_current && e.model !== e.model_current ? (
+                        <span className="hist-was"> (was {e.model})</span>
+                      ) : null}
+                    </td>
                     <td className="hist-desc">{e.description}</td>
                   </tr>
                 ))}

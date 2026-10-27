@@ -204,3 +204,22 @@ def test_flush_active_release_preserves_unsaved_edits(tmp_path):
     mgr.set_active_release(1)             # back to A -> reloads from DB
     assert mgr.get_active_release().data_cache.get("rows") == [{"port": "P1"}]
     d.close()
+
+
+def test_history_model_id_chain_and_release_copy(db):
+    """model_id is part of the HMAC chain for rows that carry it (legacy rows
+    keep verifying) and is preserved when history is copied to a new release."""
+    a = db.create_release("A")
+    b = db.create_release("B")
+    db.add_history_entry("legacy", model_name="M", username="u", release_id=a)
+    db.add_history_entry("by id", model_name="M", username="u", release_id=a,
+                         model_id=7)
+    db.copy_release_history(a, b)
+    assert db.verify_history_chain() is True
+    assert {h["description"]: h["model_id"] for h in db.get_history(b)} == \
+        {"legacy": None, "by id": 7}
+    assert db.history_model_name_owners() == {"M": 7}
+    # Tampering with the attribution breaks the chain.
+    with db._conn:
+        db._conn.execute("UPDATE history SET model_id=8 WHERE model_id=7")
+    assert db.verify_history_chain() is False

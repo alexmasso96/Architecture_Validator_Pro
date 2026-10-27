@@ -43,9 +43,15 @@ def _guard(fn):
 # exposed this as a single "View History"; the React app splits it into
 # Model History (all entries) and Port History (filtered to one port).
 # ---------------------------------------------------------------------------
-def _record_history(state: AppState, description: str, model_name: str = "") -> None:
+# Shown in a history entry in place of the port name when the row has none.
+UNNAMED_PORT = "(unnamed port)"
+
+
+def _record_history(state: AppState, description: str, model_name: str = "",
+                    model_id: Optional[int] = None) -> None:
     """Best-effort append of one history entry. Never raises — a logging failure
-    must not break the edit that triggered it."""
+    must not break the edit that triggered it. ``model_id`` is what attributes
+    the entry to a model; ``model_name`` is only the name it had at the time."""
     db = state.db
     if db is None or not db.is_open:
         return
@@ -56,6 +62,7 @@ def _record_history(state: AppState, description: str, model_name: str = "") -> 
             model_name=model_name,
             username=FileLockManager.get_username(),
             release_id=db.get_active_release_id(),
+            model_id=model_id,
         )
     except Exception:
         logger.exception("Failed to record history entry")
@@ -120,6 +127,7 @@ def patch_model(model_id: int, body: PatchModelBody,
         mgr = state.require_arch()
         idx = state.model_index_by_id(model_id)
         m = mgr.models[idx]
+        old_name = m.name
         if body.name is not None:
             m.name = body.name
         if body.status is not None:
@@ -130,6 +138,11 @@ def patch_model(model_id: int, body: PatchModelBody,
             mgr.restore_model(idx)
         else:
             mgr.save_registry()
+        if body.name is not None and body.name != old_name:
+            # Recorded under the OLD name: this row is what links that name to
+            # the model's id, so entries logged before the rename stay with it.
+            _record_history(state, f"Model renamed: {old_name} -> {m.name}",
+                            old_name, model_id)
         bus.publish("db-changed", {"reason": "model-updated", "model_id": model_id})
         return {"id": m.id, "name": m.name, "status": m.status, "is_deleted": m.is_deleted}
     return _guard(go)
@@ -456,7 +469,7 @@ def patch_port(model_id: int, row_index: int, body: CellUpdate,
         # changed, mirroring the PyQt log format
         # "Row N -> <port> -> <col> -> <old> -> <new>".
         _state_cols, name_col = _port_columns(db)
-        port = (_cell_text(updated.get(name_col)) if name_col else "") or "N/A"
+        port = (_cell_text(updated.get(name_col)) if name_col else "") or UNNAMED_PORT
         mname = _model_name(state, model_id)
         for col in body.updates:
             old_text = before_text[col]
@@ -466,7 +479,7 @@ def patch_port(model_id: int, row_index: int, body: CellUpdate,
             _record_history(
                 state,
                 f"Row {row_index + 1} -> {port} -> {col} -> {old_text} -> {new_text}",
-                mname,
+                mname, model_id,
             )
         bus.publish("db-changed",
                     {"reason": "port-edited", "model_id": model_id, "row_index": row_index})
@@ -501,12 +514,12 @@ def unlock_port_cell(model_id: int, row_index: int, body: UnlockBody,
         db.commit()
         from Application_Logic.Logic_Architecture_Models import _cell_text
         _state_cols, name_col = _port_columns(db)
-        port = (_cell_text(updated.get(name_col)) if name_col else "") or "N/A"
+        port = (_cell_text(updated.get(name_col)) if name_col else "") or UNNAMED_PORT
         _record_history(
             state,
             f"Row {row_index + 1} -> {port} -> {body.column} -> "
             f"unlocked imported cell (value kept: {_cell_text(new_cell)})",
-            _model_name(state, model_id),
+            _model_name(state, model_id), model_id,
         )
         bus.publish("db-changed",
                     {"reason": "port-edited", "model_id": model_id,
@@ -531,9 +544,9 @@ def add_port(model_id: int, body: Optional[CellUpdate] = None,
         idx = len(rows) - 1
         from Application_Logic.Logic_Architecture_Models import _cell_text
         _state_cols, name_col = _port_columns(db)
-        port = (_cell_text(new_row.get(name_col)).strip() if name_col else "") or "N/A"
+        port = (_cell_text(new_row.get(name_col)).strip() if name_col else "") or UNNAMED_PORT
         _record_history(state, f"Row {idx + 1} -> {port} -> Added port",
-                        _model_name(state, model_id))
+                        _model_name(state, model_id), model_id)
         bus.publish("db-changed", {"reason": "port-added", "model_id": model_id, "row_index": idx})
         return {"model_id": model_id, "row_index": idx, "cells": new_row, "total": len(rows)}
     return _guard(go)
@@ -578,12 +591,12 @@ def delete_port(model_id: int, row_index: int,
             raise ProjectError(f"No such row: {row_index}")
         from Application_Logic.Logic_Architecture_Models import _cell_text
         _state_cols, name_col = _port_columns(db)
-        port = (_cell_text(rows[row_index].get(name_col)).strip() if name_col else "") or "N/A"
+        port = (_cell_text(rows[row_index].get(name_col)).strip() if name_col else "") or UNNAMED_PORT
         del rows[row_index]
         db.save_model_rows(model_id, rows)   # re-indexes contiguously
         db.commit()
         _record_history(state, f"Row {row_index + 1} -> {port} -> Deleted port",
-                        _model_name(state, model_id))
+                        _model_name(state, model_id), model_id)
         bus.publish("db-changed", {"reason": "port-deleted", "model_id": model_id})
         return {"model_id": model_id, "total": len(rows)}
     return _guard(go)
@@ -618,11 +631,16 @@ def _port_columns(db) -> tuple[list[str], Optional[str]]:
     """(port_state_column_names, port_name_column) derived from the column schema.
 
     Port-state cols carry logic_key 'PortStateColumn'; the port-name col is the
-    first 'Port Search'. Falls back to the conventional 'Port State' name.
+    first 'Port Search', else the first 'Function Search' / 'Variable Search'
+    (the same search columns the Workspace treats as the port name). Falls back
+    to the conventional 'Port State' name.
     """
     layout = db.load_column_layout()
     state_cols = [n for (n, t, _v, _w) in layout if t == "PortStateColumn"] or ["Port State"]
     name_col = next((n for (n, t, _v, _w) in layout if t == "Port Search"), None)
+    if name_col is None:
+        name_col = next((n for (n, t, _v, _w) in layout
+                         if t in ("Function Search", "Variable Search")), None)
     return state_cols, name_col
 
 
@@ -700,7 +718,7 @@ def commit_state_change(model_id: int, body: StateChangeBody,
         _record_history(
             state,
             f"Model status changed: {old_status} -> {body.new_status}{suffix}",
-            model.name,
+            model.name, model_id,
         )
         bus.publish("db-changed",
                     {"reason": "model-state-changed", "model_id": model_id,
@@ -719,21 +737,46 @@ def commit_state_change(model_id: int, body: StateChangeBody,
 # release; Port History = entries whose description references one port name.
 # ---------------------------------------------------------------------------
 @router.get("/history")
-def get_history(model_name: Optional[str] = None,
+def get_history(model_id: Optional[int] = None,
+                model_name: Optional[str] = None,
                 port: Optional[str] = None,
+                include_unattributed: bool = False,
                 state: AppState = Depends(get_state)) -> dict:
     def go():
         db = state.require_open()
         rel_id = db.get_active_release_id()
         entries = db.get_history(rel_id)          # id order (oldest first)
-        if model_name:
+        # Attribute every entry to a model id. Rows written before history
+        # carried model_id resolve by the name they were recorded under: first
+        # via names the model was logged with (incl. "renamed" rows, which carry
+        # the old name), then via current names.
+        mgr = state.arch_manager
+        current = {m.id: m.name for m in (mgr.models if mgr else []) if m.id is not None}
+        owner_by_name = {name: mid for mid, name in current.items()}
+        owner_by_name.update(db.history_model_name_owners())
+        for e in entries:
+            if e.get("model_id") is None and e.get("model"):
+                e["model_id"] = owner_by_name.get(e["model"])
+            e["model_current"] = current.get(e.get("model_id"), "")
+        unattributed = 0
+        if model_id is not None:
+            # Entries recorded under a model name nobody owns any more (a rename
+            # made before renames were logged) can't be attributed; count them
+            # so the UI can offer to include them.
+            def orphan(e):
+                return bool(e.get("model")) and e.get("model_id") is None
+            unattributed = sum(1 for e in entries if orphan(e))
+            entries = [e for e in entries if e.get("model_id") == model_id
+                       or (include_unattributed and orphan(e))]
+        elif model_name:
             entries = [e for e in entries if (e.get("model") or "") == model_name]
         if port:
             needle = port.strip().lower()
             entries = [e for e in entries
                        if needle and needle in (e.get("description") or "").lower()]
         entries.reverse()                          # newest first for display
-        return {"entries": entries, "release_id": rel_id}
+        return {"entries": entries, "release_id": rel_id,
+                "unattributed": unattributed}
     return _guard(go)
 
 
