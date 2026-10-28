@@ -262,3 +262,76 @@ def test_report_uses_operator_preference(client, tmp_path, monkeypatch):
     doc = client.post("/api/calltree-tests/report", json={"col_name": "T1"},
                       headers=AUTH).json()["html"]
     assert "Jane Doe" in doc and "Validation" in doc and "pc-user42" not in doc
+
+
+# ---------------------------------------------------------------------------
+# Score tables, result grid and logo.
+# ---------------------------------------------------------------------------
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def test_score_counts_entry_points_as_passing():
+    s = rep.score({ct.PASSED: 6, ct.ENTRY_POINT: 2, ct.FAILED: 1, ct.NO_MATCH: 1})
+    assert (s["total"], s["passing"], s["failed"], s["other"]) == (10, 8, 1, 1)
+    assert s["score"] == 80.0
+    assert rep.score({})["score"] is None
+
+
+def test_overall_and_per_model_score_tables():
+    data = rep.build_report(
+        project="Demo", release="R1", col_name="T1", binding=BINDING, author="a",
+        created_at="now", layout=LAYOUT, port_state_col="Port State",
+        models=[("Motor", _rows(), CODE_MAP), ("Idle", [{"x": {}}], CODE_MAP)])
+    # Motor: Passed, Entry point, Failed, No Match (the Retired row is left out).
+    assert data["score"]["score"] == 50.0 and data["score"]["total"] == 4
+    assert data["chapters"][0]["score"]["score"] == 50.0
+    assert data["chapters"][1]["score"]["score"] is None
+    doc = rep.render_html(data)
+    assert "Overall test results" in doc and "Overall score" in doc
+    overall = re.search(r'<table class="grid overall">.*?</table>', doc).group(0)
+    assert re.search(r"Passed</span></td><td class=\"num\">1</td>"
+                     r"<td class=\"num\">25.0 %</td>", overall)
+    assert "<th>Total</th><th class=\"num\">4</th>" in overall
+    models = re.search(r'<table class="grid models">.*?</table>', doc).group(0)
+    assert 'href="#m-motor">Motor</a>' in models and 'href="#m-idle">Idle</a>' in models
+    assert "<b>50.0 %</b>" in models and "All models" in models
+    # Results are a bordered grid table, not bare dividing lines.
+    assert doc.count('<table class="grid results">') == 1
+    assert "table.grid{border:1px solid" in doc
+
+
+def test_logo_data_uri_and_header():
+    uri = rep.logo_data_uri(PNG)
+    assert uri.startswith("data:image/png;base64,") and rep.parse_logo(uri) == uri
+    assert rep.logo_data_uri(b"<?xml?><svg xmlns='x'/>").startswith("data:image/svg+xml;")
+    for bad in (b"", b"MZ\x90\x00 not an image", b"\xff\xd8\xff" + b"0" * rep.MAX_LOGO_BYTES):
+        with pytest.raises(ValueError):
+            rep.logo_data_uri(bad)
+    # Only inline images are ever embedded — never a URL or file path.
+    for bad in ("https://x/logo.png", "data:text/html;base64,PGI+", "/tmp/a.png",
+                'data:image/png;base64,AA"onerror="x', None):
+        assert rep.parse_logo(bad) is None
+    doc = rep.render_html(_report(logo=uri))
+    assert f'<img class="logo" src="{uri}" alt="Logo">' in doc
+    assert '<img class="logo"' not in rep.render_html(_report())
+    assert '<img class="logo"' not in rep.render_html(_report(logo="https://x/l.png"))
+
+
+def test_logo_preference_is_embedded_in_report(client, tmp_path):
+    _setup_and_run(client)
+    img = tmp_path / "logo.png"
+    img.write_bytes(PNG)
+    r = client.post("/api/prefs/report-logo", json={"path": str(img)}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json()["key"] == rep.LOGO_PREF_KEY
+    stored = client.get("/api/prefs", headers=AUTH).json()["prefs"][rep.LOGO_PREF_KEY]
+    assert stored == r.json()["value"]
+    doc = client.post("/api/calltree-tests/report", json={"col_name": "T1"},
+                      headers=AUTH).json()["html"]
+    assert f'src="{stored}"' in doc
+    bad = tmp_path / "notes.txt"
+    bad.write_text("hello")
+    r = client.post("/api/prefs/report-logo", json={"path": str(bad)}, headers=AUTH)
+    assert r.status_code == 400 and "Not a PNG" in r.json()["detail"]
+    assert client.post("/api/prefs/report-logo", json={"path": str(tmp_path / "nope.png")},
+                       headers=AUTH).status_code == 400

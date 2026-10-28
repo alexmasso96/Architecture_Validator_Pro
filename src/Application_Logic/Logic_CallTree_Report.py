@@ -2,7 +2,8 @@
 Call-tree Test column → one self-contained HTML report (inline CSS/JS/SVG,
 no external assets), for handing a verdict record to a reviewer or auditor.
 
-Layout: a header (project, release, Test column, operator, date, totals), then
+Layout: a header (optional logo, project, release, Test column, operator,
+date), an overall results table with the score, a per-model score table, then
 one chapter per architecture model listing every valid result row of that
 model's table. Clicking an entry opens its detail view inside the same file
 (hash-routed ``#e-<n>`` sections): why the verdict is what it is — the stored
@@ -15,6 +16,7 @@ plain inputs; ``render_html`` turns it into the document.
 """
 from __future__ import annotations
 
+import base64
 import html
 import json
 import re
@@ -141,6 +143,67 @@ def parse_operator_fields(raw: Optional[str]) -> List[Tuple[str, str]]:
     return out[:MAX_OPERATOR_FIELDS]
 
 
+# Preferences key holding the report logo: an image data URI (PNG/JPEG/GIF/
+# WebP/SVG), shown in the top-right corner of the report header.
+LOGO_PREF_KEY = "arch.report.logo"
+MAX_LOGO_CHARS = 1_500_000
+_LOGO_RE = re.compile(r"data:image/(?:png|jpeg|gif|webp|svg\+xml);base64,"
+                      r"[A-Za-z0-9+/]+={0,2}")
+
+
+def parse_logo(raw: Optional[str]) -> Optional[str]:
+    """The stored logo data URI, or None when unset, too large or not an
+    inline image (the report stays self-contained: never a file or URL)."""
+    s = (raw or "").strip()
+    if not s or len(s) > MAX_LOGO_CHARS or not _LOGO_RE.fullmatch(s):
+        return None
+    return s
+
+
+MAX_LOGO_BYTES = 1024 * 1024
+LOGO_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+
+
+def logo_data_uri(raw: bytes) -> str:
+    """An image file's bytes → the data URI stored as the report logo. The
+    type comes from the content, not the file name. Raises ValueError for
+    anything that isn't a PNG/JPEG/GIF/WebP/SVG image or is over 1 MB."""
+    if not raw:
+        raise ValueError("The file is empty.")
+    if len(raw) > MAX_LOGO_BYTES:
+        raise ValueError("The logo is larger than 1 MB — use a smaller image.")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "png"
+    elif raw.startswith(b"\xff\xd8\xff"):
+        mime = "jpeg"
+    elif raw[:6] in (b"GIF87a", b"GIF89a"):
+        mime = "gif"
+    elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        mime = "webp"
+    elif b"<svg" in raw[:4096].lower():
+        mime = "svg+xml"
+    else:
+        raise ValueError("Not a PNG, JPEG, GIF, WebP or SVG image.")
+    return f"data:image/{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+# Verdicts that count towards the score: the function is called, or it is an
+# entry point started by the OS / scheduler / startup code.
+PASSING = (ct.PASSED, ct.ENTRY_POINT)
+
+
+def score(counts: Dict[str, int]) -> dict:
+    """Totals for a verdict count map. ``score`` = passing results as a
+    percentage of all valid results (None when there are none)."""
+    total = sum(counts.values())
+    passing = sum(counts.get(k, 0) for k in PASSING)
+    failed = counts.get(ct.FAILED, 0)
+    return {"total": total, "passed": counts.get(ct.PASSED, 0),
+            "entry": counts.get(ct.ENTRY_POINT, 0), "failed": failed,
+            "other": total - passing - failed, "passing": passing,
+            "score": (100.0 * passing / total) if total else None}
+
+
 def port_name_column(layout, match_col: str) -> Optional[str]:
     """The search column feeding ``match_col`` (the column just before it)."""
     names = [c[0] for c in layout]
@@ -154,6 +217,7 @@ def port_name_column(layout, match_col: str) -> Optional[str]:
 def build_report(*, project: str, release: str, col_name: str, binding: dict,
                  author: str, created_at: str, layout,
                  operator: Optional[List[Tuple[str, str]]] = None,
+                 logo: Optional[str] = None,
                  models: Iterable[Tuple[str, List[dict], Optional[dict]]],
                  object_pairs: Optional[Iterable[Tuple[str, str]]] = None,
                  port_state_col: Optional[str] = None,
@@ -162,6 +226,7 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
 
     ``operator`` = [(label, value)] from Preferences → Reports; without it the
     header names ``author`` (the computer's user account) as the operator.
+    ``logo`` = an image data URI (see ``parse_logo``) for the header.
 
     Valid result rows are rows with a recorded verdict in ``col_name`` that is
     not "No Result" (retired/deleted port) or "Not Run"."""
@@ -212,7 +277,7 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
             counts[verdict] = counts.get(verdict, 0) + 1
             totals[verdict] = totals.get(verdict, 0) + 1
         chapters.append({"model": model_name, "entries": entries, "counts": counts,
-                         "skipped": skipped, "has_code_map": bool(code_map),
+                         "score": score(counts), "skipped": skipped, "has_code_map": bool(code_map),
                          "code_map_built_at": built_at})
     return {
         "project": project, "release": release, "col_name": col_name,
@@ -220,7 +285,9 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
         "has_objects": pairs is not None, "author": author, "created_at": created_at,
         "operator": list(operator or []) or [("Operator", author or "—")],
         "components": list(components or []),
-        "chapters": chapters, "totals": totals, "entry_count": n,
+        "logo": parse_logo(logo),
+        "chapters": chapters, "totals": totals, "score": score(totals),
+        "entry_count": n,
     }
 
 
@@ -250,6 +317,68 @@ def _counts_line(counts: Dict[str, int]) -> str:
     order = [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NO_MATCH, ct.NO_DATA]
     keys = [k for k in order if k in counts] + sorted(k for k in counts if k not in order)
     return " ".join(f'{_badge(k)}<b>{counts[k]}</b>' for k in keys)
+
+
+def _pct(value: Optional[float]) -> str:
+    return "—" if value is None else f"{value:.1f} %"
+
+
+def _share(n: int, total: int) -> str:
+    return _pct(100.0 * n / total) if total else "—"
+
+
+def _score_cell(value: Optional[float]) -> str:
+    """A percentage with a small bar, coloured by how much passed."""
+    if value is None:
+        return '<span class="muted">—</span>'
+    cls = "good" if value >= 90 else "mid" if value >= 60 else "low"
+    return (f'<span class="score"><span class="bar"><i class="{cls}" '
+            f'style="width:{value:.1f}%"></i></span><b>{_pct(value)}</b></span>')
+
+
+def _overall_html(data: dict) -> str:
+    """Overall results: one row per verdict (count + share) and the score."""
+    sc, totals = data["score"], data["totals"]
+    order = [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NO_MATCH, ct.NO_DATA]
+    keys = [k for k in order if k in (ct.PASSED, ct.FAILED) or totals.get(k)]
+    keys += sorted(k for k in totals if k not in order)
+    body = "".join(
+        f'<tr><td>{_badge(k)}</td><td class="num">{totals.get(k, 0)}</td>'
+        f'<td class="num">{_share(totals.get(k, 0), sc["total"])}</td></tr>'
+        for k in keys)
+    table = (f'<table class="grid overall"><thead><tr><th>Result</th>'
+             f'<th class="num">Test cases</th><th class="num">Share</th></tr></thead>'
+             f'<tbody>{body}</tbody><tfoot><tr><th>Total</th>'
+             f'<th class="num">{sc["total"]}</th>'
+             f'<th class="num">{"100.0 %" if sc["total"] else "—"}</th></tr></tfoot></table>')
+    tile = (f'<div class="tile"><div class="tile-k">Overall score</div>'
+            f'<div class="tile-v">{_pct(sc["score"])}</div>{_score_cell(sc["score"])}'
+            f'<div class="muted small">{sc["passing"]} of {sc["total"]} passed '
+            f'(Passed + Entry point)</div></div>')
+    return f'<div class="overall-wrap">{tile}{table}</div>'
+
+
+def _models_html(data: dict) -> str:
+    """Per-model table: counts and score, each model linking to its chapter."""
+    rows = []
+    for c in data["chapters"]:
+        s = c["score"]
+        rows.append(
+            f'<tr><td><a href="#{_e(_chapter_id(c))}">{_e(c["model"])}</a></td>'
+            f'<td class="num">{s["total"]}</td><td class="num">{s["passed"]}</td>'
+            f'<td class="num">{s["entry"]}</td><td class="num">{s["failed"]}</td>'
+            f'<td class="num">{s["other"]}</td><td>{_score_cell(s["score"])}</td></tr>')
+    t = data["score"]
+    foot = (f'<tr><th>All models</th><th class="num">{t["total"]}</th>'
+            f'<th class="num">{t["passed"]}</th><th class="num">{t["entry"]}</th>'
+            f'<th class="num">{t["failed"]}</th><th class="num">{t["other"]}</th>'
+            f'<th>{_score_cell(t["score"])}</th></tr>')
+    return (f'<div class="scroll"><table class="grid models"><thead><tr><th>Model</th>'
+            f'<th class="num">Results</th><th class="num">Passed</th>'
+            f'<th class="num">Entry point</th><th class="num">Failed</th>'
+            f'<th class="num" title="No Match / No Data">Other</th><th>Score</th>'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody><tfoot>{foot}</tfoot>'
+            f'</table></div>')
 
 
 def _tree_html(nodes: List[dict], target: str, arrow: str) -> str:
@@ -365,7 +494,7 @@ def _detail_html(entry: dict, chapter: dict, data: dict) -> str:
             f'<p><a href="#{_e(_chapter_id(chapter))}" class="back">← {_e(chapter["model"])}</a>'
             f' · <a href="#top" class="back">Overview</a></p>'
             f'<h2>{_e(entry["port"] or entry["function"] or "Row " + str(entry["row"]))}</h2>'
-            f'<table class="meta">{meta}</table>'
+            f'<table class="grid meta">{meta}</table>'
             f'<h3>Why this verdict</h3>{"".join(why)}'
             f'<h3>Call-tree snapshot</h3>{snap}</section>')
 
@@ -377,11 +506,13 @@ def _chapter_id(chapter: dict) -> str:
 _CSS = """
 :root{--bg:#fff;--fg:#1d1d1f;--muted:#6e6e73;--line:#e3e3e8;--card:#f6f6f8;
 --pass:#1e7e34;--pass-bg:#e3f4e7;--fail:#b3261e;--fail-bg:#fbe5e3;--entry:#8a5a00;
---entry-bg:#fdf1d6;--warn:#555;--warn-bg:#ececef;--accent:#0a66d8}
+--entry-bg:#fdf1d6;--warn:#555;--warn-bg:#ececef;--accent:#0a66d8;--zebra:#fafafb}
 @media (prefers-color-scheme:dark){:root{--bg:#1c1c1e;--fg:#f2f2f4;--muted:#a1a1a6;
 --line:#3a3a3c;--card:#2c2c2e;--pass:#7ad08f;--pass-bg:#1f3a26;--fail:#ff8a80;
 --fail-bg:#47201d;--entry:#f2c46d;--entry-bg:#3d3017;--warn:#c7c7cc;--warn-bg:#3a3a3c;
---accent:#5aa2ff}}
+--accent:#5aa2ff;--zebra:#232325}}
+@media (prefers-color-scheme:dark){.head img.logo{background:#fff;padding:6px;
+border-radius:6px}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,
 BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
@@ -391,11 +522,38 @@ h3{font-size:15px;margin:22px 0 6px}h4{font-size:13px;margin:14px 0 4px}
 a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 code{font:12.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .muted{color:var(--muted)}.ok{color:var(--pass);font-size:12px}
-.head{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:8px}
+.head{border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:8px;
+display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+.head img.logo{max-height:64px;max-width:240px;object-fit:contain;flex:none}
+.small{font-size:12px}
 table{border-collapse:collapse;width:100%}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}
-table.meta{width:auto;max-width:100%}table.meta th{width:150px}
+table.grid{border:1px solid var(--line);border-radius:8px;border-collapse:separate;
+border-spacing:0;overflow:hidden}
+table.grid th,table.grid td{border-bottom:1px solid var(--line);
+border-right:1px solid var(--line)}
+table.grid tr>:last-child{border-right:0}
+table.grid tbody tr:last-child>*{border-bottom:0}
+table.grid thead th{background:var(--card);color:var(--fg)}
+table.grid tbody tr:nth-child(even){background:var(--zebra)}
+table.grid tfoot th{background:var(--card);color:var(--fg);font-size:13px;
+text-transform:none;letter-spacing:0;border-top:1px solid var(--line);border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+table.meta{width:auto;max-width:100%}table.meta th{width:150px;background:var(--card)}
+table.meta tbody tr:nth-child(even){background:none}
+.overall-wrap{display:flex;gap:20px;align-items:stretch;flex-wrap:wrap}
+table.overall{width:auto;min-width:340px}
+.tile{border:1px solid var(--line);border-radius:8px;padding:12px 16px;min-width:200px;
+background:var(--card);flex:0 0 auto}.tile .score{width:100%}
+.tile-k{font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}
+.tile-v{font-size:30px;font-weight:700;margin:2px 0 6px}
+.tile .score b{display:none}
+.score{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.bar{display:inline-block;width:90px;height:8px;border-radius:4px;background:var(--line);
+overflow:hidden}.tile .bar{width:100%}
+.bar i{display:block;height:100%}.bar .good{background:var(--pass)}
+.bar .mid{background:var(--entry)}.bar .low{background:var(--fail)}
 .scroll{overflow-x:auto}.scroll table{min-width:640px}
 td code{word-break:break-all}
 table.facts{width:auto}table.facts th{padding-right:24px}
@@ -423,7 +581,7 @@ svg.path .node.hl{stroke:var(--accent);stroke-width:2}
 svg.path text{fill:var(--fg);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
 svg.path .edge{stroke:var(--muted);stroke-width:1.5;fill:var(--muted)}
 svg.path .edge.ver{stroke:var(--pass);fill:var(--pass)}svg.path .head{stroke:none}
-.chapter{margin-top:30px}.toc a{margin-right:14px}
+.chapter{margin-top:30px}
 .filter{margin:10px 0}.filter input{padding:5px 8px;border:1px solid var(--line);
 border-radius:6px;background:var(--bg);color:var(--fg);width:260px}
 .js .detail{display:none}.js.routed .overview{display:none}
@@ -465,9 +623,6 @@ def render_html(data: dict) -> str:
     facts.append(("Created", _e(data["created_at"])))
     fact_rows = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in facts)
 
-    toc = " ".join(
-        f'<a href="#{_chapter_id(c)}">{_e(c["model"])} ({len(c["entries"])})</a>'
-        for c in data["chapters"])
     chapters, details = [], []
     for c in data["chapters"]:
         if c["entries"]:
@@ -481,7 +636,7 @@ def render_html(data: dict) -> str:
                    if e["stale"] else "")
                 + f'</td><td class="muted">{_e(e["reason"])}</td></tr>'
                 for e in c["entries"])
-            table = (f'<div class="scroll"><table><thead><tr><th>#</th><th>Port</th>'
+            table = (f'<div class="scroll"><table class="grid results"><thead><tr><th>#</th><th>Port</th>'
                      f'<th>Function</th><th>Verdict</th><th>Reason</th></tr></thead>'
                      f'<tbody>{body}</tbody></table></div>')
             details += [_detail_html(e, c, data) for e in c["entries"]]
@@ -491,23 +646,28 @@ def render_html(data: dict) -> str:
                  f'(not run / retired / deleted)</span>' if c["skipped"] else "")
         nocm = ("" if c["has_code_map"] else
                 ' · <span class="muted">no code map for this release — snapshots unavailable</span>')
+        sc = (f' · score <b>{_pct(c["score"]["score"])}</b>'
+              if c["score"]["total"] else "")
         chapters.append(
             f'<section class="chapter" id="{_chapter_id(c)}"><h2>{_e(c["model"])}</h2>'
-            f'<p>{_counts_line(c["counts"])}{extra}{nocm}</p>{table}</section>')
+            f'<p>{_counts_line(c["counts"])}{sc}{extra}{nocm}</p>{table}</section>')
 
     title = f'Call-tree test report — {data["release"]} — {data["col_name"]}'
+    logo = (f'<img class="logo" src="{_e(data["logo"])}" alt="Logo">'
+            if data.get("logo") else "")
     payload = json.dumps({"entries": data["entry_count"]})
     return (
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         f"<meta name=\"generator\" content=\"Architecture Validator\">"
         f"<title>{_e(title)}</title><style>{_CSS}</style></head><body><main id=\"top\">"
-        f'<div class="overview"><div class="head"><h1>Call-tree test report</h1>'
+        f'<div class="overview"><div class="head"><div><h1>Call-tree test report</h1>'
         f'<p class="muted">{_e(data["project"])} · {_e(data["release"])} · '
-        f'{_e(data["col_name"])}</p></div>'
+        f'{_e(data["col_name"])}</p></div>{logo}</div>'
         f'<table class="facts">{fact_rows}</table>'
-        f'<h3>Summary — {data["entry_count"]} result(s)</h3><p>{_counts_line(data["totals"])}</p>'
-        f'<p class="toc">{toc}</p>'
+        f'<h3>Overall test results — {data["entry_count"]} result(s)</h3>'
+        f'{_overall_html(data)}'
+        f'<h3>Architecture models</h3>{_models_html(data)}'
         f'<div class="filter"><input id="flt" placeholder="Filter entries…" '
         f'aria-label="Filter entries"></div>'
         f'{"".join(chapters)}</div>{"".join(details)}</main>'

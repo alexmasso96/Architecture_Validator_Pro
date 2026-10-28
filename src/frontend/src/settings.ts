@@ -3,7 +3,7 @@
 // any subscribed component re-renders live (see useSetting).
 
 import { useEffect, useState } from "react";
-import { persistKey } from "./prefs";
+import { persistKey, removePersistedKey } from "./prefs";
 
 const ICON_LABELS_KEY = "arch.ui.iconLabels";
 const FILE_EXPLORER_KEY = "arch.ui.fileExplorer";
@@ -79,5 +79,29 @@ export function setReportOperator(fields: OperatorField[]): void {
   const blob = JSON.stringify(fields);
   localStorage.setItem(REPORT_OPERATOR_KEY, blob);
   persistKey(REPORT_OPERATOR_KEY, blob);
+  emit();
+}
+
+// Report logo (Preferences → Reports): an image data URI shown in the top-right
+// corner of every call-tree HTML report. The backend stores it (it reads the
+// chosen image file, POST /prefs/report-logo); this is the in-session cache.
+export const REPORT_LOGO_KEY = "arch.report.logo";
+
+export function getReportLogo(): string {
+  return localStorage.getItem(REPORT_LOGO_KEY) ?? "";
+}
+
+export function cacheReportLogo(dataUri: string): void {
+  try {
+    localStorage.setItem(REPORT_LOGO_KEY, dataUri);
+  } catch {
+    /* quota — the backend copy is what reports use */
+  }
+  emit();
+}
+
+export function clearReportLogo(): void {
+  localStorage.removeItem(REPORT_LOGO_KEY);
+  removePersistedKey(REPORT_LOGO_KEY);
   emit();
 }
