@@ -9,6 +9,8 @@ interface Candidate {
   inlined?: boolean;
   /** Exists only as a #define in the release's source — no symbol, no address. */
   macro?: boolean;
+  /** Only seen in the release's Code Map call tree — no symbol, no #define found. */
+  call_target?: boolean;
   /** Release with several symbol files: the components defining the name. */
   components?: string[];
 }
@@ -179,6 +181,14 @@ export function MatchPicker({
                     title="A #define macro in the release's source — the preprocessor expands it, so it has no ELF symbol or address"
                   >
                     macro
+                  </span>
+                )}
+                {c.call_target && (
+                  <span
+                    className="mm-tag"
+                    title="Called in the release's source (shown in the Code Map) but it has no ELF symbol and no #define was found in the imported source — usually a macro from a header that wasn't imported"
+                  >
+                    call tree
                   </span>
                 )}
                 {c.components && c.components.length > 0 && (

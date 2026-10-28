@@ -27,8 +27,11 @@ class SymbolMatcher:
     def __init__(self, parser: ELFParser, db=None, elf_hash=None,
                  macros: Optional[Dict[str, List[str]]] = None) -> None:
         self.parser: ELFParser = parser
-        # Names that exist only as source #define macros (no ELF symbol).
+        # Names that exist only as source #define macros (no ELF symbol), and
+        # names only seen in the Code Map's call tree (no symbol, no #define
+        # found — e.g. a macro from a header that wasn't imported).
         self.macro_names: set = set()
+        self.call_target_names: set = set()
 
         if db is not None and (elf_hash or macros):
             # DB-backed path — load only name strings, not full objects. A list
@@ -54,6 +57,12 @@ class SymbolMatcher:
                 self.all_function_names = self.all_function_names + fmac
                 self.all_variable_names = self.all_variable_names + omac
                 self.macro_names = set(fmac) | set(omac)
+                # Anything visible in the call tree is a call target, so it
+                # joins the function pool even when no definition was found.
+                known |= self.macro_names
+                calls = [n for n in macros.get("call_targets", []) if n not in known]
+                self.all_function_names = self.all_function_names + calls
+                self.call_target_names = set(calls)
         else:
             # Legacy in-memory path
             self.all_function_names = [f.name for f in parser.functions]
@@ -155,10 +164,17 @@ def rematch_rows(rows, specs, matcher, limit: int = 10) -> int:
     best ``"Name (NN%)"`` into the adjacent (Match) cell's ``widget_text``.
     Pure (Qt-free); returns the number of cells updated. Mirrors the Qt
     ``_match_model_data_inplace`` minus the widget styling.
+
+    A Match cell the user picked by hand (``user_changed``) is kept: re-runs
+    happen automatically (e.g. after a source import) and must never replace
+    a tester's choice.
     """
     changed = 0
     for row in rows:
         for search_col, match_col, kind in specs:
+            existing = row.get(match_col)
+            if isinstance(existing, dict) and existing.get("user_changed"):
+                continue
             cell = row.get(search_col)
             text = (cell.get("text", "") if isinstance(cell, dict) else "").strip()
             if not text:

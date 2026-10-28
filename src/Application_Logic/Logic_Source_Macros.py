@@ -12,6 +12,12 @@ the variable pool.
 The list is extracted from the source stored in the project for a release and
 cached in project_meta, keyed by a fingerprint of that source, so it is read
 again only after the source changes.
+
+A macro defined in a header that never reached the project (over the importer's
+size limit, under a skipped build/output folder, or outside the imported tree)
+can't be extracted — but every name the release's Code Map shows is still a
+real call target. ``release_call_targets`` lists those names so anything
+visible in the call tree can be matched.
 """
 from __future__ import annotations
 
@@ -81,3 +87,28 @@ def release_macros(db, release_id) -> Dict[str, List[str]]:
     result = collect_macros(DbReleaseSourceProvider(db, release_id).iter_text())
     db.set_meta(key, json.dumps({"fp": fp, **result}))   # no-op in view mode
     return result
+
+
+def release_call_targets(db, release_id) -> List[str]:
+    """Every function name in the release's Code Maps (all models): the
+    functions plus everything they call. Raw ``0x…`` addresses are left out."""
+    if db is None or release_id is None:
+        return []
+    rows = db.execute(
+        "SELECT model_id FROM ai_release_maps WHERE release_id=?"
+        " AND code_map_json IS NOT NULL", (release_id,)).fetchall()
+    names: Set[str] = set()
+    for (model_id,) in rows:
+        cm = db.get_model_code_map(model_id, release_id=release_id) or {}
+        for fname, fdata in (cm.get("functions") or {}).items():
+            names.add(fname)
+            names.update((fdata or {}).get("calls") or [])
+    return sorted(n for n in names if n and not n.startswith("0x"))
+
+
+def release_match_extras(db, release_id) -> Dict[str, List[str]]:
+    """Source-side match candidates of a release: its #define macros plus the
+    names in its Code Maps' call trees."""
+    out = release_macros(db, release_id)
+    out["call_targets"] = release_call_targets(db, release_id)
+    return out

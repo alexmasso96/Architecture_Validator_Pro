@@ -115,7 +115,8 @@ def _wait(client, job_id, timeout=20.0):
     raise AssertionError("job did not finish")
 
 
-def test_port_search_matches_source_macro(client, tmp_path):
+@pytest.mark.parametrize("import_via", ["source", "code_map"])
+def test_port_search_matches_source_macro(client, tmp_path, import_via):
     src = tmp_path / "src"
     (src / "inc").mkdir(parents=True)
     (src / "inc" / "cfg_gen_get_macro.h").write_text(HEADER)
@@ -127,27 +128,38 @@ def test_port_search_matches_source_macro(client, tmp_path):
                       json={"file_path": SAMPLE_ELF, "release_id": rid}, headers=AUTH).json()
     assert _wait(client, job["job_id"])["status"] == "done"
 
-    # Before the source is imported the macro can't be found.
-    r = client.get("/api/symbols", params={"q": "cfgGetRLMaxValueForHigh_u16"},
-                   headers=AUTH).json()
-    assert all(c["name"] != "cfgGetRLMaxValueForHigh_u16" for c in r["candidates"])
-
-    job = client.post(f"/api/releases/{rid}/source", json={"source_dir": str(src)},
-                      headers=AUTH).json()
-    assert _wait(client, job["job_id"])["status"] == "done"
-    r = client.get("/api/symbols", params={"q": "cfgGetRLMaxValueForHigh_u16"},
-                   headers=AUTH).json()
-    top = r["candidates"][0]
-    assert top["name"] == "cfgGetRLMaxValueForHigh_u16" and top["score"] == 100
-    assert top["macro"] is True
-
-    # Re-match fills the Match cell of a Port Search column.
     mid = client.post("/api/models", json={"name": "M1"}, headers=AUTH).json()["id"]
     cols = client.get("/api/columns", headers=AUTH).json()["columns"]
     names = [c["name"] for c in cols]
     search = next(c["name"] for c in cols if c["type"] == "Port Search")
     match = names[names.index(search) + 1]
     db = client.app.state.appstate.db
+    db.save_model_rows(mid, [{search: {"text": "cfgGetRLMaxValueForHigh_u16"},
+                              match: {"text": "", "widget_text": "OldSymbol (40%)"}}])
+    db.commit()
+
+    # Before the source is imported the macro can't be found.
+    r = client.get("/api/symbols", params={"q": "cfgGetRLMaxValueForHigh_u16"},
+                   headers=AUTH).json()
+    assert all(c["name"] != "cfgGetRLMaxValueForHigh_u16" for c in r["candidates"])
+
+    if import_via == "source":
+        job = client.post(f"/api/releases/{rid}/source", json={"source_dir": str(src)},
+                          headers=AUTH).json()
+    else:
+        job = client.post("/api/jobs/build_code_map",
+                          json={"source_dir": str(src), "release_id": rid,
+                                "model_id": mid}, headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    r = client.get("/api/symbols", params={"q": "cfgGetRLMaxValueForHigh_u16"},
+                   headers=AUTH).json()
+    top = r["candidates"][0]
+    assert top["name"] == "cfgGetRLMaxValueForHigh_u16" and top["score"] == 100
+    assert top["macro"] is True
+    assert db.get_model_rows(mid)[0][match]["widget_text"] == \
+        "cfgGetRLMaxValueForHigh_u16 (100%)"
+
+    # Re-match fills the Match cell of a Port Search column.
     db.save_model_rows(mid, [{search: {"text": "cfgGetRLMaxValueForHigh_u16"}}])
     db.commit()
     job = client.post("/api/jobs/fuzzy_rematch", json={"model_ids": [mid]},
@@ -161,3 +173,104 @@ def test_port_search_matches_source_macro(client, tmp_path):
     r = client.get("/api/symbols", params={"q": "cfgGetRLMaxValueForHigh_u16"},
                    headers=AUTH).json()
     assert all(not c.get("macro") for c in r["candidates"])
+
+
+def test_inactive_source_import_preserves_active_matches(client, tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "cfg.h").write_text(HEADER)
+    active = client.post("/api/releases", json={"name": "Active"}, headers=AUTH).json()["id"]
+    other = client.post("/api/releases", json={"name": "Other"}, headers=AUTH).json()["id"]
+    client.post(f"/api/releases/{active}/activate", headers=AUTH)
+    mid = client.post("/api/models", json={"name": "M1"}, headers=AUTH).json()["id"]
+    db = client.app.state.appstate.db
+    rows = [{"Input Port": {"text": "cfgGetRLMaxValueForHigh_u16"},
+             "Input Port (Match)": {"text": "", "widget_text": "ChosenSymbol (80%)"}}]
+    db.save_model_rows(mid, rows)
+    db.commit()
+    before = db.get_model_rows(mid)
+
+    job = client.post(f"/api/releases/{other}/source", json={"source_dir": str(src)},
+                      headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    assert db.get_model_rows(mid) == before
+
+
+def test_source_import_rematch_keeps_hand_picked_matches(client, tmp_path):
+    """The automatic re-match after a source import updates stale matches but
+    never replaces a Match cell the tester picked by hand."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "cfg.h").write_text(HEADER)
+    rid = client.post("/api/releases", json={"name": "R1"}, headers=AUTH).json()["id"]
+    client.post(f"/api/releases/{rid}/activate", headers=AUTH)
+    job = client.post("/api/jobs/import_symbols",
+                      json={"file_path": SAMPLE_ELF, "release_id": rid}, headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    mid = client.post("/api/models", json={"name": "M1"}, headers=AUTH).json()["id"]
+    db = client.app.state.appstate.db
+    picked = {"text": "add (60%)", "widget_text": "add (60%)", "user_changed": True}
+    db.save_model_rows(mid, [
+        {"Input Port": {"text": "cfgGetRLMaxValueForHigh_u16"},
+         "Input Port (Match)": dict(picked)},
+        {"Input Port": {"text": "cfgGetRLMinValueForLow_u16"},
+         "Input Port (Match)": {"text": "", "widget_text": "OldSymbol (40%)"}},
+    ])
+    db.commit()
+    job = client.post(f"/api/releases/{rid}/source", json={"source_dir": str(src)},
+                      headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    rows = db.get_model_rows(mid)
+    assert rows[0]["Input Port (Match)"] == picked
+    assert rows[1]["Input Port (Match)"]["widget_text"] == "cfgGetRLMinValueForLow_u16 (100%)"
+
+
+@pytest.mark.parametrize("header_problem", ["over_2mb", "skipped_folder"])
+def test_rematch_finds_call_tree_name_when_header_was_not_imported(
+        client, tmp_path, header_problem):
+    """The reported bug: the macro shows in the Code Map's call tree, but its
+    defining header never reached the project (the importer skips files over
+    2 MB and build-output folders), so Re-match could not find it."""
+    src = tmp_path / "src"
+    (src / "app").mkdir(parents=True)
+    (src / "app" / "rls_cfg.c").write_text(SOURCE)
+    if header_problem == "over_2mb":
+        filler = "#define cfgGetFiller_%06d() (0)\n"
+        (src / "app" / "cfg_gen_get_macro.h").write_text(
+            HEADER + "".join(filler % i for i in range(80000)))
+        assert (src / "app" / "cfg_gen_get_macro.h").stat().st_size > 2 * 1024 * 1024
+    else:
+        (src / "out").mkdir()
+        (src / "out" / "cfg_gen_get_macro.h").write_text(HEADER)
+
+    rid = client.post("/api/releases", json={"name": "R1"}, headers=AUTH).json()["id"]
+    client.post(f"/api/releases/{rid}/activate", headers=AUTH)
+    job = client.post("/api/jobs/import_symbols",
+                      json={"file_path": SAMPLE_ELF, "release_id": rid}, headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    mid = client.post("/api/models", json={"name": "M1"}, headers=AUTH).json()["id"]
+    job = client.post(f"/api/releases/{rid}/source", json={"source_dir": str(src)},
+                      headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    db = client.app.state.appstate.db
+    assert not any(f["rel_path"].endswith(".h")
+                   for f in db.list_release_source_files(rid))     # header skipped
+    job = client.post("/api/jobs/build_code_map",
+                      json={"model_id": mid, "release_id": rid}, headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    cm = db.get_model_code_map(mid, release_id=rid)
+    assert "cfgGetRLMaxValueForHigh_u16" in cm["functions"]["rlsCfgGetRlSignal"]["calls"]
+
+    r = client.get("/api/symbols", params={"q": "cfgGetRLMaxValueForHigh_u16"},
+                   headers=AUTH).json()
+    top = r["candidates"][0]
+    assert (top["name"], top["score"]) == ("cfgGetRLMaxValueForHigh_u16", 100)
+    assert top["call_target"] is True and top["macro"] is False
+
+    db.save_model_rows(mid, [{"Input Port": {"text": "cfgGetRLMaxValueForHigh_u16"}}])
+    db.commit()
+    job = client.post("/api/jobs/fuzzy_rematch", json={"model_ids": [mid]},
+                      headers=AUTH).json()
+    assert _wait(client, job["job_id"])["status"] == "done"
+    assert db.get_model_rows(mid)[0]["Input Port (Match)"]["widget_text"] == \
+        "cfgGetRLMaxValueForHigh_u16 (100%)"

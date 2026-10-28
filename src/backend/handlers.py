@@ -11,6 +11,7 @@ run_release_diff). Handlers therefore stay thin.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import threading
 import time
@@ -156,6 +157,31 @@ def _make_release_diff(state: AppState):
 
 
 # ----------------------------------------------------------------------
+# After source is imported into the ACTIVE release, its #define macros are
+# new match candidates — re-match every model so Match cells filled before
+# the source existed pick them up (hand-picked cells are kept, see
+# rematch_rows). Never fails the import it follows: the source is stored
+# either way, and Re-match Symbols remains available.
+# ----------------------------------------------------------------------
+def _rematch_source_models(state: AppState, release_id, progress, cancel) -> None:
+    active = (state.release_manager.get_active_release()
+              if state.release_manager is not None else None)
+    if (active is None or active.id != release_id or active.is_baseline
+            or not state.can_edit or state.lock_lost or cancel.is_set()):
+        return
+    model_ids = [model.id for model in state.require_arch().models
+                 if model.id is not None and not model.is_deleted]
+    if not model_ids:
+        return
+    try:
+        _make_fuzzy_rematch(state)({"model_ids": model_ids}, progress, cancel)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Re-match after source import failed: %s", e)
+        progress(f"Source imported, but re-matching failed ({e}) — "
+                 "run Re-match Symbols.")
+
+
+# ----------------------------------------------------------------------
 def _make_build_code_map(state: AppState):
     def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
         db = state.require_open()
@@ -176,6 +202,8 @@ def _make_build_code_map(state: AppState):
         # folder) — tell clients so the ✓ Source badge / Code Map source status
         # refresh without a manual reload.
         state.invalidate_matchers()   # the build may have imported source
+        if params.get("source_dir"):
+            _rematch_source_models(state, params.get("release_id"), progress, cancel)
         state.bus.publish("db-changed",
                           {"reason": "code-map-built",
                            "release_id": params.get("release_id")})
@@ -204,9 +232,9 @@ def _make_fuzzy_rematch(state: AppState):
             for h in hashes:
                 if not wdb.has_elf(h):
                     raise ProjectError(f"No ELF in project for hash {h}.")
-            from Application_Logic.Logic_Source_Macros import release_macros
+            from Application_Logic.Logic_Source_Macros import release_match_extras
             matcher = SymbolMatcher(None, db=wdb, elf_hash=hashes,
-                                    macros=release_macros(wdb, active_rid))
+                                    macros=release_match_extras(wdb, active_rid))
             specs = search_specs_from_layout(wdb.load_column_layout())
             model_ids = _resolve_model_ids(state, params, wdb)
             total = 0
@@ -445,6 +473,7 @@ def _make_import_source(state: AppState):
             release_macros(wdb, release_id)
             wdb.commit()
         state.invalidate_matchers()
+        _rematch_source_models(state, release_id, progress, cancel)
 
         # Tell every client the source set changed so the Release Manager's
         # ✓ Source badge + the workspace refresh without a manual reload.

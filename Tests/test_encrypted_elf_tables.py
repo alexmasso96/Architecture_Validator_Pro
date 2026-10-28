@@ -57,9 +57,10 @@ def test_elf_tables_are_ciphertext_at_rest():
             "SELECT parameters, return_type FROM elf_functions"
             " WHERE elf_hash=? AND name='add'", (p.md5_hash,)).fetchone()
         assert is_marked_text(raw[0])
-        # return_type is empty for this fixture (falsy values skip encryption);
-        # either way it must never be readable plaintext of a real value.
-        assert raw[1] == "" or is_marked_text(raw[1])
+        # return_type is empty for this fixture (falsy values skip encryption:
+        # "" from the native parser, NULL from pyelftools — CI has no native
+        # module); either way it must never be readable plaintext of a value.
+        assert not raw[1] or is_marked_text(raw[1])
         raw_s = db.execute(
             "SELECT fields FROM elf_structures WHERE elf_hash=? AND name='Point'",
             (p.md5_hash,)).fetchone()

@@ -166,15 +166,16 @@ class AppState:
     def get_symbol_matcher(self, elf_hash, release_id: Optional[int] = None):
         """A name-list-only SymbolMatcher for one ELF hash — or a list of them
         (a release's component files, matched as one pool) — cached per session.
-        With ``release_id``, the #define macros of that release's stored source
-        join the pool too (they never reach the ELF).
+        With ``release_id``, that release's source-side names join the pool
+        too: its #define macros and its Code Maps' call-tree names (neither
+        reaches the ELF).
 
         The DB-backed matcher loads only symbol *name* strings (not full objects)
         and never touches the parser, so we build it with ``parser=None``.
         Call ``invalidate_matchers()`` when a release's symbols or source change.
         """
         from Application_Logic.Logic_Database import elf_hash_list
-        from Application_Logic.Logic_Source_Macros import release_macros
+        from Application_Logic.Logic_Source_Macros import release_match_extras
         from Application_Logic.Logic_Symbol_Matcher import SymbolMatcher
         db = self.require_open()
         hashes = elf_hash_list(elf_hash)
@@ -183,7 +184,8 @@ class AppState:
                 raise ProjectError(f"No ELF in project for hash {h}.")
         key = (tuple(hashes), release_id)
         if key not in self._matchers:
-            macros = release_macros(db, release_id) if release_id is not None else None
+            macros = (release_match_extras(db, release_id)
+                      if release_id is not None else None)
             self._matchers[key] = SymbolMatcher(None, db=db, elf_hash=hashes,
                                                 macros=macros)
         return self._matchers[key]

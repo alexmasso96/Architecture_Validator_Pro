@@ -9,7 +9,8 @@ union of all its component symbol files (FBL, APP, …) — or an explicit
 data the Qt match dropdown showed, minus the widget — plus, when the release
 has several component files, ``components`` (which files define the name).
 ``macro`` marks a name that exists only as a #define in the release's stored
-source (preprocessor-expanded, so no ELF symbol and no address).
+source (preprocessor-expanded, so no ELF symbol and no address);
+``call_target`` one that is only seen in the release's Code Map call tree.
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ def symbols(q: str = Query(..., min_length=1),
             return {"query": q, "kind": kind, "elf_hash": None, "candidates": []}
         # The active release's source #define macros join the pool (generated
         # accessors never reach the ELF but are what ports often name).
-        matcher = state.get_symbol_matcher(hashes, release_id=rid if has_source else None)
+        matcher = state.get_symbol_matcher(hashes, release_id=rid)
         files = db.get_release_symbol_files(rid) if rid is not None else []
     except ProjectError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
@@ -64,7 +65,8 @@ def symbols(q: str = Query(..., min_length=1),
     candidates = []
     for n, s in pairs:
         cand = {"name": n, "score": s, "inlined": n in inlined,
-                "macro": n in matcher.macro_names}
+                "macro": n in matcher.macro_names,
+                "call_target": n in matcher.call_target_names}
         if n in comps:
             cand["components"] = comps[n]
         candidates.append(cand)
