@@ -717,6 +717,18 @@ class ProjectDatabase:
                     PRIMARY KEY (model_id, release_id)
                 );
 
+                -- The Code Map of a release (ELF + release source + .o data).
+                -- It doesn't depend on the architecture model, so it is keyed
+                -- by release alone (release_id 0 = no release). Maps built
+                -- before this table existed live per model in ai_release_maps
+                -- and are adopted on first read (get_release_code_map).
+                -- Derived cache → excluded from the integrity digest.
+                CREATE TABLE IF NOT EXISTS release_code_maps (
+                    release_id    INTEGER PRIMARY KEY,
+                    code_map_json TEXT    NOT NULL,
+                    updated_at    TEXT    NOT NULL DEFAULT ''
+                );
+
                 -- Source-Level Test Code Injection -----------------------
                 -- A test project bundles imported helper files plus a set of
                 -- injection hooks that splice snippets into production source.
@@ -987,39 +999,61 @@ class ProjectDatabase:
                  diff_hash, builder_version, int(char_count or 0), updated_at,
                  self._enc_text("C", cm)))
 
-    def get_model_code_map(self, model_id: int, release_id=None) -> Optional[dict]:
-        """Return the parsed CodeMap dict for a model+release, or None."""
+    def get_release_code_map(self, release_id=None) -> Optional[dict]:
+        """The parsed Code Map of a release (None → the active release), or
+        None when it has never been built.
+
+        Projects saved before Code Maps were per release keep them per model
+        in ai_release_maps: the most recently built of those is adopted as
+        the release's map (and stored, unless the project is read-only)."""
         rid = self._resolve_release_id(release_id)
-        cur = self._conn.execute(
-            "SELECT code_map_json FROM ai_release_maps WHERE model_id=? AND release_id=?",
-            (model_id, rid))
-        row = cur.fetchone()
-        if not row or not row[0]:
-            return None
-        try:
-            return json.loads(self._dec_text("C", row[0]))
-        except (ValueError, TypeError):
-            return None
+        row = self._conn.execute(
+            "SELECT code_map_json FROM release_code_maps WHERE release_id=?",
+            (rid,)).fetchone()
+        if row and row[0]:
+            try:
+                return json.loads(self._dec_text("C", row[0]))
+            except (ValueError, TypeError):
+                return None
+        best, best_raw = None, None
+        for (raw,) in self._conn.execute(
+                "SELECT code_map_json FROM ai_release_maps WHERE release_id=?"
+                " AND code_map_json IS NOT NULL AND code_map_json != ''", (rid,)):
+            try:
+                text = self._dec_text("C", raw)
+                cm = json.loads(text)
+            except (ValueError, TypeError):
+                continue
+            if best is None or (cm.get("built_at") or "") > (best.get("built_at") or ""):
+                best, best_raw = cm, text
+        if best is not None and not self.read_only:
+            self.save_release_code_map(best_raw, release_id=rid)
+        return best
+
+    def save_release_code_map(self, code_map_json: str, release_id=None) -> None:
+        """Store (replace) the Code Map JSON of a release."""
+        rid = self._resolve_release_id(release_id)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO release_code_maps"
+                " (release_id, code_map_json, updated_at) VALUES (?, ?, ?)",
+                (rid, self._enc_text("C", code_map_json),
+                 datetime.datetime.now().isoformat(timespec="seconds")))
+
+    def has_release_code_map(self, release_id=None) -> bool:
+        return self.get_release_code_map(release_id) is not None
+
+    def get_model_code_map(self, model_id: int, release_id=None) -> Optional[dict]:
+        """The Code Map seen from a model: the release's map. Kept with its
+        model argument for its many callers — the map is the same for every
+        model of a release."""
+        return self.get_release_code_map(release_id)
 
     def save_model_code_map(self, model_id: int, code_map_json: str,
                             release_id=None) -> None:
-        """Save or update the CodeMap JSON for a model+release (keeps any mind map)."""
-        rid = self._resolve_release_id(release_id)
-        enc_cm = self._enc_text("C", code_map_json)
-        with self._conn:
-            cur = self._conn.execute(
-                "SELECT 1 FROM ai_release_maps WHERE model_id=? AND release_id=?",
-                (model_id, rid))
-            if cur.fetchone():
-                self._conn.execute(
-                    "UPDATE ai_release_maps SET code_map_json=? "
-                    "WHERE model_id=? AND release_id=?", (enc_cm, model_id, rid))
-            else:
-                ts = datetime.datetime.now().isoformat()
-                self._conn.execute(
-                    "INSERT INTO ai_release_maps "
-                    "(model_id, release_id, mindmap_json, updated_at, code_map_json) "
-                    "VALUES (?, ?, ?, ?, ?)", (model_id, rid, "", ts, enc_cm))
+        """Save the release's Code Map (``model_id`` is ignored — see
+        get_model_code_map)."""
+        self.save_release_code_map(code_map_json, release_id=release_id)
 
     def delete_model_mindmap(self, model_id: int, release_id=None) -> None:
         """Remove a model's map row(s) AND its code-diff rows (the diff table is not
@@ -1405,6 +1439,8 @@ class ProjectDatabase:
             # and release_rows cascade via their FKs.
             self._conn.execute(
                 "DELETE FROM ai_release_maps WHERE release_id=?", (release_id,))
+            self._conn.execute(
+                "DELETE FROM release_code_maps WHERE release_id=?", (release_id,))
             self._conn.execute("DELETE FROM releases WHERE id=?", (release_id,))
 
     # ------------------------------------------------------------------

@@ -915,10 +915,6 @@ export function CodeMap({
         api.get<ModelsResponse>("/models"),
         api.get<ReleasesResponse>("/releases"),
       ]);
-      if (models.active_model_id == null) {
-        toast("No active model to build a Code Map for.");
-        return;
-      }
       const relId = releases.active_release_id;
       const rel = releases.releases.find((r) => r.id === relId);
       await api.post("/jobs/build_code_map", {
@@ -1056,7 +1052,7 @@ export function CodeMap({
       <>
         <div className="cm-empty">
           <div className="cm-empty-card">
-            <div className="cm-empty-title">No Code Map for this model/release</div>
+            <div className="cm-empty-title">No Code Map for this release</div>
             <p className="cm-empty-sub">
               {relHasSource
                 ? "Source is imported for this release — build the code map to " +

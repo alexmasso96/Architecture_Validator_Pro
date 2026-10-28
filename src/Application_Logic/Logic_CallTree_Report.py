@@ -315,7 +315,7 @@ def _detail_html(entry: dict, chapter: dict, data: dict) -> str:
 
     if not s["found"]:
         snap = ('<p class="muted">The function is not in the current call tree of '
-                "this model and release, so there is nothing to draw.</p>")
+                "this release, so there is nothing to draw.</p>")
     else:
         alias = (f' <span class="muted">(code-map name <code>{_e(s["key"])}</code>)</span>'
                  if s["key"] != entry["function"] else "")

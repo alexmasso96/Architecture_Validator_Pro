@@ -191,7 +191,7 @@ export function Workspace({
     if (activeModelId === null) return;
     const st = testStatus[colName];
     if (st && !st.has_code_map) {
-      toast(`No code map for this model in ${st.release_name} — build it in the Code Map first.`);
+      toast(`No code map for ${st.release_name} — build it in the Code Map first.`);
       return;
     }
     try {

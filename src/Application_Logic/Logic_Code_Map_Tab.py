@@ -143,12 +143,11 @@ def build_code_map_job(db_path, elf_hash, elf_path, source_dir, model_id,
 
         # Commit on the worker's own connection → durable immediately, no project
         # Save required, nothing lost if the user doesn't hit Save afterwards.
+        # One map per release — every architecture model sees the same one.
         progress_cb("Saving code map…")
-        if model_id is not None:
-            wdb.save_model_code_map(model_id, json.dumps(code_map),
-                                    release_id=release_id)
-            wdb.set_meta("code_map_index_state", "done")
-            wdb.commit()
+        wdb.save_release_code_map(json.dumps(code_map), release_id=release_id)
+        wdb.set_meta("code_map_index_state", "done")
+        wdb.commit()
         return code_map
     finally:
         try:

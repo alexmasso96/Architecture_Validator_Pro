@@ -57,14 +57,14 @@ A **Call-tree Test** column checks, for every port, whether the function in a ch
 
 **Adding one.** In **Columns**, click **＋ Test column…**, pick the **Match column** to test (only port/function Match columns are offered: a variable isn't "called") and the **release**, then **Add** and **Apply**. You can add one per release and Match column, so with several Match columns you choose which one each test checks. Tick **verified calls only** to count only calls confirmed by the release's imported `.o` files.
 
-**Running it.** Tests run only when you start them: click **▶** in the column header (shown while the column's release is active). Build the release's Code Map first; a model without one reports *No Data*.
+**Running it.** Tests run only when you start them: click **▶** in the column header (shown while the column's release is active). Build the release's Code Map first (one map serves every model of the release); without one the rows report *No Data*.
 
 | Verdict | Meaning |
 |---|---|
 | **Passed** | Some function calls it. Hover the cell to see the callers; ✓ marks calls confirmed by the `.o` files. |
 | **Entry point** | Nothing calls it, but it calls other functions, so it is treated as started by the OS, scheduler or startup code. |
 | **Failed** | Nothing calls it and it calls nothing, or the function isn't in the release's call tree at all (the tooltip says which). |
-| **No Match** / **No Data** / **No Result** | The Match cell is empty / there is no code map for this model and release / the port is Retired or Deleted. |
+| **No Match** / **No Data** / **No Result** | The Match cell is empty / there is no code map for the release / the port is Retired or Deleted. |
 | **Not Run** | The test hasn't been run yet. |
 
 Calls made from **assembly** (for example a bootloader's start-up code calling a low-level init) are not visible in the C source. Import the release's `.o` files, including the assembled start-up objects, in the Code Map's **Objects** badge and those calls count as real callers.

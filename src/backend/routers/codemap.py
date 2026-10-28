@@ -1,7 +1,7 @@
 """
 Code Map + source router (plan §3.2).
 
-    GET /api/codemap                        → function list + counts for a model/release map
+    GET /api/codemap                        → function list + counts for a release's map
     GET /api/codemap/graph?fn=&back=&fwd=&params=
                                             → depth-limited call-graph nodes + edges
                                               (+ the focus's read/written variables)
@@ -57,11 +57,14 @@ def _resolve_model_id(state: AppState, model_id: Optional[int]) -> int:
 
 
 def _dataset(state: AppState, model_id: Optional[int], release_id: Optional[int]) -> dict:
+    """The release's Code Map. It is the same for every architecture model;
+    ``model_id`` is only validated (older clients still send it)."""
     db = state.require_open()
-    mid = _resolve_model_id(state, model_id)
-    code_map = db.get_model_code_map(mid, release_id=release_id)
+    if model_id is not None:
+        state.model_index_by_id(model_id)
+    code_map = db.get_release_code_map(release_id)
     if not code_map or "functions" not in code_map:
-        raise ProjectError("No Code Map for this model/release — run the build_code_map job.")
+        raise ProjectError("No Code Map for this release — run the build_code_map job.")
     return code_map
 
 

@@ -41,7 +41,9 @@ The object files are an addition to the release, never a replacement for its ELF
 
 ## Building / refreshing it
 
-A Code Map is produced when you build the mind map in [AI Generation](07-ai-test-generation.md) with source imported for the release — it re-indexes the source and rebuilds the map **offline, with no AI tokens**. If no map exists yet for the selected model/release, the view points you to generate one.
+A Code Map is produced when you build the mind map in [AI Generation](07-ai-test-generation.md) with source imported for the release — it re-indexes the source and rebuilds the map **offline, with no AI tokens**. If no map exists yet for the release, the view points you to generate one.
+
+A Code Map belongs to the **release**, not to an architecture model: build it once, and every model of that release shows the same map (and its call-tree Test columns use it). Projects from earlier versions, where a map was stored with the model that was active when it was built, keep working: the most recently built of those maps becomes the release's map.
 
 ## Using the view
 

@@ -167,6 +167,7 @@ _MIGRATION_TARGETS = [
     ("B", "release_source_files", ("release_id", "rel_path"), "content_gzip", True),
     ("C", "ai_release_maps", ("model_id", "release_id"), "mindmap_json", False),
     ("C", "ai_release_maps", ("model_id", "release_id"), "code_map_json", False),
+    ("C", "release_code_maps", ("release_id",), "code_map_json", False),
     ("C", "ai_code_diffs", ("id",), "unified_diff", False),
     ("C", "ai_model_mindmaps", ("model_id",), "mindmap_json", False),
     ("C", "ai_model_mindmaps", ("model_id",), "code_map_json", False),

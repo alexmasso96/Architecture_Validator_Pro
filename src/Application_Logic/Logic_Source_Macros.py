@@ -90,25 +90,21 @@ def release_macros(db, release_id) -> Dict[str, List[str]]:
 
 
 def release_call_targets(db, release_id) -> List[str]:
-    """Every function name in the release's Code Maps (all models): the
-    functions plus everything they call. Raw ``0x…`` addresses are left out."""
+    """Every function name in the release's Code Map: the functions plus
+    everything they call. Raw ``0x…`` addresses are left out."""
     if db is None or release_id is None:
         return []
-    rows = db.execute(
-        "SELECT model_id FROM ai_release_maps WHERE release_id=?"
-        " AND code_map_json IS NOT NULL", (release_id,)).fetchall()
+    cm = db.get_release_code_map(release_id) or {}
     names: Set[str] = set()
-    for (model_id,) in rows:
-        cm = db.get_model_code_map(model_id, release_id=release_id) or {}
-        for fname, fdata in (cm.get("functions") or {}).items():
-            names.add(fname)
-            names.update((fdata or {}).get("calls") or [])
+    for fname, fdata in (cm.get("functions") or {}).items():
+        names.add(fname)
+        names.update((fdata or {}).get("calls") or [])
     return sorted(n for n in names if n and not n.startswith("0x"))
 
 
 def release_match_extras(db, release_id) -> Dict[str, List[str]]:
     """Source-side match candidates of a release: its #define macros plus the
-    names in its Code Maps' call trees."""
+    names in its Code Map's call tree."""
     out = release_macros(db, release_id)
     out["call_targets"] = release_call_targets(db, release_id)
     return out

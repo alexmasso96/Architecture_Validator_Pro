@@ -315,7 +315,7 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
             res = {"verdict": NO_MATCH, "reason": f"'{binding['match_col']}' is empty."}
         elif index is None:
             res = {"verdict": NO_DATA,
-                   "reason": "No code map for this model and release — build it first."}
+                   "reason": "No code map for this release — build it first."}
         elif strict and not index.has_objects:
             res = {"verdict": NO_DATA,
                    "reason": "Strict mode needs the release's .o files imported."}

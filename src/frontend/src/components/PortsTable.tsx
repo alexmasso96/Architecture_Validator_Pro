@@ -480,7 +480,7 @@ export function PortsTable({
                       className="test-run-btn"
                       title={
                         testStatus?.[c.name]?.has_code_map === false
-                          ? "No code map for this model and release — build it first"
+                          ? "No code map for this release — build it first"
                           : `Run call-tree test against ${c.test.release_name}'s code map`
                       }
                       onClick={(e) => {

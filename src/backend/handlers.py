@@ -185,9 +185,9 @@ def _rematch_source_models(state: AppState, release_id, progress, cancel) -> Non
 def _make_build_code_map(state: AppState):
     def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
         db = state.require_open()
+        # The map belongs to the release; model_id is accepted for older
+        # clients but no longer needed.
         model_id = params.get("model_id")
-        if model_id is None:
-            raise ProjectError("model_id is required.")
         code_map = build_code_map_job(
             db.db_path,
             params.get("elf_hash"),
