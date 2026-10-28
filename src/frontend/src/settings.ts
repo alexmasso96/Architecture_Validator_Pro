@@ -50,3 +50,34 @@ export function useSetting<T>(read: () => T): T {
   }, []);
   return value;
 }
+
+
+// Operator details for the call-tree HTML report header (Preferences →
+// Reports): [{label, value}], e.g. Operator / Email / Team. The backend reads
+// the same key from the prefs store when it writes a report.
+export const REPORT_OPERATOR_KEY = "arch.report.operator";
+
+export interface OperatorField {
+  label: string;
+  value: string;
+}
+
+export function getReportOperator(): OperatorField[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(REPORT_OPERATOR_KEY) ?? "[]");
+    return Array.isArray(raw)
+      ? raw
+          .filter((f) => f && typeof f === "object")
+          .map((f) => ({ label: String(f.label ?? ""), value: String(f.value ?? "") }))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setReportOperator(fields: OperatorField[]): void {
+  const blob = JSON.stringify(fields);
+  localStorage.setItem(REPORT_OPERATOR_KEY, blob);
+  persistKey(REPORT_OPERATOR_KEY, blob);
+  emit();
+}

@@ -2,7 +2,7 @@
 Call-tree Test column → one self-contained HTML report (inline CSS/JS/SVG,
 no external assets), for handing a verdict record to a reviewer or auditor.
 
-Layout: a header (project, release, Test column, author, date, totals), then
+Layout: a header (project, release, Test column, operator, date, totals), then
 one chapter per architecture model listing every valid result row of that
 model's table. Clicking an entry opens its detail view inside the same file
 (hash-routed ``#e-<n>`` sections): why the verdict is what it is — the stored
@@ -115,6 +115,32 @@ def call_tree_snapshot(index: Optional[ct.CallIndex], function: str) -> dict:
 # Data
 # ---------------------------------------------------------------------------
 
+# Preferences key (per-user prefs store) holding the operator details shown in
+# the report header: a JSON list of {"label", "value"} — e.g. Operator, Email,
+# Team. Without any, the report names the computer's user account.
+OPERATOR_PREF_KEY = "arch.report.operator"
+MAX_OPERATOR_FIELDS = 12
+MAX_OPERATOR_TEXT = 200
+
+
+def parse_operator_fields(raw: Optional[str]) -> List[Tuple[str, str]]:
+    """[(label, value)] from the stored preference — filled-in fields only,
+    trimmed and length-capped; anything malformed is ignored."""
+    try:
+        items = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        label = str(it.get("label") or "").strip()[:MAX_OPERATOR_TEXT]
+        value = str(it.get("value") or "").strip()[:MAX_OPERATOR_TEXT]
+        if value:
+            out.append((label or "Operator", value))
+    return out[:MAX_OPERATOR_FIELDS]
+
+
 def port_name_column(layout, match_col: str) -> Optional[str]:
     """The search column feeding ``match_col`` (the column just before it)."""
     names = [c[0] for c in layout]
@@ -127,11 +153,15 @@ def port_name_column(layout, match_col: str) -> Optional[str]:
 
 def build_report(*, project: str, release: str, col_name: str, binding: dict,
                  author: str, created_at: str, layout,
+                 operator: Optional[List[Tuple[str, str]]] = None,
                  models: Iterable[Tuple[str, List[dict], Optional[dict]]],
                  object_pairs: Optional[Iterable[Tuple[str, str]]] = None,
                  port_state_col: Optional[str] = None,
                  components: Optional[List[str]] = None) -> dict:
     """The report as plain data. ``models`` = [(model name, rows, code map)].
+
+    ``operator`` = [(label, value)] from Preferences → Reports; without it the
+    header names ``author`` (the computer's user account) as the operator.
 
     Valid result rows are rows with a recorded verdict in ``col_name`` that is
     not "No Result" (retired/deleted port) or "Not Run"."""
@@ -188,6 +218,7 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
         "project": project, "release": release, "col_name": col_name,
         "match_col": binding.get("match_col", ""), "strict": bool(binding.get("strict")),
         "has_objects": pairs is not None, "author": author, "created_at": created_at,
+        "operator": list(operator or []) or [("Operator", author or "—")],
         "components": list(components or []),
         "chapters": chapters, "totals": totals, "entry_count": n,
     }
@@ -430,8 +461,8 @@ def render_html(data: dict) -> str:
     ]
     if data["components"]:
         facts.append(("Symbol files", _e(", ".join(data["components"]))))
-    facts += [("Created by", _e(data["author"]) or "—"),
-              ("Created", _e(data["created_at"]))]
+    facts += [(_e(label), _e(value)) for label, value in data["operator"]]
+    facts.append(("Created", _e(data["created_at"])))
     fact_rows = "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in facts)
 
     toc = " ".join(

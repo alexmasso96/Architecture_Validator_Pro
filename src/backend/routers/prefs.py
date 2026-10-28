@@ -67,6 +67,13 @@ def _write(data: dict[str, str]) -> None:
     os.replace(tmp, path)
 
 
+def read_pref(key: str, default: str | None = None) -> str | None:
+    """One stored preference, for backend features that use a user setting
+    (e.g. the operator details in the call-tree report)."""
+    with _lock:
+        return _read().get(key, default)
+
+
 class PrefPatch(BaseModel):
     key: str
     value: str | None = None  # None deletes the key

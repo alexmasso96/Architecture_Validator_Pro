@@ -220,3 +220,45 @@ def test_report_returned_inline_and_gated_on_active_release(client):
     client.post(f"/api/releases/{other}/activate", headers=AUTH)
     r = client.post("/api/calltree-tests/report", json={"col_name": "T1"}, headers=AUTH)
     assert r.status_code == 409 and "Activate release" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Operator details (Preferences → Reports) instead of the computer user name.
+# ---------------------------------------------------------------------------
+def test_parse_operator_fields():
+    raw = json.dumps([{"label": "Operator", "value": " Jane Doe "},
+                      {"label": "Email", "value": ""},          # empty → dropped
+                      {"label": "", "value": "QA Team"},        # no label → Operator
+                      "junk", {"label": "Site", "value": "x" * 500}])
+    fields = rep.parse_operator_fields(raw)
+    assert fields[:2] == [("Operator", "Jane Doe"), ("Operator", "QA Team")]
+    assert fields[2][0] == "Site" and len(fields[2][1]) == rep.MAX_OPERATOR_TEXT
+    assert rep.parse_operator_fields("not json") == []
+    assert rep.parse_operator_fields(None) == []
+    many = json.dumps([{"label": f"F{i}", "value": "v"} for i in range(30)])
+    assert len(rep.parse_operator_fields(many)) == rep.MAX_OPERATOR_FIELDS
+
+
+def test_operator_fields_replace_created_by():
+    doc = rep.render_html(_report(operator=[("Operator", "Jane <Doe>"),
+                                            ("Email", "jane@example.com")]))
+    assert "<th>Operator</th><td>Jane &lt;Doe&gt;</td>" in doc
+    assert "<th>Email</th><td>jane@example.com</td>" in doc
+    assert "Created by" not in doc and "alice" not in doc
+    # Nothing configured → the computer's user name, labeled Operator.
+    doc = rep.render_html(_report())
+    assert "<th>Operator</th><td>alice</td>" in doc
+
+
+def test_report_uses_operator_preference(client, tmp_path, monkeypatch):
+    from Application_Logic.Logic_File_Locking import FileLockManager
+    monkeypatch.setattr(FileLockManager, "get_username", staticmethod(lambda: "pc-user42"))
+    _setup_and_run(client)
+    assert client.put("/api/prefs", json={
+        "key": rep.OPERATOR_PREF_KEY,
+        "value": json.dumps([{"label": "Operator", "value": "Jane Doe"},
+                             {"label": "Team", "value": "Validation"}])},
+        headers=AUTH).status_code == 200
+    doc = client.post("/api/calltree-tests/report", json={"col_name": "T1"},
+                      headers=AUTH).json()["html"]
+    assert "Jane Doe" in doc and "Validation" in doc and "pc-user42" not in doc

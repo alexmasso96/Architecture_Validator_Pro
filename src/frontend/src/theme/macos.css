@@ -6387,3 +6387,14 @@ button.update-pill:hover {
   flex-wrap: wrap;
   row-gap: 3px;
 }
+
+/* Preferences → Reports: operator detail rows (field name + value). */
+.op-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.op-field .op-label {
+  flex: 0 0 160px;
+}

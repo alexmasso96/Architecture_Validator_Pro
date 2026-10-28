@@ -850,9 +850,11 @@ def calltree_test_report(body: CallTreeReportBody,
         files = db.get_release_symbol_files(rid)
         now = _dt.datetime.now().astimezone()
         project = os.path.splitext(os.path.basename(state.project_path or ""))[0]
+        from .prefs import read_pref
         data = rep.build_report(
             project=project, release=rel.name, col_name=body.col_name,
             binding=binding, author=FileLockManager.get_username(),
+            operator=rep.parse_operator_fields(read_pref(rep.OPERATOR_PREF_KEY)),
             created_at=now.strftime("%Y-%m-%d %H:%M %Z").strip(),
             layout=layout, models=models, object_pairs=object_pairs,
             port_state_col=port_state_col,
