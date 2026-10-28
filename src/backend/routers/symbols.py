@@ -8,6 +8,8 @@ union of all its component symbol files (FBL, APP, …) — or an explicit
 ``elf_hash``. Each candidate is ``{"name", "score"}`` — the same ``Name (NN%)``
 data the Qt match dropdown showed, minus the widget — plus, when the release
 has several component files, ``components`` (which files define the name).
+``macro`` marks a name that exists only as a #define in the release's stored
+source (preprocessor-expanded, so no ELF symbol and no address).
 """
 from __future__ import annotations
 
@@ -32,15 +34,17 @@ def symbols(q: str = Query(..., min_length=1),
     try:
         db = state.require_open()
         hashes = [elf_hash] if elf_hash else state.active_elf_hashes()
-        if not hashes:
+        active = (state.release_manager.get_active_release()
+                  if state.release_manager is not None else None)
+        rid = active.id if (active is not None and not elf_hash) else None
+        has_source = rid is not None and db.has_release_source(rid)
+        if not hashes and not has_source:
             # No ELF imported for the active release — empty candidate list, not an error.
             return {"query": q, "kind": kind, "elf_hash": None, "candidates": []}
-        matcher = state.get_symbol_matcher(hashes)
-        files = []
-        if not elf_hash and state.release_manager is not None:
-            active = state.release_manager.get_active_release()
-            if active is not None and active.id is not None:
-                files = db.get_release_symbol_files(active.id)
+        # The active release's source #define macros join the pool (generated
+        # accessors never reach the ELF but are what ports often name).
+        matcher = state.get_symbol_matcher(hashes, release_id=rid if has_source else None)
+        files = db.get_release_symbol_files(rid) if rid is not None else []
     except ProjectError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
@@ -59,14 +63,15 @@ def symbols(q: str = Query(..., min_length=1),
              if len(files) > 1 else {})
     candidates = []
     for n, s in pairs:
-        cand = {"name": n, "score": s, "inlined": n in inlined}
+        cand = {"name": n, "score": s, "inlined": n in inlined,
+                "macro": n in matcher.macro_names}
         if n in comps:
             cand["components"] = comps[n]
         candidates.append(cand)
     return {
         "query": q,
         "kind": kind,
-        "elf_hash": hashes[0],
+        "elf_hash": hashes[0] if hashes else None,
         "elf_hashes": hashes,
         "candidates": candidates,
     }

@@ -57,7 +57,7 @@ class AppState:
         self.master_password_hash: Optional[str] = None
         self.lock_info: dict = {}
         self.lock_lost: bool = False
-        self._matchers: dict = {}   # elf_hash | (hash, …) -> SymbolMatcher (name-list cache)
+        self._matchers: dict = {}   # ((hash, …), release_id) -> SymbolMatcher (name-list cache)
         self._hb_thread: Optional[threading.Thread] = None
         self._hb_stop: Optional[threading.Event] = None
 
@@ -163,24 +163,33 @@ class AppState:
             hashes = [active.elf_hash]
         return hashes
 
-    def get_symbol_matcher(self, elf_hash):
+    def get_symbol_matcher(self, elf_hash, release_id: Optional[int] = None):
         """A name-list-only SymbolMatcher for one ELF hash — or a list of them
         (a release's component files, matched as one pool) — cached per session.
+        With ``release_id``, the #define macros of that release's stored source
+        join the pool too (they never reach the ELF).
 
         The DB-backed matcher loads only symbol *name* strings (not full objects)
         and never touches the parser, so we build it with ``parser=None``.
+        Call ``invalidate_matchers()`` when a release's symbols or source change.
         """
         from Application_Logic.Logic_Database import elf_hash_list
+        from Application_Logic.Logic_Source_Macros import release_macros
         from Application_Logic.Logic_Symbol_Matcher import SymbolMatcher
         db = self.require_open()
         hashes = elf_hash_list(elf_hash)
         for h in hashes:
             if not db.has_elf(h):
                 raise ProjectError(f"No ELF in project for hash {h}.")
-        key = hashes[0] if len(hashes) == 1 else tuple(hashes)
+        key = (tuple(hashes), release_id)
         if key not in self._matchers:
-            self._matchers[key] = SymbolMatcher(None, db=db, elf_hash=hashes)
+            macros = release_macros(db, release_id) if release_id is not None else None
+            self._matchers[key] = SymbolMatcher(None, db=db, elf_hash=hashes,
+                                                macros=macros)
         return self._matchers[key]
+
+    def invalidate_matchers(self) -> None:
+        self._matchers.clear()
 
     # ------------------------------------------------------------------
     # Lifecycle

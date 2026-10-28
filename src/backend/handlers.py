@@ -175,6 +175,7 @@ def _make_build_code_map(state: AppState):
         # The build may have imported source into the DB (an explicitly chosen
         # folder) — tell clients so the ✓ Source badge / Code Map source status
         # refresh without a manual reload.
+        state.invalidate_matchers()   # the build may have imported source
         state.bus.publish("db-changed",
                           {"reason": "code-map-built",
                            "release_id": params.get("release_id")})
@@ -194,13 +195,18 @@ def _make_fuzzy_rematch(state: AppState):
         state.require_edit()
         # The active release's symbol files — all components, one match pool.
         hashes = [params["elf_hash"]] if params.get("elf_hash") else state.active_elf_hashes()
-        if not hashes:
+        main_db = state.require_open()
+        active_rid = main_db.get_active_release_id()
+        if not hashes and not (active_rid is not None
+                               and main_db.has_release_source(active_rid)):
             raise ProjectError("No ELF imported for the active release.")
         with _worker_db(state) as wdb:
             for h in hashes:
                 if not wdb.has_elf(h):
                     raise ProjectError(f"No ELF in project for hash {h}.")
-            matcher = SymbolMatcher(None, db=wdb, elf_hash=hashes)
+            from Application_Logic.Logic_Source_Macros import release_macros
+            matcher = SymbolMatcher(None, db=wdb, elf_hash=hashes,
+                                    macros=release_macros(wdb, active_rid))
             specs = search_specs_from_layout(wdb.load_column_layout())
             model_ids = _resolve_model_ids(state, params, wdb)
             total = 0
@@ -380,7 +386,7 @@ def _import_symbol_file(state: AppState, params: dict, progress: Callable[..., N
     # endpoint's active_elf_hash() sees it without a reopen.
     if state.release_manager is not None:
         state.release_manager.refresh_elf_mirror(release_id)
-    state._matchers.clear()
+    state.invalidate_matchers()
     state.bus.publish("db-changed", {"reason": "symbol-files-changed",
                                      "release_id": release_id})
     return {"kind": kind, "elf_hash": elf_hash, "functions": fn_count,
@@ -432,6 +438,13 @@ def _make_import_source(state: AppState):
                     f"Importing {rel_path}"),
             )
             wdb.commit()
+            # The source's #define macros are match candidates: list them now
+            # (cached in the project) so the first symbol search stays fast.
+            progress("Indexing #define macros…")
+            from Application_Logic.Logic_Source_Macros import release_macros
+            release_macros(wdb, release_id)
+            wdb.commit()
+        state.invalidate_matchers()
 
         # Tell every client the source set changed so the Release Manager's
         # ✓ Source badge + the workspace refresh without a manual reload.

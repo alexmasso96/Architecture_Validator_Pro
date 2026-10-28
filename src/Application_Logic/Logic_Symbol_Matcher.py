@@ -24,10 +24,13 @@ class SymbolMatcher:
     Loads only symbol *names* into RAM — avoids the 7 GB spike from full objects.
     """
 
-    def __init__(self, parser: ELFParser, db=None, elf_hash=None) -> None:
+    def __init__(self, parser: ELFParser, db=None, elf_hash=None,
+                 macros: Optional[Dict[str, List[str]]] = None) -> None:
         self.parser: ELFParser = parser
+        # Names that exist only as source #define macros (no ELF symbol).
+        self.macro_names: set = set()
 
-        if db is not None and elf_hash:
+        if db is not None and (elf_hash or macros):
             # DB-backed path — load only name strings, not full objects. A list
             # of hashes (a release's component symbol files) is one union pool;
             # a name defined in several components is offered once.
@@ -40,6 +43,17 @@ class SymbolMatcher:
                 db.get_inlined_only_function_names(elf_hash))
             self.all_function_names = (
                 self.all_function_names + sorted(self.inlined_names))
+            # Macros from the release's source (Logic_Source_Macros): generated
+            # accessors like `#define cfgGet…_u16()` never reach the ELF but are
+            # real call targets. Function-like → function pool, object-like →
+            # variable pool; an ELF symbol of the same name takes precedence.
+            if macros:
+                known = set(self.all_function_names) | set(self.all_variable_names)
+                fmac = [m for m in macros.get("functions", []) if m not in known]
+                omac = [m for m in macros.get("objects", []) if m not in known]
+                self.all_function_names = self.all_function_names + fmac
+                self.all_variable_names = self.all_variable_names + omac
+                self.macro_names = set(fmac) | set(omac)
         else:
             # Legacy in-memory path
             self.all_function_names = [f.name for f in parser.functions]

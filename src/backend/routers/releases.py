@@ -527,6 +527,7 @@ def drop_release_source(release_id: int, state: AppState = Depends(get_state),
         db = state.require_edit()
         db.delete_release_source(release_id)
         db.commit()
+        state.invalidate_matchers()   # its #define macros leave the match pool
         bus.publish("db-changed",
                     {"reason": "source-dropped", "release_id": release_id})
         return {"release_id": release_id, "result": "source dropped"}
@@ -658,7 +659,7 @@ def remove_symbol_file(release_id: int, component: str,
                            f"{os.path.basename(removed['elf_path'] or '')}")
         db.commit()
         rm.refresh_elf_mirror(release_id)
-        state._matchers.clear()
+        state.invalidate_matchers()
         bus.publish("db-changed", {"reason": "symbol-files-changed",
                                    "release_id": release_id})
         return _symbol_files_payload(db, release_id)

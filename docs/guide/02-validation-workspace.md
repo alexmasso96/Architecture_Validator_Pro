@@ -22,6 +22,8 @@ The **Workspace** is the architecture-validation matrix and where most of the wo
 
 When a release's ELF is loaded, search-type columns match each port against the real function and variable names pulled from the binary, using fuzzy string matching with a **configurable confidence threshold**. Each match shows the resolved symbol and a confidence score, colour-coded so a strong match reads green and a weak or missing one reads amber/red. You stay in control: accept the proposed match, pick a different candidate from the match picker, or override it by hand. Click **Re-match Symbols** after importing a new build to re-link every port; cells you've touched by hand aren't silently overwritten.
 
+**Macros count too.** Generated configuration code often provides its accessors as `#define` macros, for example `#define cfgGetRLMaxValueForHigh_u16() (…)`. The preprocessor replaces them before compiling, so they are never in the ELF, but they are real call targets and the Code Map shows them. Once the release's source is imported, its macros are offered as candidates as well: function-like macros alongside functions, other macros alongside variables. The match picker tags them **macro**. When an ELF symbol has the same name, the ELF symbol is used.
+
 ## Column types
 
 The matrix is fully customizable, and each column has a *type* that defines how it behaves:

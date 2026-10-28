@@ -7,6 +7,8 @@ interface Candidate {
   score: number;
   /** #6D: exists only as an inline expansion — no symbol, no address. */
   inlined?: boolean;
+  /** Exists only as a #define in the release's source — no symbol, no address. */
+  macro?: boolean;
   /** Release with several symbol files: the components defining the name. */
   components?: string[];
 }
@@ -105,7 +107,7 @@ export function MatchPicker({
         );
         if (cancelled) return;
         setCandidates(r.candidates);
-        setNoElf(r.elf_hash === null);
+        setNoElf(r.elf_hash === null && r.candidates.length === 0);
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       } finally {
@@ -171,6 +173,14 @@ export function MatchPicker({
               >
                 {c.name}
                 {c.inlined && <span className="mm-tag"> inlined</span>}
+                {c.macro && (
+                  <span
+                    className="mm-tag"
+                    title="A #define macro in the release's source — the preprocessor expands it, so it has no ELF symbol or address"
+                  >
+                    macro
+                  </span>
+                )}
                 {c.components && c.components.length > 0 && (
                   <span
                     className="mm-tag comp"
