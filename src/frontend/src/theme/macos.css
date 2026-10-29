@@ -6426,3 +6426,92 @@ button.update-pill:hover {
   font-size: 12px;
   color: #8e8e93;
 }
+
+/* Call-tree test: main-function pop-up. */
+.mainfn {
+  width: 600px;
+}
+.mainfn code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+.mainfn-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 10px;
+  min-height: 26px;
+  align-items: center;
+}
+.mainfn-empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+.mainfn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.mainfn-chip.bad {
+  border-color: #d93025;
+  background: color-mix(in srgb, #d93025 12%, transparent);
+}
+.mainfn-chip button {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 4px;
+}
+.mainfn-search {
+  flex-direction: column;
+  margin-top: 0;
+}
+.mainfn-hits {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  max-height: 180px;
+  overflow: auto;
+}
+.mainfn-hits li {
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.mainfn-hits li:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.mainfn-sub {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.mainfn-cov {
+  color: var(--muted);
+  font-size: 12px;
+}
+.mainfn .mm-foot button:not(.primary) {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 16px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.mainfn .mm-foot button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

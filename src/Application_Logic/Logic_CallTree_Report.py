@@ -5,7 +5,9 @@ no external assets), for handing a verdict record to a reviewer or auditor.
 Layout: a header (optional logo, project, release, Test column, operator,
 date), an overall results table with the score, a per-model score table, then
 one chapter per architecture model listing every valid result row of that
-model's table. Clicking an entry opens its detail view inside the same file
+model's table, followed by the model's call tree from its main function(s)
+down to its ports (only the paths that reach a port) and the ports not
+reached. Clicking an entry opens its detail view inside the same file
 (hash-routed ``#e-<n>`` sections): why the verdict is what it is — the stored
 reason and caller evidence, any manual override — and a snapshot of the call
 tree around the function (the call path from an entry point as an SVG chain,
@@ -222,7 +224,8 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
                  object_pairs: Optional[Iterable[Tuple[str, str]]] = None,
                  port_state_col: Optional[str] = None,
                  components: Optional[List[str]] = None) -> dict:
-    """The report as plain data. ``models`` = [(model name, rows, code map)].
+    """The report as plain data. ``models`` = [(model name, rows, code map
+    [, main functions])].
 
     ``operator`` = [(label, value)] from Preferences → Reports; without it the
     header names ``author`` (the computer's user account) as the operator.
@@ -235,7 +238,9 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
     totals: Dict[str, int] = {}
     chapters = []
     n = 0
-    for model_name, rows, code_map in models:
+    for model in models:
+        model_name, rows, code_map = model[:3]
+        mains = ct.clean_mains(model[3]) if len(model) > 3 and model[3] else []
         index = ct.CallIndex(code_map, pairs) if code_map else None
         built_at = (code_map or {}).get("built_at", "")
         entries, counts = [], {}
@@ -251,6 +256,8 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
                 ct.cell_text(row.get(binding.get("match_col"))))
             stale = bool(built_at and cell.get("code_map_built_at")
                          and cell["code_map_built_at"] != built_at)
+            cell_mains = list(cell.get("mains") or [])
+            mains_changed = bool(cell_mains and mains and cell_mains != mains)
             entries.append({
                 "id": f"e-{n}",
                 "row": row_no,
@@ -270,6 +277,9 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
                 "code_map_built_at": cell.get("code_map_built_at") or "",
                 "strict": bool(cell.get("strict")),
                 "stale": stale,
+                "mains_changed": mains_changed,
+                "main_path": [str(x) for x in cell.get("main_path") or []],
+                "mains": cell_mains,
                 "component": (((code_map or {}).get("functions") or {})
                               .get(function) or {}).get("component", ""),
                 "snapshot": call_tree_snapshot(index, function),
@@ -277,7 +287,9 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
             counts[verdict] = counts.get(verdict, 0) + 1
             totals[verdict] = totals.get(verdict, 0) + 1
         chapters.append({"model": model_name, "entries": entries, "counts": counts,
-                         "score": score(counts), "skipped": skipped, "has_code_map": bool(code_map),
+                         "score": score(counts), "skipped": skipped, "mains": mains,
+                         "tree": main_tree(entries, index),
+                         "unreached": [e["id"] for e in entries if not e["main_path"]], "has_code_map": bool(code_map),
                          "code_map_built_at": built_at})
     return {
         "project": project, "release": release, "col_name": col_name,
@@ -289,6 +301,32 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
         "chapters": chapters, "totals": totals, "score": score(totals),
         "entry_count": n,
     }
+
+
+def main_tree(entries: List[dict], index: Optional[ct.CallIndex]) -> List[dict]:
+    """The model's call tree from its main function(s), keeping only the
+    recorded main → … → port paths (merged where they share a prefix):
+    [{name, verified, ports: [entry ids], children: [...]}] per main."""
+    roots: Dict[str, dict] = {}
+    for e in entries:
+        path = e["main_path"]
+        if not path:
+            continue
+        level, parent = roots, None
+        for name in path:
+            node = level.get(name)
+            if node is None:
+                node = level[name] = {
+                    "name": name, "ports": [], "kids": {},
+                    "verified": bool(index and parent and (parent, name) in index.verified)}
+            level, parent = node["kids"], name
+        node["ports"].append(e["id"])
+
+    def done(nodes: Dict[str, dict]) -> List[dict]:
+        return [{"name": n["name"], "verified": n["verified"], "ports": n["ports"],
+                 "children": done(n["kids"])}
+                for n in sorted(nodes.values(), key=lambda n: n["name"].lower())]
+    return done(roots)
 
 
 def report_filename(project: str, release: str, col_name: str, date: str) -> str:
@@ -353,32 +391,95 @@ def _overall_html(data: dict) -> str:
              f'<th class="num">{"100.0 %" if sc["total"] else "—"}</th></tr></tfoot></table>')
     tile = (f'<div class="tile"><div class="tile-k">Overall score</div>'
             f'<div class="tile-v">{_pct(sc["score"])}</div>{_score_cell(sc["score"])}'
-            f'<div class="muted small">{sc["passing"]} of {sc["total"]} passed '
-            f'(Passed + Entry point)</div></div>')
+            f'<div class="muted small">{sc["passing"]} of {sc["total"]} passed'
+            f'{" (Passed + Entry point)" if sc["entry"] else ""}</div></div>')
     return f'<div class="overall-wrap">{tile}{table}</div>'
 
 
 def _models_html(data: dict) -> str:
     """Per-model table: counts and score, each model linking to its chapter."""
+    t = data["score"]
+    entry = bool(t["entry"])    # never with main functions set: hide the column
+
+    def ent(n, tag="td"):
+        return f'<{tag} class="num">{n}</{tag}>' if entry else ""
     rows = []
     for c in data["chapters"]:
         s = c["score"]
+        mains = ("<br>".join(f"<code>{_e(m)}()</code>" for m in c["mains"])
+                 or '<span class="muted">—</span>')
         rows.append(
             f'<tr><td><a href="#{_e(_chapter_id(c))}">{_e(c["model"])}</a></td>'
+            f'<td>{mains}</td>'
             f'<td class="num">{s["total"]}</td><td class="num">{s["passed"]}</td>'
-            f'<td class="num">{s["entry"]}</td><td class="num">{s["failed"]}</td>'
+            f'{ent(s["entry"])}<td class="num">{s["failed"]}</td>'
             f'<td class="num">{s["other"]}</td><td>{_score_cell(s["score"])}</td></tr>')
-    t = data["score"]
-    foot = (f'<tr><th>All models</th><th class="num">{t["total"]}</th>'
-            f'<th class="num">{t["passed"]}</th><th class="num">{t["entry"]}</th>'
+    foot = (f'<tr><th>All models</th><th></th><th class="num">{t["total"]}</th>'
+            f'<th class="num">{t["passed"]}</th>{ent(t["entry"], "th")}'
             f'<th class="num">{t["failed"]}</th><th class="num">{t["other"]}</th>'
             f'<th>{_score_cell(t["score"])}</th></tr>')
     return (f'<div class="scroll"><table class="grid models"><thead><tr><th>Model</th>'
+            f'<th>Main function</th>'
             f'<th class="num">Results</th><th class="num">Passed</th>'
-            f'<th class="num">Entry point</th><th class="num">Failed</th>'
+            f'{'<th class="num">Entry point</th>' if entry else ""}<th class="num">Failed</th>'
             f'<th class="num" title="No Match / No Data">Other</th><th>Score</th>'
             f'</tr></thead><tbody>{"".join(rows)}</tbody><tfoot>{foot}</tfoot>'
             f'</table></div>')
+
+
+def _count_ports(node: dict) -> int:
+    return len(node["ports"]) + sum(_count_ports(c) for c in node["children"])
+
+
+def _main_tree_html(chapter: dict) -> str:
+    """The chapter's call tree from its main function(s) — an Eclipse-style
+    call hierarchy, collapsible, with each port's verdict on its function."""
+    by_id = {e["id"]: e for e in chapter["entries"]}
+    mains = chapter["mains"]
+
+    def node_html(nd: dict, depth: int) -> str:
+        tags = []
+        if depth == 0:
+            tags.append('<span class="tag main">main</span>')
+        if nd["verified"]:
+            tags.append('<span class="ok" title="Call confirmed by object files">✓</span>')
+        ports = "".join(
+            f'<a class="port" href="#{e["id"]}">{_badge(e["verdict"])}'
+            f'{_e(e["port"] or "Row " + str(e["row"]))}</a>'
+            for e in (by_id[i] for i in nd["ports"]))
+        label = (f'<span class="fn{" is-port" if nd["ports"] else ""}">'
+                 f'<code>{_e(nd["name"])}()</code>{"".join(tags)}{ports}</span>')
+        if not nd["children"]:
+            return f'<li class="leaf">{label}</li>'
+        n = _count_ports(nd) - len(nd["ports"])
+        hint = f'<span class="muted small"> {n} port{"" if n == 1 else "s"} below</span>'
+        kids = "".join(node_html(c, depth + 1) for c in nd["children"])
+        return (f'<li><details open><summary>{label}{hint}</summary>'
+                f'<ul>{kids}</ul></details></li>')
+
+    title = ", ".join(f"{m}()" for m in mains) or "the main function"
+    if not mains:
+        body = ('<p class="muted">No main function was set for this model when the test '
+                'ran, so there is no call tree to draw.</p>')
+    elif not chapter["tree"]:
+        body = '<p class="muted">No port of this model is reached from the main function.</p>'
+    else:
+        body = (f'<ul class="ctree">{"".join(node_html(n, 0) for n in chapter["tree"])}</ul>')
+
+    unreached = [by_id[i] for i in chapter["unreached"]] if mains else []
+    if unreached:
+        rows = "".join(
+            f'<tr class="entry" data-e="{e["id"]}"><td><a href="#{e["id"]}">'
+            f'{_e(e["port"]) or "—"}</a></td><td><code>{_e(e["function"]) or "—"}</code></td>'
+            f'<td>{_badge(e["verdict"])}</td><td class="muted">{_e(e["reason"])}</td></tr>'
+            for e in unreached)
+        body += (f'<h4>Not reached from {_e(title)} ({len(unreached)})</h4>'
+                 f'<div class="scroll"><table class="grid results"><thead><tr><th>Port</th>'
+                 f'<th>Function</th><th>Verdict</th><th>Reason</th></tr></thead>'
+                 f'<tbody>{rows}</tbody></table></div>')
+    return (f'<div class="calltree"><h3>Call tree from {_e(title)}</h3>'
+            f'<p class="muted small">Only the calls that lead from the main function to '
+            f'a port of this model; click a port to open its result.</p>{body}</div>')
 
 
 def _tree_html(nodes: List[dict], target: str, arrow: str) -> str:
@@ -437,6 +538,9 @@ def _detail_html(entry: dict, chapter: dict, data: dict) -> str:
         ("Matched function", f'<code>{_e(entry["function"]) or "—"}</code>'),
         ("Verdict", _badge(entry["verdict"])),
     ]
+    if entry["mains"]:
+        rows.append(("Main function", ", ".join(f"<code>{_e(m)}()</code>"
+                                                for m in entry["mains"])))
     if entry["component"]:
         rows.append(("Component", _e(entry["component"])))
     if entry["port_state"]:
@@ -456,6 +560,10 @@ def _detail_html(entry: dict, chapter: dict, data: dict) -> str:
             f'{_badge(entry["verdict"])} by {who}{when}. The tool verdict was '
             f'{_badge(entry["auto"] or ct.NOT_RUN)} — the reason above is the '
             f"tool's.</div>")
+    if entry["mains_changed"]:
+        why.append('<div class="note warn"><b>Main function changed.</b> This verdict '
+                   'was recorded against other main function(s) than the model has now. '
+                   'Re-run the Test column to refresh it.</div>')
     if entry["stale"]:
         why.append('<div class="note warn"><b>Stale.</b> This verdict was recorded '
                    'against an older code-map build; the snapshot below is from the '
@@ -473,8 +581,17 @@ def _detail_html(entry: dict, chapter: dict, data: dict) -> str:
         why.append(f'<p class="muted">No callers recorded · calls '
                    f'{entry["callees_total"]} function(s).</p>')
 
+    # The recorded main → … → function chain replaces the root chain.
+    main_snap = ""
+    if entry["main_path"]:
+        p = entry["main_path"]
+        note = ("It is a main function of this model." if len(p) == 1 else
+                f"{len(p) - 1} call(s) from the main function {p[0]}() — recorded when "
+                "the test ran.")
+        main_snap = (f"<h4>Path from the main function</h4><p class=\"muted\">{_e(note)}</p>"
+                     f"{_path_svg(p, [False] * (len(p) - 1))}")
     if not s["found"]:
-        snap = ('<p class="muted">The function is not in the current call tree of '
+        snap = main_snap + ('<p class="muted">The function is not in the current call tree of '
                 "this release, so there is nothing to draw.</p>")
     else:
         alias = (f' <span class="muted">(code-map name <code>{_e(s["key"])}</code>)</span>'
@@ -483,8 +600,10 @@ def _detail_html(entry: dict, chapter: dict, data: dict) -> str:
                      if len(s["path"]) == 1 else
                      f"Shortest chain from a root (a function nothing calls) — "
                      f"{len(s['path']) - 1} call(s); green edges are object-verified.")
-        snap = (f"<h4>Call path{alias}</h4><p class=\"muted\">{path_note}</p>"
-                f"{_path_svg(s['path'], s['path_verified'])}"
+        root_path = ("" if main_snap else
+                     f"<h4>Call path{alias}</h4><p class=\"muted\">{path_note}</p>"
+                     f"{_path_svg(s['path'], s['path_verified'])}")
+        snap = (f"{main_snap}{root_path}"
                 f'<div class="trees"><div><h4>Called by ({s["callers_total"]}) — '
                 f'{CALLER_DEPTH} levels</h4>{_tree_html(s["callers"], s["key"], "callers")}</div>'
                 f'<div><h4>Calls ({s["callees_total"]}) — {CALLEE_DEPTH} levels</h4>'
@@ -558,7 +677,7 @@ overflow:hidden}.tile .bar{width:100%}
 td code{word-break:break-all}
 table.facts{width:auto}table.facts th{padding-right:24px}
 tr.entry{cursor:pointer}tr.entry:hover{background:var(--card)}
-.v{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;
+.v{display:inline-block;white-space:nowrap;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;
 margin-right:4px}.v-pass{color:var(--pass);background:var(--pass-bg)}
 .v-fail{color:var(--fail);background:var(--fail-bg)}
 .v-entry{color:var(--entry);background:var(--entry-bg)}
@@ -582,6 +701,20 @@ svg.path text{fill:var(--fg);font:12px ui-monospace,SFMono-Regular,Menlo,monospa
 svg.path .edge{stroke:var(--muted);stroke-width:1.5;fill:var(--muted)}
 svg.path .edge.ver{stroke:var(--pass);fill:var(--pass)}svg.path .head{stroke:none}
 .chapter{margin-top:30px}
+.calltree{margin-top:18px}
+.ctree,.ctree ul{list-style:none;margin:0;padding-left:20px}
+.ctree{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.ctree ul{border-left:1px dotted var(--line);margin-left:7px}
+.ctree li{padding:2px 0}.ctree summary{cursor:pointer}
+.ctree li.leaf{padding-left:14px}
+.ctree .fn code{font-size:13px}.ctree .fn.is-port code{font-weight:700}
+.ctree .fn::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;
+background:var(--pass);margin-right:6px;vertical-align:1px;opacity:.55}
+.ctree .fn.is-port::before{opacity:1}
+.ctree .port{margin-left:10px;font-size:12.5px;white-space:nowrap}
+.ctree .port .v{margin-right:4px}
+.tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;font-size:11px;
+font-weight:600}.tag.main{background:var(--accent);color:#fff}
 .filter{margin:10px 0}.filter input{padding:5px 8px;border:1px solid var(--line);
 border-radius:6px;background:var(--bg);color:var(--fg);width:260px}
 .js .detail{display:none}.js.routed .overview{display:none}
@@ -650,7 +783,8 @@ def render_html(data: dict) -> str:
               if c["score"]["total"] else "")
         chapters.append(
             f'<section class="chapter" id="{_chapter_id(c)}"><h2>{_e(c["model"])}</h2>'
-            f'<p>{_counts_line(c["counts"])}{sc}{extra}{nocm}</p>{table}</section>')
+            f'<p>{_counts_line(c["counts"])}{sc}{extra}{nocm}</p>{table}'
+            f'{_main_tree_html(c) if c["entries"] else ""}</section>')
 
     title = f'Call-tree test report — {data["release"]} — {data["col_name"]}'
     logo = (f'<img class="logo" src="{_e(data["logo"])}" alt="Logo">'

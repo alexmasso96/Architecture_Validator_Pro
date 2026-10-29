@@ -66,6 +66,19 @@ export interface TestColumnStatus extends TestColumnMeta {
   has_objects: boolean;
 }
 
+// GET /models/{id}/main-functions?col_name= — a model's main function(s)
+// checked against a Test column's release call tree.
+export interface MainFunctionsInfo {
+  model_id: number;
+  functions: string[];
+  found: string[];
+  missing: string[];
+  has_code_map: boolean;
+  needs_input: boolean;
+  release_name: string;
+  suggestions: { name: string; covers: number; total: number }[];
+}
+
 export interface ColumnsResponse {
   columns: ColumnSpec[];
   result_columns?: ResultColumnMeta[];

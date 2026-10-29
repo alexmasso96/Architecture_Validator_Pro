@@ -289,6 +289,8 @@ def _setup(client):
     ])
     db.save_model_code_map(mid, _json.dumps(CODE_MAP), release_id=rid)
     db.commit()
+    assert client.put(f"/api/models/{mid}/main-functions", json={"functions": ["main"]},
+                      headers=AUTH).status_code == 200
     return rid, mid
 
 
@@ -315,13 +317,13 @@ def test_create_run_and_report(client):
                       json={"col_name": "T1", "model_ids": [mid]}, headers=AUTH).json()
     body = _wait(client, job["job_id"])
     assert body["status"] == "done", body
-    assert body["result"]["models"][0]["counts"] == {"Passed": 1, "Entry point": 1,
-                                                     "Failed": 1}
+    assert body["result"]["models"][0]["counts"] == {"Passed": 1, "Failed": 2}
 
     rows = client.get(f"/api/models/{mid}/ports", headers=AUTH).json()["rows"]
     cells = [r["cells"]["T1"] for r in rows]
-    assert [c["text"] for c in cells] == ["Passed", "Entry point", "Failed"]
+    assert [c["text"] for c in cells] == ["Passed", "Failed", "Failed"]
     assert cells[0]["callers"] == [{"name": "main", "verified": False}]
+    assert cells[0]["main_path"] == ["main", "app_run"] and cells[0]["mains"] == ["main"]
     assert cells[0]["code_map_built_at"] == CODE_MAP["built_at"]
 
     status = client.get(f"/api/models/{mid}/calltree-tests", headers=AUTH).json()
@@ -424,3 +426,118 @@ def test_run_and_override_refused_when_release_inactive_or_baselined(client):
     r = client.patch(f"/api/models/{mid}/ports/0", json={"updates": {"T1": "Failed"}},
                      headers=AUTH)
     assert r.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Main function(s): a port passes when one of them reaches its function
+# through any number of calls.
+# ---------------------------------------------------------------------------
+DEEP = {"functions": {
+    "OsTask": {"calls": ["modAppl", "otherAppl"]},
+    "modAppl": {"calls": ["f1"]},
+    "f1": {"calls": ["f2"]},
+    "f2": {"calls": ["tested"], },
+    "tested": {"calls": []},
+    "otherAppl": {"calls": ["foreign"]},
+    "foreign": {"calls": []},
+    "lonely": {"calls": []},
+}}
+
+
+def _rows_for(*funcs):
+    return [{"F": {"text": f}, "F (Match)": {"widget_text": f"{f} (90%)"} if f else {}}
+            for f in funcs]
+
+
+def test_reach_passes_several_layers_deep_and_records_path():
+    index = ct.CallIndex(DEEP)
+    reach = ct.Reach(index, ["modAppl"])
+    r = ct.evaluate_from_mains("tested", index, reach)
+    assert r["verdict"] == ct.PASSED
+    assert r["main_path"] == ["modAppl", "f1", "f2", "tested"]
+    assert "in 3 calls" in r["reason"]
+    assert ct.evaluate_from_mains("modAppl", index, reach)["reason"].startswith("It is a main")
+
+
+def test_called_outside_the_main_tree_fails_and_names_callers():
+    index = ct.CallIndex(DEEP)
+    reach = ct.Reach(index, ["modAppl"])
+    r = ct.evaluate_from_mains("foreign", index, reach)
+    assert r["verdict"] == ct.FAILED and "called only by otherAppl" in r["reason"]
+    r = ct.evaluate_from_mains("lonely", index, reach)
+    assert r["verdict"] == ct.FAILED and "no function calls it" in r["reason"]
+    assert ct.evaluate_from_mains("ghost", index, reach)["verdict"] == ct.FAILED
+    # Several main functions: any of them may reach it.
+    assert ct.evaluate_from_mains("foreign", index,
+                                  ct.Reach(index, ["modAppl", "otherAppl"]))["verdict"] == ct.PASSED
+
+
+def test_strict_reach_uses_verified_edges_only():
+    cm = {"functions": {"m": {"calls": ["a", "b"], "verified_calls": ["a"]},
+                        "a": {"calls": []}, "b": {"calls": []}}}
+    index = ct.CallIndex(cm, set())
+    reach = ct.Reach(index, ["m"], strict=True)
+    assert ct.evaluate_from_mains("a", index, reach, strict=True)["verdict"] == ct.PASSED
+    assert ct.evaluate_from_mains("b", index, reach, strict=True)["verdict"] == ct.FAILED
+
+
+def test_run_on_rows_with_mains():
+    b = {"release_id": 1, "match_col": "F (Match)", "strict": False}
+    rows = _rows_for("tested", "foreign", "")
+    counts = ct.run_on_rows(rows, "T", b, DEEP, None, port_state_col=None,
+                            tested_at="t", mains=["modAppl"])
+    assert counts == {ct.PASSED: 1, ct.FAILED: 1, ct.NO_MATCH: 1}
+    assert rows[0]["T"]["main_path"][0] == "modAppl" and rows[0]["T"]["mains"] == ["modAppl"]
+    assert rows[1]["T"]["main_path"] == []
+    # None of the main functions in this release's call tree → No Data.
+    rows = _rows_for("tested")
+    ct.run_on_rows(rows, "T", b, DEEP, None, port_state_col=None, tested_at="t",
+                   mains=["renamedAppl"])
+    assert rows[0]["T"]["text"] == ct.NO_DATA and "renamedAppl" in rows[0]["T"]["reason"]
+
+
+def test_suggest_mains_prefers_the_closest_common_caller():
+    cm = {"functions": {
+        "OsTask": {"calls": ["modAppl"]},
+        "modAppl": {"calls": ["a", "b"]},
+        "a": {"calls": []}, "b": {"calls": []}}}
+    sugg = ct.suggest_mains(ct.CallIndex(cm), ["a", "b", "nope"])
+    assert sugg[0] == {"name": "modAppl", "covers": 2, "total": 2}
+    assert [s["name"] for s in sugg[:2]] == ["modAppl", "OsTask"]
+
+
+def test_parse_and_dump_mains():
+    raw = ct.dump_mains({3: [" rlsAppl ", "rlsAppl", "rlsInit"], 4: []})
+    assert ct.parse_mains(raw) == {3: ["rlsAppl", "rlsInit"]}
+    assert ct.parse_mains("junk") == {} and ct.parse_mains('{"x": ["a"]}') == {}
+
+
+def test_main_function_endpoints_and_run_gate(client):
+    rid, mid = _setup(client)
+    _add_test_column(client, rid)
+    client.put(f"/api/models/{mid}/main-functions", json={"functions": []}, headers=AUTH)
+
+    info = client.get(f"/api/models/{mid}/main-functions", params={"col_name": "T1"},
+                      headers=AUTH).json()
+    assert info["needs_input"] is True and info["functions"] == []
+    assert info["suggestions"][0]["name"] == "main"      # reaches app_run
+    # The run job refuses a model without a main function.
+    body = _wait(client, client.post("/api/jobs/run_calltree_tests",
+                                     json={"col_name": "T1", "model_ids": [mid]},
+                                     headers=AUTH).json()["job_id"])
+    assert body["status"] == "failed" and "main function" in body["error"]
+
+    found = client.get("/api/calltree-tests/functions",
+                       params={"col_name": "T1", "q": "app"}, headers=AUTH).json()
+    assert found["functions"][0] == "app_run"
+
+    r = client.put(f"/api/models/{mid}/main-functions",
+                   json={"functions": ["renamed", "ISR_Timer"]}, headers=AUTH)
+    assert r.json()["functions"] == ["renamed", "ISR_Timer"]
+    info = client.get(f"/api/models/{mid}/main-functions", params={"col_name": "T1"},
+                      headers=AUTH).json()
+    assert info["needs_input"] is False
+    assert info["found"] == ["ISR_Timer"] and info["missing"] == ["renamed"]
+    hist = client.app.state.appstate.db.get_history(release_id=rid)
+    assert any("Main function(s) for call-tree tests" in (h.get("description") or "")
+               for h in hist)

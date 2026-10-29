@@ -11,6 +11,16 @@ for the model, takes each row's matched function, and records a verdict:
     3. not called, but calls other functions          → Entry point
     4. not called and calls nothing                   → Failed   (never called)
 
+With the model's MAIN FUNCTION(S) set (the module's entry, e.g. its cyclic
+``xxxAppl()``; stored per model, asked for on the first run), the test checks
+the relationship to them instead:
+
+    1. function not in the call tree                  → Failed
+    2. reached from a main function, any depth        → Passed  (main → … → fn)
+    3. not reached from any main function             → Failed  (callers named)
+
+None of the main functions in the release's call tree → "No Data".
+
 Rows whose Port State is Retired/Deleted get "No Result" (as the release-result
 column does); an empty Match cell → "No Match"; no code map for the model and
 release → "No Data".
@@ -37,6 +47,9 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 TEST_COLUMN_TYPE = "CallTreeTestColumn"
 BINDINGS_KEY = "calltree_test_columns"
+# Project meta: {model_id: [main function names]} — per model, every release.
+MAINS_KEY = "model_main_functions"
+MAX_MAINS = 10
 
 PASSED = "Passed"
 FAILED = "Failed"
@@ -54,6 +67,8 @@ MANUAL_OPTIONS = (PASSED, FAILED, ENTRY_POINT)
 _FUNCTION_SEARCH_TYPES = ("Port Search", "Function Search")
 
 MAX_EVIDENCE_CALLERS = 25
+MAX_SUGGEST_DEPTH = 10      # caller levels walked up from a port for suggestions
+MAX_SUGGEST_NODES = 20000   # nodes visited per port when suggesting
 
 _MATCH_RE = re.compile(r"^(.*?)\s*\((\d+)%\)\s*$")
 
@@ -114,6 +129,39 @@ def parse_bindings(raw: Optional[str]) -> Dict[str, dict]:
 
 def dump_bindings(bindings: Dict[str, dict]) -> str:
     return json.dumps(bindings, sort_keys=True)
+
+
+def clean_mains(names: Iterable) -> List[str]:
+    """Trimmed, de-duplicated main function names (order kept, capped)."""
+    out: List[str] = []
+    for n in names or ():
+        n = str(n or "").strip()
+        if n and n not in out:
+            out.append(n)
+    return out[:MAX_MAINS]
+
+
+def parse_mains(raw: Optional[str]) -> Dict[int, List[str]]:
+    """{model_id: [main function names]} from the project meta value."""
+    try:
+        data = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    out: Dict[int, List[str]] = {}
+    for k, v in (data.items() if isinstance(data, dict) else ()):
+        try:
+            mid = int(k)
+        except (TypeError, ValueError):
+            continue
+        names = clean_mains(v if isinstance(v, list) else ())
+        if names:
+            out[mid] = names
+    return out
+
+
+def dump_mains(mains: Dict[int, List[str]]) -> str:
+    return json.dumps({str(k): v for k, v in sorted(mains.items()) if v},
+                      sort_keys=True)
 
 
 def reconcile_bindings(old: Dict[str, dict], new_layout, renames: Dict[str, str],
@@ -295,15 +343,130 @@ def evaluate(name: str, index: CallIndex, strict: bool = False) -> dict:
     return {"verdict": FAILED, "reason": reason, **evidence}
 
 
+class Reach:
+    """Everything reachable from a model's main functions, with the shortest
+    call chain to each (BFS over callees; verified edges only in strict mode)."""
+
+    def __init__(self, index: CallIndex, mains: Iterable[str], strict: bool = False):
+        self.mains = clean_mains(mains)
+        self.roots: List[str] = []
+        self.missing: List[str] = []
+        self.parent: Dict[str, Optional[str]] = {}
+        for m in self.mains:
+            key = index.resolve(m)
+            if key is None:
+                self.missing.append(m)
+            elif key not in self.parent:
+                self.roots.append(key)
+                self.parent[key] = None
+        queue = list(self.roots)
+        for node in queue:                     # grows while iterating: BFS
+            for callee in sorted(index.callees.get(node, ())):
+                if callee in self.parent:
+                    continue
+                if strict and (node, callee) not in index.verified:
+                    continue
+                self.parent[callee] = node
+                queue.append(callee)
+
+    def path(self, key: str) -> List[str]:
+        """[main, …, key] — empty when ``key`` is not reached."""
+        if key not in self.parent:
+            return []
+        chain = [key]
+        while self.parent[chain[-1]] is not None:
+            chain.append(self.parent[chain[-1]])
+        return chain[::-1]
+
+
+def evaluate_from_mains(name: str, index: CallIndex, reach: Reach,
+                        strict: bool = False) -> dict:
+    """Verdict for one matched function relative to the model's main functions:
+    Passed when a main function reaches it through any number of calls."""
+    key = index.resolve(name)
+    if key is None:
+        return {"verdict": FAILED,
+                "reason": f"'{name}' is not in this release's call tree."}
+    callers = index.callers.get(key, set())
+    if strict:
+        callers = {c for c in callers if (c, key) in index.verified}
+    evidence = {
+        "callers": [{"name": c, "verified": (c, key) in index.verified}
+                    for c in sorted(callers)][:MAX_EVIDENCE_CALLERS],
+        "callers_total": len(callers),
+        "callees_total": len(index.callees.get(key, set())),
+    }
+    chain = reach.path(key)
+    if chain:
+        if len(chain) == 1:
+            reason = "It is a main function of this model."
+        else:
+            calls = len(chain) - 1
+            reason = (f"Reached from {chain[0]} in {calls} call"
+                      f"{'' if calls == 1 else 's'}: {' → '.join(chain)}.")
+        return {"verdict": PASSED, "reason": reason, "main_path": chain, **evidence}
+    mains = ", ".join(reach.roots)
+    edge = "a verified call path" if strict else "any call path"
+    if callers:
+        shown = sorted(callers)[:5]
+        more = f" and {len(callers) - len(shown)} more" if len(callers) > len(shown) else ""
+        reason = (f"Not reached from {mains} by {edge}; called only by "
+                  f"{', '.join(shown)}{more}, outside that call tree.")
+    else:
+        reason = f"Not reached from {mains} by {edge}; no function calls it."
+    return {"verdict": FAILED, "reason": reason, **evidence}
+
+
+def suggest_mains(index: CallIndex, functions: Iterable[str],
+                  limit: int = 5) -> List[dict]:
+    """Likely main functions for a model: the functions that reach the most
+    of its matched port functions, closest first — the common ancestor of the
+    module's ports rather than the OS task above it.
+    [{name, covers, total}]"""
+    keys = []
+    for f in functions:
+        k = index.resolve(f) if f else None
+        if k and k not in keys:
+            keys.append(k)
+    covers: Dict[str, int] = {}
+    dist: Dict[str, int] = {}
+    for k in keys:
+        seen = {k: 0}
+        queue = [k]
+        for node in queue:
+            d = seen[node]
+            if d >= MAX_SUGGEST_DEPTH or len(seen) >= MAX_SUGGEST_NODES:
+                continue
+            for c in index.callers.get(node, ()):
+                if c not in seen:
+                    seen[c] = d + 1
+                    queue.append(c)
+        for node, d in seen.items():
+            covers[node] = covers.get(node, 0) + 1
+            dist[node] = dist.get(node, 0) + d
+    # A port function that reaches only itself is no suggestion.
+    own = set(keys)
+    ranked = sorted((n for n in covers if not (n in own and covers[n] == 1)),
+                    key=lambda n: (-covers[n], dist[n] / covers[n], n))
+    return [{"name": n, "covers": covers[n], "total": len(keys)}
+            for n in ranked[:limit]]
+
+
 def run_on_rows(rows: List[dict], col_name: str, binding: dict,
                 code_map: Optional[dict],
                 object_pairs: Optional[Iterable[Tuple[str, str]]],
-                *, port_state_col: Optional[str], tested_at: str) -> Dict[str, int]:
+                *, port_state_col: Optional[str], tested_at: str,
+                mains: Optional[Iterable[str]] = None) -> Dict[str, int]:
     """Evaluate every row in place. Manual overrides keep their verdict; the
-    tool verdict and evidence are refreshed. Returns a verdict histogram."""
+    tool verdict and evidence are refreshed. Returns a verdict histogram.
+
+    ``mains`` = the model's main functions: when given, a row passes only if
+    one of them reaches its function (see ``evaluate_from_mains``)."""
     index = CallIndex(code_map, object_pairs) if code_map else None
     built_at = (code_map or {}).get("built_at", "")
     strict = bool(binding.get("strict"))
+    main_list = clean_mains(mains) if mains is not None else None
+    reach = Reach(index, main_list, strict) if index is not None and main_list else None
     counts: Dict[str, int] = {}
 
     for row in rows:
@@ -319,6 +482,12 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
         elif strict and not index.has_objects:
             res = {"verdict": NO_DATA,
                    "reason": "Strict mode needs the release's .o files imported."}
+        elif main_list is not None and not (reach and reach.roots):
+            res = {"verdict": NO_DATA,
+                   "reason": ("Main function " + ", ".join(main_list or ["(none set)"])
+                              + " is not in this release's call tree.")}
+        elif reach is not None:
+            res = evaluate_from_mains(name, index, reach, strict)
         else:
             res = evaluate(name, index, strict)
 
@@ -334,6 +503,9 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
             "code_map_built_at": built_at,
             "strict": strict,
         }
+        if main_list is not None:
+            cell["mains"] = main_list
+            cell["main_path"] = res.get("main_path", [])
         if prev.get("user_changed") and prev.get("text") in MANUAL_OPTIONS:
             cell["text"] = prev["text"]
             cell["user_changed"] = True

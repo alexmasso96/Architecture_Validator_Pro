@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import { isDesktop, nativeSaveFile } from "../native";
 import { useColumns, useModels, usePorts, useReleases } from "../api/hooks";
 import { useSSE } from "../api/useSSE";
-import type { ProjectStatus, TestColumnStatus } from "../api/types";
+import type { MainFunctionsInfo, ProjectStatus, TestColumnStatus } from "../api/types";
 import {
   cellText,
   initCyclicValue,
@@ -19,6 +19,7 @@ import { ImportWizard } from "../components/ImportWizard";
 import { ProfileImportDialog } from "../components/ProfileImportDialog";
 import { ColumnCustomizer } from "../components/ColumnCustomizer";
 import { PortsTable } from "../components/PortsTable";
+import { MainFunctionsDialog } from "../components/MainFunctionsDialog";
 import { MatchPicker } from "../components/MatchPicker";
 import { Inspector } from "../components/Inspector";
 import { HistoryModal } from "../components/HistoryModal";
@@ -187,6 +188,10 @@ export function Workspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeModelId, columns.data]);
 
+  // Main-function pop-up: asked before the first run of a model (or when
+  // none of its main functions is in the release's call tree); ƒ edits it.
+  const [mainFnFor, setMainFnFor] = useState<{ colName: string; run: boolean } | null>(null);
+
   async function runTest(colName: string) {
     if (activeModelId === null) return;
     const st = testStatus[colName];
@@ -194,6 +199,23 @@ export function Workspace({
       toast(`No code map for ${st.release_name} — build it in the Code Map first.`);
       return;
     }
+    try {
+      const mf = await api.get<MainFunctionsInfo>(
+        `/models/${activeModelId}/main-functions?col_name=${encodeURIComponent(colName)}`,
+      );
+      if (mf.needs_input) {
+        setMainFnFor({ colName, run: true });
+        return;
+      }
+    } catch (e) {
+      toast(`Run failed to start: ${(e as Error).message}`);
+      return;
+    }
+    startTest(colName);
+  }
+
+  async function startTest(colName: string) {
+    if (activeModelId === null) return;
     try {
       await api.post("/jobs/run_calltree_tests", {
         col_name: colName,
@@ -699,8 +721,25 @@ export function Workspace({
               testStatus={testStatus}
               onRunTest={runTest}
               onReportTest={reportTest}
+              onEditMains={(colName) => setMainFnFor({ colName, run: false })}
               canEdit={canEdit}
               modelStatus={activeModel?.status ?? "In Work"}
+            />
+          )}
+
+          {mainFnFor && activeModelId !== null && (
+            <MainFunctionsDialog
+              modelId={activeModelId}
+              modelName={activeModel?.name ?? ""}
+              colName={mainFnFor.colName}
+              runAfter={mainFnFor.run}
+              onCancel={() => setMainFnFor(null)}
+              onSaved={(fns) => {
+                const { colName, run } = mainFnFor;
+                setMainFnFor(null);
+                if (run) startTest(colName);
+                else toast(`Main function of ${activeModel?.name ?? "model"}: ${fns.join(", ")}`);
+              }}
             />
           )}
 

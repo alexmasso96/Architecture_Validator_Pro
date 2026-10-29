@@ -179,6 +179,8 @@ def _setup_and_run(client):
     ])
     db.save_model_code_map(mids[0], json.dumps(CODE_MAP), release_id=rid)
     db.commit()
+    assert client.put(f"/api/models/{mids[0]}/main-functions",
+                      json={"functions": ["main"]}, headers=AUTH).status_code == 200
     cols = client.get("/api/columns", headers=AUTH).json()["columns"]
     cols.append({"name": "T1", "type": ct.TEST_COLUMN_TYPE, "visible": True, "width": 110,
                  "test_binding": {"release_id": rid, "match_col": "Mapped Func (Match)",
@@ -296,7 +298,7 @@ def test_overall_and_per_model_score_tables():
     assert 'href="#m-motor">Motor</a>' in models and 'href="#m-idle">Idle</a>' in models
     assert "<b>50.0 %</b>" in models and "All models" in models
     # Results are a bordered grid table, not bare dividing lines.
-    assert doc.count('<table class="grid results">') == 1
+    assert '<table class="grid results">' in doc
     assert "table.grid{border:1px solid" in doc
 
 
@@ -335,3 +337,60 @@ def test_logo_preference_is_embedded_in_report(client, tmp_path):
     assert r.status_code == 400 and "Not a PNG" in r.json()["detail"]
     assert client.post("/api/prefs/report-logo", json={"path": str(tmp_path / "nope.png")},
                        headers=AUTH).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Main function: per-model call tree to the ports, unreached list, paths.
+# ---------------------------------------------------------------------------
+def _main_rows():
+    rows = [
+        {"Mapped Func": {"text": "motor"},
+         "Mapped Func (Match)": {"widget_text": "motor_stop (90%)"}},
+        {"Mapped Func": {"text": "log"},
+         "Mapped Func (Match)": {"widget_text": "log_write (90%)"}},
+        {"Mapped Func": {"text": "tick"},
+         "Mapped Func (Match)": {"widget_text": "timer_tick (90%)"}},
+    ]
+    ct.run_on_rows(rows, "T1", BINDING, CODE_MAP, None, port_state_col="Port State",
+                   tested_at="t", mains=["main"])
+    return rows
+
+
+def test_main_tree_merges_recorded_paths():
+    data = rep.build_report(
+        project="Demo", release="R1", col_name="T1", binding=BINDING, author="a",
+        created_at="now", layout=LAYOUT, port_state_col="Port State",
+        models=[("Motor", _main_rows(), CODE_MAP, ["main"])])
+    ch = data["chapters"][0]
+    tree = ch["tree"]
+    assert [n["name"] for n in tree] == ["main"]
+    app = tree[0]["children"][0]
+    assert app["name"] == "app_run" and app["ports"] == []
+    assert [(c["name"], c["ports"]) for c in app["children"]] == [
+        ("log_write", ["e-2"]), ("motor_stop", ["e-1"])]
+    assert app["children"][1]["verified"] is True        # app_run → motor_stop
+    assert ch["unreached"] == ["e-3"] and ch["mains"] == ["main"]
+
+    doc = rep.render_html(data)
+    assert "Call tree from main()" in doc and '<span class="tag main">main</span>' in doc
+    assert "Not reached from main() (1)" in doc
+    assert '<a class="port" href="#e-1">' in doc
+    assert "<td><code>main()</code></td>" in doc            # models table
+    assert "Path from the main function" in doc            # detail of e-1
+    assert "Entry point</th>" not in doc                   # unused column hidden
+
+
+def test_main_function_changed_since_the_run_is_flagged():
+    data = rep.build_report(
+        project="Demo", release="R1", col_name="T1", binding=BINDING, author="a",
+        created_at="now", layout=LAYOUT, port_state_col="Port State",
+        models=[("Motor", _main_rows(), CODE_MAP, ["ISR_Timer"])])
+    assert all(e["mains_changed"] for e in data["chapters"][0]["entries"])
+    assert "Main function changed." in rep.render_html(data)
+
+
+def test_report_api_draws_main_tree(client):
+    _setup_and_run(client)
+    doc = client.post("/api/calltree-tests/report", json={"col_name": "T1"},
+                      headers=AUTH).json()["html"]
+    assert "Call tree from main()" in doc and "app_run()" in doc

@@ -802,6 +802,104 @@ def calltree_test_status(model_id: int, state: AppState = Depends(get_state)) ->
     return _guard(go)
 
 
+# ---------------------------------------------------------------------------
+# Main function(s) of a model — what a call-tree test checks reachability
+# from. Stored per model (every release); the Run button asks for them when
+# they are missing or none is in the Test column's release call tree.
+# ---------------------------------------------------------------------------
+def _model_mains(db) -> dict:
+    from Application_Logic import Logic_CallTree_Test as ct
+    return ct.parse_mains(db.get_meta(ct.MAINS_KEY, "{}"))
+
+
+def _test_code_map_index(db, col_name: str):
+    """(binding, CallIndex or None) for a Test column's release."""
+    from Application_Logic import Logic_CallTree_Test as ct
+    binding = _test_bindings(db).get(col_name)
+    if binding is None:
+        raise ProjectError(f"No call-tree Test column named {col_name!r}.")
+    cm = db.get_release_code_map(binding["release_id"])
+    return binding, (ct.CallIndex(cm) if cm and cm.get("functions") else None)
+
+
+@router.get("/models/{model_id}/main-functions")
+def get_main_functions(model_id: int, col_name: str,
+                       state: AppState = Depends(get_state)) -> dict:
+    """The model's main functions checked against the Test column's release:
+    which resolve, which are missing, whether the Run button must ask, and
+    suggestions (functions reaching most of the model's port functions)."""
+    def go():
+        from Application_Logic import Logic_CallTree_Test as ct
+        db = state.require_open()
+        state.model_index_by_id(model_id)
+        binding, index = _test_code_map_index(db, col_name)
+        mains = _model_mains(db).get(model_id, [])
+        found = [m for m in mains if index is not None and index.resolve(m)]
+        suggestions = []
+        if index is not None:
+            funcs = [ct.parse_match(ct.cell_text(r.get(binding["match_col"])))
+                     for r in db.get_model_rows(model_id)]
+            suggestions = ct.suggest_mains(index, [f for f in funcs if f])
+        rel, _active, _base = _release_flags(state.release_manager,
+                                             binding["release_id"])
+        return {"model_id": model_id, "functions": mains, "found": found,
+                "missing": [m for m in mains if m not in found],
+                "has_code_map": index is not None,
+                "needs_input": index is not None and not found,
+                "release_name": getattr(rel, "name", ""),
+                "suggestions": suggestions}
+    return _guard(go)
+
+
+class MainFunctionsBody(BaseModel):
+    functions: list[str]
+
+
+@router.put("/models/{model_id}/main-functions")
+def set_main_functions(model_id: int, body: MainFunctionsBody,
+                       state: AppState = Depends(get_state),
+                       bus: EventBus = Depends(get_bus)) -> dict:
+    def go():
+        from Application_Logic import Logic_CallTree_Test as ct
+        db = state.require_table_edit()
+        idx = state.model_index_by_id(model_id)
+        model = state.require_arch().models[idx]
+        mains = _model_mains(db)
+        old = mains.get(model_id, [])
+        new = ct.clean_mains(body.functions)
+        if new:
+            mains[model_id] = new
+        else:
+            mains.pop(model_id, None)
+        db.set_meta(ct.MAINS_KEY, ct.dump_mains(mains))
+        db.commit()
+        if new != old:
+            _record_history(state, "Main function(s) for call-tree tests: "
+                            f"{', '.join(old) or '(none)'} -> {', '.join(new) or '(none)'}",
+                            model.name, model_id)
+            bus.publish("db-changed", {"reason": "main-functions", "model_id": model_id})
+        return {"model_id": model_id, "functions": new}
+    return _guard(go)
+
+
+@router.get("/calltree-tests/functions")
+def search_test_functions(col_name: str, q: str = "", limit: int = 30,
+                          state: AppState = Depends(get_state)) -> dict:
+    """Function names in a Test column's release call tree containing ``q``
+    (case-insensitive; names starting with it first) — the main-function
+    picker's autocomplete."""
+    def go():
+        db = state.require_open()
+        _binding, index = _test_code_map_index(db, col_name)
+        if index is None:
+            return {"functions": []}
+        needle = q.strip().lower()
+        hits = [n for n in index.known if needle in n.lower()] if needle else []
+        hits.sort(key=lambda n: (not n.lower().startswith(needle), len(n), n))
+        return {"functions": hits[:max(1, min(limit, 100))]}
+    return _guard(go)
+
+
 class CallTreeReportBody(BaseModel):
     col_name: str
     # Where to write the .html (the native Save dialog's choice). Omitted →
@@ -844,8 +942,9 @@ def calltree_test_report(body: CallTreeReportBody,
             object_pairs = set(db.get_release_object_edges(rid))
             for inl in db.get_release_inlined_functions(rid):
                 object_pairs.add((inl["caller"], inl["name"]))
+        mains = _model_mains(db)
         models = [(m.name, db.get_model_rows(m.id),
-                   db.get_model_code_map(m.id, release_id=rid))
+                   db.get_model_code_map(m.id, release_id=rid), mains.get(m.id, []))
                   for m in mgr.models if m.id is not None and not m.is_deleted]
         files = db.get_release_symbol_files(rid)
         now = _dt.datetime.now().astimezone()

@@ -625,6 +625,13 @@ def _make_run_calltree_tests(state: AppState):
                     object_pairs.add((inl["caller"], inl["name"]))
             model_ids = _resolve_model_ids(state, params, wdb)
             names = {m.id: m.name for m in state.require_arch().models}
+            # Every model needs its main function(s): the test checks that
+            # they reach each port's function (the UI asks before running).
+            mains = ct.parse_mains(wdb.get_meta(ct.MAINS_KEY, "{}"))
+            unset = [names.get(mid, str(mid)) for mid in model_ids if not mains.get(mid)]
+            if unset:
+                raise ProjectError("Set the main function of "
+                                   + ", ".join(unset) + " before running the test.")
             for i, mid in enumerate(model_ids, 1):
                 if cancel.is_set():
                     break
@@ -633,7 +640,7 @@ def _make_run_calltree_tests(state: AppState):
                 rows = wdb.get_model_rows(mid)
                 counts = ct.run_on_rows(rows, col_name, binding, code_map, object_pairs,
                                         port_state_col=port_state_col,
-                                        tested_at=tested_at)
+                                        tested_at=tested_at, mains=mains[mid])
                 wdb.save_model_rows(mid, rows)
                 summary.append({"model_id": mid, "model": names.get(mid, ""),
                                 "counts": counts, "has_code_map": bool(code_map)})

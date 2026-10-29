@@ -87,6 +87,7 @@ export function PortsTable({
   testStatus,
   onRunTest,
   onReportTest,
+  onEditMains,
 }: {
   columns: ResolvedColumn[];
   rows: PortRow[];
@@ -100,6 +101,7 @@ export function PortsTable({
   testStatus?: Record<string, TestColumnStatus>;
   onRunTest?: (colName: string) => void;
   onReportTest?: (colName: string) => void;
+  onEditMains?: (colName: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pill, setPill] = useState<PillTarget | null>(null);
@@ -489,6 +491,19 @@ export function PortsTable({
                       }}
                     >
                       ▶
+                    </button>
+                  )}
+                {c.role === "calltest" && onEditMains && canEdit &&
+                  c.test?.is_active && !c.test?.is_baselined && (
+                    <button
+                      className="test-run-btn"
+                      title="Main function(s) of this model — the test checks they reach each port's function"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onEditMains(c.name);
+                      }}
+                    >
+                      ƒ
                     </button>
                   )}
                 {c.role === "calltest" && onReportTest && c.test?.is_active && (
