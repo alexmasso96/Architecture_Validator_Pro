@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 SOURCE_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx"}
-MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB
+# No file size limit (see Logic_Source_Store): large generated sources count.
 
 # Directories that never contain test-relevant source code
 SKIP_DIRS = {
@@ -438,7 +438,7 @@ def _scan_files(sw_path: str) -> List[Dict]:
                 fpath = os.path.join(root, fname)
                 try:
                     size = os.path.getsize(fpath)
-                    if size <= MAX_FILE_SIZE and size > 0:
+                    if size > 0:
                         files.append({
                             "path": fpath,
                             "relpath": os.path.relpath(fpath, sw_path),

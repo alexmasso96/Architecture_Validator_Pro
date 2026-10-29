@@ -24,7 +24,7 @@ When a release's ELF is loaded, search-type columns match each port against the 
 
 **Macros count too.** Generated configuration code often provides its accessors as `#define` macros, for example `#define cfgGetRLMaxValueForHigh_u16() (…)`. The preprocessor replaces them before compiling, so they are never in the ELF, but they are real call targets and the Code Map shows them. Once the release's source is imported, its macros are offered as candidates as well: function-like macros alongside functions, other macros alongside variables. The match picker tags them **macro**. When an ELF symbol has the same name, the ELF symbol is used.
 
-Anything shown in the release's [Code Map](09-code-map.md) call tree can be matched too, even when its definition wasn't found. That happens when a header was never imported: the importer skips files over 2 MB and build-output folders such as `out` or `build`, and large generated configuration headers often hit one or the other. These candidates are tagged **call tree**. Importing source into the active release re-matches the table automatically; cells you picked by hand are kept.
+Anything shown in the release's [Code Map](09-code-map.md) call tree can be matched too, even when its definition wasn't found. That happens when a header was never imported: the importer skips build-output folders such as `out` or `build`, where generated configuration headers often live. These candidates are tagged **call tree**. Importing source into the active release re-matches the table automatically; cells you picked by hand are kept.
 
 ## Column types
 

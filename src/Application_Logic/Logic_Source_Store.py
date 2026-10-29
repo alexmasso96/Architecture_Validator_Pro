@@ -27,7 +27,8 @@ from typing import List, Optional, Iterator, Tuple
 
 # Canonical source-scanning rules (mirror Logic_Code_Index).
 SOURCE_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx"}
-MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MB — skip anything larger
+# No size limit: generated sources (config, RTE, calibration tables) are often
+# many MB and hold exactly the macros/functions the matcher and call tree need.
 SKIP_DIRS = {
     ".git", ".svn", ".hg", "__pycache__", "node_modules",
     "bin", "obj", "build", "output", "out", "debug", "release",
@@ -67,7 +68,7 @@ class FilesystemSourceProvider:
             if ext in exts:
                 try:
                     st = os.stat(self.root)
-                    if 0 < st.st_size <= MAX_FILE_SIZE:
+                    if st.st_size > 0:
                         out.append(SourceFile(os.path.basename(self.root),
                                               st.st_size, ext, mtime=st.st_mtime))
                 except OSError:
@@ -86,7 +87,7 @@ class FilesystemSourceProvider:
                     st = os.stat(ap)
                 except OSError:
                     continue
-                if not (0 < st.st_size <= MAX_FILE_SIZE):
+                if st.st_size <= 0:
                     continue
                 rel = _norm_rel(os.path.relpath(ap, self.root))
                 out.append(SourceFile(rel, st.st_size, ext, mtime=st.st_mtime))

@@ -229,8 +229,9 @@ def test_source_import_rematch_keeps_hand_picked_matches(client, tmp_path):
 def test_rematch_finds_call_tree_name_when_header_was_not_imported(
         client, tmp_path, header_problem):
     """The reported bug: the macro shows in the Code Map's call tree, but its
-    defining header never reached the project (the importer skips files over
-    2 MB and build-output folders), so Re-match could not find it."""
+    defining header never reached the project (the importer skips build-output
+    folders, and used to skip files over 2 MB), so Re-match could not find it.
+    A large header is now imported, so the macro is also a #define match."""
     src = tmp_path / "src"
     (src / "app").mkdir(parents=True)
     (src / "app" / "rls_cfg.c").write_text(SOURCE)
@@ -253,8 +254,10 @@ def test_rematch_finds_call_tree_name_when_header_was_not_imported(
                       headers=AUTH).json()
     assert _wait(client, job["job_id"])["status"] == "done"
     db = client.app.state.appstate.db
-    assert not any(f["rel_path"].endswith(".h")
-                   for f in db.list_release_source_files(rid))     # header skipped
+    headers = [f["rel_path"] for f in db.list_release_source_files(rid)
+               if f["rel_path"].endswith(".h")]
+    large = header_problem == "over_2mb"
+    assert headers == (["app/cfg_gen_get_macro.h"] if large else [])  # no size limit
     job = client.post("/api/jobs/build_code_map",
                       json={"model_id": mid, "release_id": rid}, headers=AUTH).json()
     assert _wait(client, job["job_id"])["status"] == "done"
@@ -265,7 +268,9 @@ def test_rematch_finds_call_tree_name_when_header_was_not_imported(
                    headers=AUTH).json()
     top = r["candidates"][0]
     assert (top["name"], top["score"]) == ("cfgGetRLMaxValueForHigh_u16", 100)
-    assert top["call_target"] is True and top["macro"] is False
+    # Its #define is known now when the large header is imported; otherwise
+    # only the call tree has it.
+    assert (top["macro"], top["call_target"]) == (large, not large)
 
     db.save_model_rows(mid, [{"Input Port": {"text": "cfgGetRLMaxValueForHigh_u16"}}])
     db.commit()
@@ -274,3 +279,24 @@ def test_rematch_finds_call_tree_name_when_header_was_not_imported(
     assert _wait(client, job["job_id"])["status"] == "done"
     assert db.get_model_rows(mid)[0]["Input Port (Match)"]["widget_text"] == \
         "cfgGetRLMaxValueForHigh_u16 (100%)"
+
+
+def test_large_generated_sources_are_not_skipped(tmp_path):
+    """Generated config/RTE sources are often several MB; they used to be
+    dropped by a 2 MB limit, losing exactly the macros ports name."""
+    from Application_Logic import Logic_Code_Index as ci
+    from Application_Logic.Logic_Source_Store import FilesystemSourceProvider
+    big = tmp_path / "Cfg_Gen.h"
+    filler = "".join(f"#define CFG_PARAM_{i}_u16 ((uint16){i}u)\n" for i in range(120000))
+    big.write_text(filler + "#define cfgGetRLMaxValueForHigh_u16() (cfgData.x)\n")
+    gen = tmp_path / "Cfg_Gen.c"
+    gen.write_text("".join(f"static const unsigned short Tab_{i} = {i}u;\n"
+                           for i in range(100000))
+                   + "void Gen_Fn(void)\n{\n    cfgGetRLMaxValueForHigh_u16();\n}\n")
+    assert big.stat().st_size > 3 * 1024 * 1024 and gen.stat().st_size > 3 * 1024 * 1024
+    (tmp_path / "empty.c").write_text("")
+    files = FilesystemSourceProvider(str(tmp_path)).list_files()
+    assert [f.rel_path for f in files] == ["Cfg_Gen.c", "Cfg_Gen.h"]  # empty still skipped
+    text = dict(FilesystemSourceProvider(str(tmp_path)).iter_text())["Cfg_Gen.h"]
+    assert "cfgGetRLMaxValueForHigh_u16" in sm.extract_macros(text)[0]
+    assert "Gen_Fn" in ci.build_index(str(tmp_path)).functions
