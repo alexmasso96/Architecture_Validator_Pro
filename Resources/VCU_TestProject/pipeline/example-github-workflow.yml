@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.14'
       - run: pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
-      - run: python Resources/VCU_TestProject/pipeline/build_firmware.py
+      - run: python Resources/VCU_TestProject/pipeline/build_firmware.py arm
       - run: python Resources/VCU_TestProject/pipeline/make_workbook.py
       - uses: actions/upload-artifact@v4
         with:
@@ -34,7 +34,7 @@ jobs:
         with:
           name: firmware
           path: Resources/VCU_TestProject/pipeline/
-      - run: arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
+      - run: arch-validator run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
       - uses: actions/upload-artifact@v4
         if: always()        # keep the report when the validation fails
         with:

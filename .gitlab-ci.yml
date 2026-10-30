@@ -41,8 +41,9 @@ test_coverage:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_PIPELINE_SOURCE == "schedule"
 
-# Compile the VCU firmware and run the pipeline CLI on it. The job's exit code is
-# the validation result; a failed run still uploads its report.
+# Compile the VCU firmware for ARM and Renesas RH850 and run the pipeline CLI on
+# both. The job's exit code is the validation result; a failed run still uploads
+# its report. The RH850 compiler is cached: building it takes minutes.
 .cli_rules: &cli_rules
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
@@ -58,16 +59,25 @@ test_coverage:
 cli_validation:
   stage: validate
   needs: []
+  cache:
+    key:
+      files:
+        - Resources/VCU_TestProject/pipeline/build_rh850_toolchain.sh
+    paths:
+      - Resources/VCU_TestProject/pipeline/rh850-toolchain/
   before_script:
     - apt-get update -qy
-    - apt-get install -y -qq cargo
+    - apt-get install -y -qq cargo libgmp-dev libmpfr-dev libmpc-dev texinfo bison flex
     - python -m pip install --upgrade pip
     - pip install -r requirements.txt maturin
     - pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
     - maturin build --release --manifest-path src/native/parser_rust/Cargo.toml --out target/wheels --compatibility linux
     - pip install --no-index --find-links target/wheels rust_elf_parser
   script:
-    - python Resources/VCU_TestProject/pipeline/build_firmware.py
+    - Resources/VCU_TestProject/pipeline/build_rh850_toolchain.sh
+    - python Resources/VCU_TestProject/pipeline/build_firmware.py arm
+    - python Resources/VCU_TestProject/pipeline/build_firmware.py rh850
     - python Resources/VCU_TestProject/pipeline/make_workbook.py
-    - python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
+    - python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
+    - python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-rh850.cfg
   <<: [*cli_rules, *cli_artifacts]

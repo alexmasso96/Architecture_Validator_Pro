@@ -3,8 +3,10 @@ name: Build Desktop App (pywebview)
 # Single pipeline for the Phase 3 desktop shell (ArchitectureValidatorDesktop.spec):
 # React SPA + FastAPI worker inside a native pywebview window.
 #
+#   rh850-firmware → compiles the VCU firmware for Renesas RH850 (Ubuntu; its
+#               compiler only runs on Linux). `test` and `build` download it.
 #   test      → logic-layer pytest suite + a pipeline CLI run over the compiled
-#               VCU firmware (Ubuntu).
+#               ARM and RH850 VCU firmware (Ubuntu).
 #   build     → matrix over windows/macos/linux. PyInstaller is not a
 #               cross-compiler, so each OS builds its own artifact; the matrix
 #               keeps the three legs in ONE job definition (no copy-paste) while
@@ -52,7 +54,38 @@ permissions:
   contents: write
 
 jobs:
+  rh850-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install compiler libraries
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev texinfo bison flex
+
+      - name: Restore the RH850 compiler
+        uses: actions/cache@v4
+        with:
+          path: Resources/VCU_TestProject/pipeline/rh850-toolchain
+          key: rh850-toolchain-${{ runner.os }}-${{ hashFiles('Resources/VCU_TestProject/pipeline/build_rh850_toolchain.sh') }}
+
+      - name: Build the RH850 compiler (skipped when restored)
+        run: Resources/VCU_TestProject/pipeline/build_rh850_toolchain.sh
+
+      - name: Compile the VCU firmware for RH850
+        run: python Resources/VCU_TestProject/pipeline/build_firmware.py rh850
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rh850-firmware
+          path: Resources/VCU_TestProject/pipeline/build/rh850/
+
   test:
+    needs: rh850-firmware
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,12 +129,19 @@ jobs:
           maturin build --release --manifest-path src/native/parser_rust/Cargo.toml --out target/wheels --compatibility linux
           pip install --no-index --find-links target/wheels rust_elf_parser
 
-      - name: Compile the VCU firmware and run the pipeline CLI on it
+      - name: Download the RH850 firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: rh850-firmware
+          path: Resources/VCU_TestProject/pipeline/build/rh850
+
+      - name: Run the pipeline CLI on the ARM and RH850 firmware
         run: |
           pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
-          python Resources/VCU_TestProject/pipeline/build_firmware.py
+          python Resources/VCU_TestProject/pipeline/build_firmware.py arm
           python Resources/VCU_TestProject/pipeline/make_workbook.py
-          python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
+          python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
+          python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-rh850.cfg
 
       # A failed run is when the report matters most.
       - name: Upload validation results
@@ -115,6 +155,7 @@ jobs:
   build:
     # Also runs on the nightly cron: every OS rebuilds the CLI and validates
     # freshly compiled firmware at the default branch's latest commit.
+    needs: rh850-firmware
     strategy:
       fail-fast: false
       matrix:
@@ -188,6 +229,12 @@ jobs:
         run: pyinstaller ArchitectureValidatorDesktop.spec --noconfirm
 
       # --- Pipeline CLI: every OS proves its own packaged binary end to end ---
+      - name: Download the RH850 firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: rh850-firmware
+          path: Resources/VCU_TestProject/pipeline/build/rh850
+
       - name: Build and test the pipeline CLI
         shell: bash
         run: |
@@ -199,9 +246,10 @@ jobs:
             pip install --target .zig-x64 --platform win_amd64 --only-binary=:all: --no-deps "$(grep '^ziglang' Resources/VCU_TestProject/pipeline/requirements.txt)"
             export PYTHONPATH=.zig-x64
           fi
-          python Resources/VCU_TestProject/pipeline/build_firmware.py
+          python Resources/VCU_TestProject/pipeline/build_firmware.py arm
           python Resources/VCU_TestProject/pipeline/make_workbook.py
-          dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
+          dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
+          dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation-rh850.cfg
           python -c "import platform, shutil; shutil.make_archive(f'architecture-validator-cli-{platform.system().lower()}-{platform.machine().lower()}', 'zip', 'dist', 'arch-validator')"
 
       - name: Upload CLI artifact

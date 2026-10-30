@@ -8,7 +8,7 @@ build_firmware:
   stage: build
   script:
     - pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
-    - python Resources/VCU_TestProject/pipeline/build_firmware.py
+    - python Resources/VCU_TestProject/pipeline/build_firmware.py arm
     - python Resources/VCU_TestProject/pipeline/make_workbook.py
   artifacts:
     paths:
@@ -19,7 +19,7 @@ architecture_validation:
   stage: validate
   needs: [build_firmware]
   script:
-    - arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
+    - arch-validator run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
   artifacts:
     when: always          # keep the report when the validation fails
     paths:

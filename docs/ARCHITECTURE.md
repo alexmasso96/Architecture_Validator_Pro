@@ -291,7 +291,7 @@ For frontend iteration, run Vite (`npm run dev` in `src/frontend`) and point it 
 - **macOS / Linux:** `scripts/build_desktop.sh`
 - **Windows:** `scripts/build_desktop.ps1`
 
-**Pipeline CLI:** `ArchitectureValidatorCLI.spec` builds a separate console bundle, `dist/arch-validator/`, without the window or the frontend. PyInstaller doesn't cross-compile, so each OS builds its own. CI compiles the demo firmware in `Resources/VCU_TestProject/pipeline` on every platform and runs the packaged CLI on it.
+**Pipeline CLI:** `ArchitectureValidatorCLI.spec` builds a separate console bundle, `dist/arch-validator/`, without the window or the frontend. PyInstaller doesn't cross-compile, so each OS builds its own. CI compiles the demo firmware in `Resources/VCU_TestProject/pipeline` for ARM and Renesas RH850 and runs each platform's packaged CLI on both.
 
 ---
 

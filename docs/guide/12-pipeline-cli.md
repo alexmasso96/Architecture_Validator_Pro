@@ -212,7 +212,7 @@ Scheduled runs on GitHub always use the default branch's latest commit.
 
 ## Working demo
 
-[`Resources/VCU_TestProject/pipeline`](../../Resources/VCU_TestProject/pipeline/README.md) has a complete example to run or copy from: a compiled test firmware, a generated workbook, a `.cfg` file, and sample GitLab and GitHub pipeline files. The app's own pipelines run these same steps on Linux, Windows and macOS.
+[`Resources/VCU_TestProject/pipeline`](../../Resources/VCU_TestProject/pipeline/README.md) has a complete example to run or copy from: a test firmware compiled for ARM and Renesas RH850, a generated workbook, `.cfg` files, and sample GitLab and GitHub pipeline files. The app's own pipelines run these same steps, and test both targets on Linux, Windows and macOS.
 
 ## Report details
 
