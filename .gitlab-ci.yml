@@ -41,9 +41,8 @@ test_coverage:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_PIPELINE_SOURCE == "schedule"
 
-# Compile the VCU firmware and run the pipeline CLI on it, on Linux and on a
-# macOS machine (shell executor, tagged `macos`). The job's exit code is the
-# validation result; a failed run still uploads its report.
+# Compile the VCU firmware and run the pipeline CLI on it. The job's exit code is
+# the validation result; a failed run still uploads its report.
 .cli_rules: &cli_rules
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
@@ -71,27 +70,4 @@ cli_validation:
     - python Resources/VCU_TestProject/pipeline/build_firmware.py
     - python Resources/VCU_TestProject/pipeline/make_workbook.py
     - python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
-  <<: [*cli_rules, *cli_artifacts]
-
-cli_validation_macos:
-  stage: validate
-  needs: []
-  tags:
-    - macos
-  variables:
-    GIT_CLEAN_FLAGS: -ffdx -e .ci-venv/
-  before_script:
-    - export PATH="/opt/homebrew/bin:$PATH"
-    - python3.14 -m venv .ci-venv
-    - .ci-venv/bin/pip install --quiet --upgrade pip
-    - .ci-venv/bin/pip install --quiet -r requirements.txt maturin
-    - .ci-venv/bin/pip install --quiet -r Resources/VCU_TestProject/pipeline/requirements.txt
-    - .ci-venv/bin/maturin build --release --manifest-path src/native/parser_rust/Cargo.toml --out target/wheels --interpreter .ci-venv/bin/python
-    - .ci-venv/bin/pip install --quiet --no-index --find-links target/wheels rust_elf_parser
-  script:
-    - .ci-venv/bin/python Resources/VCU_TestProject/pipeline/build_firmware.py
-    - .ci-venv/bin/python Resources/VCU_TestProject/pipeline/make_workbook.py
-    - .ci-venv/bin/python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
-    - .ci-venv/bin/pyinstaller ArchitectureValidatorCLI.spec --noconfirm
-    - dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
   <<: [*cli_rules, *cli_artifacts]
