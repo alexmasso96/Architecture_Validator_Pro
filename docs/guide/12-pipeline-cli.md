@@ -208,15 +208,11 @@ architecture-validation:
 
 The CLI reads the build's outputs without running them, so the job doesn't need the compiler and can use a different runner from the build.
 
-To see a working example, run the VCU test project, which is what the app's own pipelines do:
+Scheduled runs on GitHub always use the default branch's latest commit.
 
-```bash
-python scripts/make_vcu_workbook.py
-```
+## Working demo
 
-```bash
-python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
-```
+[`Resources/VCU_TestProject/pipeline`](../../Resources/VCU_TestProject/pipeline/README.md) has a complete example to run or copy from: a compiled test firmware, a generated workbook, a `.cfg` file, and sample GitLab and GitHub pipeline files. The app's own pipelines run these same steps on Linux, Windows and macOS.
 
 ## Report details
 

@@ -12,6 +12,22 @@ In on-machine validation. Version numbers are bumped when the release is cut.
   HTML report and `.arch` are written either way when a test fails.
 - **Packaged for Windows, Linux and macOS** as a console build that needs no
   Python and no desktop components.
+- **A complete demo** in `Resources/VCU_TestProject/pipeline`: compiled test
+  firmware, a generated workbook, a `.cfg` file and sample pipeline files.
+
+## 🧭 Clearer call-tree results
+- **Not Matched** replaces *No Match*, and also covers a matched name that isn't
+  in the call tree (previously *Failed*): nothing could be traced for that port.
+  Results from older runs report the same way.
+
+## 🏷️ Generic import naming
+- The architecture import now uses generic names throughout. The built-in
+  profiles auto-select files named `INTERFACE_EXPORT_*.xls*`, so rename existing
+  export files or pick the profile by hand.
+
+## 🪟 Resizable Preferences
+- Drag the bottom-right corner of the Preferences window to resize it. It opens
+  larger, remembers its size, and Import Profile names are shown in full.
 
 ## 📥 New: Import Profiles
 - **Import any table format without code.** Build a reusable profile from

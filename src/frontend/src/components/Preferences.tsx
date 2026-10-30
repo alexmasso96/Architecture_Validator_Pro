@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   ACCENTS,
   applyAccent,
@@ -16,6 +16,7 @@ import {
   useSetting,
   type FileExplorerMode,
 } from "../settings";
+import { persistKey } from "../prefs";
 import { APP_VERSION, compareUrl, type UpdateInfo } from "../update";
 import { AISettings } from "./AISettings";
 import { ColorPicker } from "./ColorPicker";
@@ -88,6 +89,27 @@ function ThemePreview({ variant }: { variant: PreviewVariant }) {
 }
 
 // Split-column preferences dialog: categories on the left, settings on the right.
+const SIZE_KEY = "arch.prefs.size";
+const DEFAULT_SIZE = { w: 820, h: 560 };
+const MIN_SIZE = { w: 600, h: 400 };
+const VIEWPORT_MARGIN = 32;
+
+function clampSize(w: number, h: number) {
+  return {
+    w: Math.max(MIN_SIZE.w, Math.min(w, window.innerWidth - VIEWPORT_MARGIN)),
+    h: Math.max(MIN_SIZE.h, Math.min(h, window.innerHeight - VIEWPORT_MARGIN)),
+  };
+}
+
+function storedSize() {
+  try {
+    const { w, h } = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null") ?? DEFAULT_SIZE;
+    return clampSize(Number(w) || DEFAULT_SIZE.w, Number(h) || DEFAULT_SIZE.h);
+  } catch {
+    return clampSize(DEFAULT_SIZE.w, DEFAULT_SIZE.h);
+  }
+}
+
 export function Preferences({
   onClose,
   onCloseProject,
@@ -105,6 +127,36 @@ export function Preferences({
   const [mode, setMode] = useState<ThemeMode>(getMode());
   const [accent, setAccent] = useState<string>(getAccent());
   const [picker, setPicker] = useState<{ x: number; y: number } | null>(null);
+  const [size, setSize] = useState(storedSize);
+
+  // Drag the corner to resize. The window stays centered, so it grows on both
+  // sides: twice the pointer's travel keeps the corner under the pointer.
+  function startResize(e: ReactPointerEvent<HTMLDivElement>) {
+    const start = { x: e.clientX, y: e.clientY, ...size };
+    let latest = size;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const target = e.currentTarget;
+    const move = (ev: PointerEvent) => {
+      latest = clampSize(start.w + (ev.clientX - start.x) * 2,
+                         start.h + (ev.clientY - start.y) * 2);
+      setSize(latest);
+    };
+    const stop = () => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", stop);
+      target.removeEventListener("pointercancel", stop);
+      const value = JSON.stringify(latest);
+      try {
+        localStorage.setItem(SIZE_KEY, value);
+      } catch {
+        /* quota / storage disabled — the backend store still has it */
+      }
+      persistKey(SIZE_KEY, value);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", stop);
+    target.addEventListener("pointercancel", stop);
+  }
   const rainbowRef = useRef<HTMLButtonElement>(null);
   const iconLabels = useSetting(getIconLabels);
   const fileExplorer = useSetting(getFileExplorer);
@@ -130,7 +182,8 @@ export function Preferences({
 
   return (
     <div className="modal-overlay" onMouseDown={onClose}>
-      <div className="modal prefs" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="modal prefs" style={{ width: size.w, height: size.h }}
+           onMouseDown={(e) => e.stopPropagation()}>
         <div className="prefs-sidebar">
           <div className="prefs-title">Preferences</div>
           {CATEGORIES.map((c) => (
@@ -343,6 +396,8 @@ export function Preferences({
             </div>
           )}
         </div>
+
+        <div className="prefs-resize" title="Drag to resize" onPointerDown={startResize} />
 
         {/* Rendered inside .prefs so its clicks don't bubble to the overlay
             (whose onMouseDown would otherwise close the whole dialog). */}

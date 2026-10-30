@@ -3045,9 +3045,20 @@ button.update-pill:hover {
 
 /* ---------- Preferences (split-column) ---------- */
 .prefs {
-  width: 680px;
-  height: 460px;
+  position: relative;
   flex-direction: row;
+}
+.prefs-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(135deg, transparent 55%, var(--border) 55%, var(--border) 65%,
+                              transparent 65%, transparent 75%, var(--border) 75%,
+                              var(--border) 85%, transparent 85%);
 }
 .prefs-sidebar {
   flex: 0 0 184px;
@@ -5099,9 +5110,9 @@ button.update-pill:hover {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 .ips-item-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .ips-editor {
   flex: 1;

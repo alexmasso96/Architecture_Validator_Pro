@@ -1,0 +1,42 @@
+# Copy to .github/workflows/. `build-firmware` stands in for your own build job,
+# and the runner needs the arch-validator CLI on its PATH.
+name: Architecture validation
+
+on:
+  push:
+  schedule:
+    - cron: '0 19 * * *'    # nightly, on the default branch's latest commit
+
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
+      - run: python Resources/VCU_TestProject/pipeline/build_firmware.py
+      - run: python Resources/VCU_TestProject/pipeline/make_workbook.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            Resources/VCU_TestProject/pipeline/build/
+            Resources/VCU_TestProject/pipeline/interfaces.xlsx
+
+  architecture-validation:
+    needs: build-firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: Resources/VCU_TestProject/pipeline/
+      - run: arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
+      - uses: actions/upload-artifact@v4
+        if: always()        # keep the report when the validation fails
+        with:
+          name: architecture-validation
+          path: Resources/VCU_TestProject/pipeline/results/

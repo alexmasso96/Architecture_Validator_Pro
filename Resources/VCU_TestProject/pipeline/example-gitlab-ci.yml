@@ -1,0 +1,27 @@
+# Add these to your .gitlab-ci.yml. `build_firmware` stands in for your own build
+# job, and the runner needs the arch-validator CLI on its PATH.
+stages:
+  - build
+  - validate
+
+build_firmware:
+  stage: build
+  script:
+    - pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
+    - python Resources/VCU_TestProject/pipeline/build_firmware.py
+    - python Resources/VCU_TestProject/pipeline/make_workbook.py
+  artifacts:
+    paths:
+      - Resources/VCU_TestProject/pipeline/build/
+      - Resources/VCU_TestProject/pipeline/interfaces.xlsx
+
+architecture_validation:
+  stage: validate
+  needs: [build_firmware]
+  script:
+    - arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
+  artifacts:
+    when: always          # keep the report when the validation fails
+    paths:
+      - Resources/VCU_TestProject/pipeline/results/
+    expire_in: 1 month

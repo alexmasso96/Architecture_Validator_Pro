@@ -1,11 +1,11 @@
 """Generate the architecture workbook the CLI reads, from the VCU test corpus.
 
 Stands in for the step of a real pipeline that exports the architecture. Writes
-Resources/VCU_TestProject/pipeline/interfaces.xlsx (git-ignored): one sheet per
-architecture model plus the main functions sheet, keeping only ports the corpus
-really calls, so Resources/VCU_TestProject/pipeline/validation.cfg passes.
+interfaces.xlsx next to this file: one sheet per architecture model plus the
+main functions sheet, keeping only ports the firmware really calls, so
+validation.cfg passes.
 
-    python scripts/make_vcu_workbook.py
+    python make_workbook.py
 """
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from pathlib import Path
 
 import openpyxl
 
-ROOT = Path(__file__).resolve().parent.parent / "Resources" / "VCU_TestProject"
-PORTS = ROOT / "releases" / "R5.0" / "architecture_ports.csv"
-OUTPUT = ROOT / "pipeline" / "interfaces.xlsx"
+HERE = Path(__file__).resolve().parent
+PORTS = HERE.parent / "releases" / "R5.0" / "architecture_ports.csv"
+OUTPUT = HERE / "interfaces.xlsx"
 
 COLUMNS = ["Port Name", "Operations", "Direction", "Return Type"]
 MAIN_FUNCTIONS = ("Vcu_InitAll", "Vcu_Cyclic10ms")

@@ -46,7 +46,7 @@ Once a project is open, switch views from the **segmented control** in the title
 - **Workspace** — the architecture-validation matrix (where most work happens)
 - **Test Design** · **AI Generation** · **AI Chat** · **Code Map** · **Test Injection** · **Change Log**
 
-The title bar also has toolbar icons for **Import** and **Columns**, a **Save** button, and a ⚙ gear that opens **Preferences** (Appearance, AI Settings, Paths, **Tutorials**, Updates). The **Tutorials** section has an interactive walkthrough of every view — a good first stop.
+The title bar also has toolbar icons for **Import** and **Columns**, a **Save** button, and a ⚙ gear that opens **Preferences** (Appearance, AI Settings, Paths, **Tutorials**, Updates). The **Tutorials** section has an interactive walkthrough of every view — a good first stop. To make the Preferences window bigger, drag its bottom-right corner; it remembers the size.
 
 ## What you'll do next
 

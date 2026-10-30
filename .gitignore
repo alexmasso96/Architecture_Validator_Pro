@@ -56,7 +56,7 @@ coverage.xml
 # Local-only real test data (not for distribution)
 ForTesting/
 
-# Pipeline CLI run over the VCU corpus: generated input and results
+# Pipeline demo: generated workbook and results (build/ is ignored above)
 Resources/VCU_TestProject/pipeline/interfaces.xlsx
 Resources/VCU_TestProject/pipeline/results/
 

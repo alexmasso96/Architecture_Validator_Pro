@@ -3,8 +3,8 @@ name: Build Desktop App (pywebview)
 # Single pipeline for the Phase 3 desktop shell (ArchitectureValidatorDesktop.spec):
 # React SPA + FastAPI worker inside a native pywebview window.
 #
-#   test      → logic-layer pytest suite + a pipeline CLI run over the VCU
-#               corpus (Ubuntu; also the nightly run).
+#   test      → logic-layer pytest suite + a pipeline CLI run over the compiled
+#               VCU firmware (Ubuntu).
 #   build     → matrix over windows/macos/linux. PyInstaller is not a
 #               cross-compiler, so each OS builds its own artifact; the matrix
 #               keeps the three legs in ONE job definition (no copy-paste) while
@@ -85,9 +85,22 @@ jobs:
       - name: Run test suite
         run: pytest Tests/ -q
 
-      - name: Run the pipeline CLI on the VCU test project
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ''
+
+      - name: Build and install Rust ELF Parser extension
         run: |
-          python scripts/make_vcu_workbook.py
+          python -m pip install maturin
+          maturin build --release --manifest-path src/native/parser_rust/Cargo.toml --out target/wheels --compatibility linux
+          pip install --no-index --find-links target/wheels rust_elf_parser
+
+      - name: Compile the VCU firmware and run the pipeline CLI on it
+        run: |
+          pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
+          python Resources/VCU_TestProject/pipeline/build_firmware.py
+          python Resources/VCU_TestProject/pipeline/make_workbook.py
           python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
 
       # A failed run is when the report matters most.
@@ -100,8 +113,8 @@ jobs:
           if-no-files-found: ignore
 
   build:
-    # Skip the heavy 3-OS build on the nightly cron — that run only needs `test`.
-    if: github.event_name != 'schedule'
+    # Also runs on the nightly cron: every OS rebuilds the CLI and validates
+    # freshly compiled firmware at the default branch's latest commit.
     strategy:
       fail-fast: false
       matrix:
@@ -179,7 +192,9 @@ jobs:
         shell: bash
         run: |
           pyinstaller ArchitectureValidatorCLI.spec --noconfirm
-          python scripts/make_vcu_workbook.py
+          pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
+          python Resources/VCU_TestProject/pipeline/build_firmware.py
+          python Resources/VCU_TestProject/pipeline/make_workbook.py
           dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
           python -c "import platform, shutil; shutil.make_archive(f'architecture-validator-cli-{platform.system().lower()}-{platform.machine().lower()}', 'zip', 'dist', 'arch-validator')"
 
