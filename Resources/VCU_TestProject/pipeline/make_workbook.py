@@ -3,7 +3,7 @@
 Stands in for the step of a real pipeline that exports the architecture. Writes
 interfaces.xlsx next to this file: one sheet per architecture model plus the
 main functions sheet, keeping only ports the firmware really calls, so
-validation.cfg passes.
+both validation-*.cfg files pass.
 
     python make_workbook.py
 """
