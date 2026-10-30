@@ -56,6 +56,10 @@ coverage.xml
 # Local-only real test data (not for distribution)
 ForTesting/
 
+# Pipeline CLI run over the VCU corpus: generated input and results
+Resources/VCU_TestProject/pipeline/interfaces.xlsx
+Resources/VCU_TestProject/pipeline/results/
+
 # Smoke tests: resources not yet committed — ignore until reviewed
 Tests/smoke/
 

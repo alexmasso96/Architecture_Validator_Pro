@@ -467,8 +467,8 @@ def compute_update_diff(existing_rows: List[dict], imported: List[dict],
 
 
 # ---------------------------------------------------------------------------
-# Built-in profiles — the legacy InterfaceExport flows expressed as rule pipelines.
-# Read-only in the UI; parity with Logic_InterfaceExport_Import is the engine's
+# Built-in profiles — the legacy interface export flows expressed as rule pipelines.
+# Read-only in the UI; parity with Logic_Interface_Export is the engine's
 # acceptance test. The legacy import path itself stays untouched (#8).
 # ---------------------------------------------------------------------------
 

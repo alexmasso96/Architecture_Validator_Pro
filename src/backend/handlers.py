@@ -447,12 +447,21 @@ def _log_release_history(db, state: AppState, release_id: int, desc: str,
 # ----------------------------------------------------------------------
 def _make_import_source(state: AppState):
     def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
-        from Application_Logic.Logic_Source_Store import FilesystemSourceProvider
+        from Application_Logic.Logic_Source_Store import (
+            FilesystemSourceProvider, iter_source_roots,
+        )
         state.require_edit()
         release_id = params.get("release_id")
         source_dir = params.get("source_dir")
-        if release_id is None or not source_dir:
+        # ``source_roots`` = explicitly listed folders (the CLI): several roots,
+        # no built-in skip list, and a file count per root in the result.
+        source_roots = params.get("source_roots")
+        if release_id is None or not (source_dir or source_roots):
             raise ProjectError("release_id and source_dir are required.")
+        root_counts: dict = {}
+        files = (iter_source_roots(source_roots, params.get("source_exclude") or (),
+                                   root_counts)
+                 if source_roots else FilesystemSourceProvider(source_dir).iter_text())
 
         with _worker_db(state) as wdb:
             progress("Scanning source folder…")
@@ -461,7 +470,7 @@ def _make_import_source(state: AppState):
             # so the bar stays indeterminate).
             count = wdb.save_release_source_files(
                 release_id,
-                FilesystemSourceProvider(source_dir).iter_text(),
+                files,
                 progress=lambda rel_path, idx, _total: progress(
                     f"Importing {rel_path}"),
             )
@@ -479,7 +488,7 @@ def _make_import_source(state: AppState):
         # ✓ Source badge + the workspace refresh without a manual reload.
         state.bus.publish("db-changed",
                           {"reason": "source-imported", "release_id": release_id})
-        return {"files": count, "release_id": release_id}
+        return {"files": count, "release_id": release_id, "roots": root_counts}
     return handler
 
 
@@ -629,7 +638,9 @@ def _make_run_calltree_tests(state: AppState):
             # they reach each port's function (the UI asks before running).
             mains = ct.parse_mains(wdb.get_meta(ct.MAINS_KEY, "{}"))
             unset = [names.get(mid, str(mid)) for mid in model_ids if not mains.get(mid)]
-            if unset:
+            # ``allow_missing_mains`` (the CLI): keep testing the other models;
+            # a model without a main function reports No Data on its rows.
+            if unset and not params.get("allow_missing_mains"):
                 raise ProjectError("Set the main function of "
                                    + ", ".join(unset) + " before running the test.")
             for i, mid in enumerate(model_ids, 1):
@@ -640,7 +651,8 @@ def _make_run_calltree_tests(state: AppState):
                 rows = wdb.get_model_rows(mid)
                 counts = ct.run_on_rows(rows, col_name, binding, code_map, object_pairs,
                                         port_state_col=port_state_col,
-                                        tested_at=tested_at, mains=mains[mid])
+                                        tested_at=tested_at, mains=mains.get(mid, []),
+                                        min_match_score=params.get("min_match_score"))
                 wdb.save_model_rows(mid, rows)
                 summary.append({"model_id": mid, "model": names.get(mid, ""),
                                 "counts": counts, "has_code_map": bool(code_map)})

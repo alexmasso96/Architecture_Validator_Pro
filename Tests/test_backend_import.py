@@ -90,9 +90,9 @@ def test_analyze_excel(client_with_project):
 def test_analyze_interface_export_csv(client_with_project):
     c, d = client_with_project
     csv = os.path.join(d, "export.csv")
-    # InterfaceExport export: a '::'-delimited path column (>=3 segments) + a port column.
+    # Interface export: a '::'-delimited path column (>=3 segments) + a port column.
     with open(csv, "w") as f:
-        # InterfaceExport path: model name is the 3rd segment; needs >=4 segments.
+        # interface export path: model name is the 3rd segment; needs >=4 segments.
         f.write("Path,Port,Required Interface\n")
         f.write("Root::P10_SW_Arch_Public::EngineCtl::op1,p_speed,IFace_A\n")
         f.write("Root::P10_SW_Arch_Public::EngineCtl::op2,p_torque,IFace_B\n")
@@ -155,7 +155,7 @@ def test_read_missing_file_404(client_with_project):
 
 
 # ---------------------------------------------------------------------------
-# InterfaceExport multi-model split
+# interface export multi-model split
 # ---------------------------------------------------------------------------
 def _write_interface_export_csv(path):
     with open(path, "w") as f:
@@ -177,7 +177,7 @@ def test_interface_export_split_creates_models(client_with_project):
         "path_col": "Path",
         "required_col": "Required Interface",
     }
-    r = c.post("/api/import/interface_export", json=body, headers=AUTH).json()
+    r = c.post("/api/import/interface-export", json=body, headers=AUTH).json()
     assert r["total_models"] == 2
     names = {m["name"]: m for m in r["models"]}
     assert names["EngineCtl"]["created"] is True and names["EngineCtl"]["added"] == 2
@@ -207,7 +207,7 @@ def test_interface_export_ops_expand_into_rows(client_with_project):
         "ops_col": "Operations",
         "required_col": "Required Interface",
     }
-    r = c.post("/api/import/interface_export", json=body, headers=AUTH).json()
+    r = c.post("/api/import/interface-export", json=body, headers=AUTH).json()
     assert r["total_added"] == 2
     eng = next(m for m in c.get("/api/models", headers=AUTH).json()["models"]
                if m["name"] == "EngineCtl")
@@ -222,8 +222,8 @@ def test_interface_export_append_to_existing_model(client_with_project):
     _write_interface_export_csv(csv)
     body = {"file_path": csv, "col_mapping": {"Port": "Input Port"},
             "path_col": "Path", "required_col": "Required Interface"}
-    c.post("/api/import/interface_export", json=body, headers=AUTH)
-    r2 = c.post("/api/import/interface_export", json=body, headers=AUTH).json()
+    c.post("/api/import/interface-export", json=body, headers=AUTH)
+    r2 = c.post("/api/import/interface-export", json=body, headers=AUTH).json()
     eng = next(m for m in r2["models"] if m["name"] == "EngineCtl")
     assert eng["created"] is False
     eng_model = next(m for m in c.get("/api/models", headers=AUTH).json()["models"]
@@ -243,7 +243,7 @@ def test_interface_export_view_only_blocked():
         app = create_app(token=TOKEN)
         with TestClient(app) as c:
             c.post("/api/project/open", json={"path": path, "mode": "view"}, headers=AUTH)
-            r = c.post("/api/import/interface_export",
+            r = c.post("/api/import/interface-export",
                        json={"file_path": csv, "col_mapping": {"Port": "Input Port"},
                              "path_col": "Path"}, headers=AUTH)
             assert r.status_code == 409

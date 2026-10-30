@@ -60,7 +60,7 @@ The UI is organised as a seven-view workbench:
 │  Pure logic layer   (src/Application_Logic/Logic_*)               │
 │  ProjectDatabase · ReleaseManager · SymbolMatcher · TestCase      │
 │  Design · History · AI providers/context/tools · Code index/map · │
-│  Code injection · InterfaceExport import · Source store · Crypto · Lock   │
+│  Code injection · Interface import · Source store · Crypto · Lock  │
 └───────────────┬───────────────────────────────────────────────────┘
                 │
        ┌────────┴─────────┐
@@ -143,8 +143,8 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 | `codemap.py` | `/api/codemap` (+ `function/{name}`, `graph`). Graph edges carry `verified` when the map was built against a `.o` dataset. |
 | `changelog.py` | `/api/changelog` (+ `diff`) — release source diffs. |
 | `ai.py` | `/api/ai/{providers,prompts,mindmap,chat,parse-hlt}` + Copilot device-flow login. |
-| `imports.py` | `/api/import/{analyze,read,interface_export}` — the legacy spreadsheet / InterfaceExport import (unchanged). |
-| `table_import.py` | Import Profiles: `/api/import/sample` (one-read in-memory sample sessions), `preview` + `preview/all` (pure in-memory), `profiles` CRUD (app-data JSON + built-in InterfaceExport profiles), and the two-step `diff` → `commit` import. |
+| `imports.py` | `/api/import/{analyze,read,interface-export}` — the legacy spreadsheet / interface export import (unchanged). |
+| `table_import.py` | Import Profiles: `/api/import/sample` (one-read in-memory sample sessions), `preview` + `preview/all` (pure in-memory), `profiles` CRUD (app-data JSON + built-in interface export profiles), and the two-step `diff` → `commit` import. |
 | `injection.py` | `/api/injection/*` — test projects, hooks (injections), files, build, export. |
 | `testdesign.py` | Test Case Design templates + preview + export. |
 | `fs.py` | Native folder/file picker bridge. |
@@ -166,7 +166,7 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 - `Logic_Release_Manager.py` — `ReleaseManager`: software releases + baselines; ELF shared by `elf_hash`; lazy loading of the active release only.
 - `Logic_Symbol_Matcher.py` — `rapidfuzz` fuzzy matching over DB-loaded name strings (`find_best_match`, `find_top_matches`, threshold). The pool includes functions that exist only as inline expansions (no symbol, no address).
 - `Logic_Release_Results.py` — per-release validation result derivation (Pass / Block / No Result / Not Run).
-- `Logic_CallTree_Test.py` — call-tree Test columns: bindings (`{column: {release_id, match_col, strict}}` in project meta `calltree_test_columns`, reconciled on every layout save so renames are followed and dangling bindings rejected), the merged caller index (code-map edges ∪ the release's `.o` relocation/inline edges), the verdict rules (Passed / Entry point / Failed / No Match / No Data / No Result), and manual overrides that survive re-runs. Results are recorded in the row cells with their evidence and the code-map `built_at` stamp (stale detection). Run by the `run_calltree_tests` job; per-model status at `GET /api/models/{id}/calltree-tests`.
+- `Logic_CallTree_Test.py` — call-tree Test columns: bindings (`{column: {release_id, match_col, strict}}` in project meta `calltree_test_columns`, reconciled on every layout save so renames are followed and dangling bindings rejected), the merged caller index (code-map edges ∪ the release's `.o` relocation/inline edges), the verdict rules (Passed / Entry point / Failed / Not Matched / No Data / No Result), and manual overrides that survive re-runs. Results are recorded in the row cells with their evidence and the code-map `built_at` stamp (stale detection). Run by the `run_calltree_tests` job; per-model status at `GET /api/models/{id}/calltree-tests`.
 - `Logic_Release_Source_Picker.py` — shared release-dropdown helper for the source pickers (every "pick a folder" became a release dropdown).
 
 **Source, code map, change log**
@@ -174,8 +174,8 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 - `Logic_Code_Index.py` — stdlib-only C indexer: `build_index(path) -> CodeIndex` (functions / globals / call_graph / file_functions).
 - `Logic_Code_Map.py` — `build_code_map(parser, code_index)` joins DWARF facts to the C call graph **by function name** (with C++ demangling) into a `CodeMap`. Given a release's `.o` dataset (`object_edges`), it labels each call edge **verified** (compiler-confirmed) or source-only — presence confirms an edge, absence never removes one.
 - `Logic_Change_Log_Tab.py` — release-to-release source diff logic.
-- `Logic_InterfaceExport_Import.py` — InterfaceExport path-based export detection and parsing (the legacy import path).
-- `Logic_Table_Import.py` — the Import Profiles engine: CSV/Excel reader (delimiter sniffing, sheet/header-row selection, merged-cell fill), the declarative rule pipeline (`filter`, `derive`, `split_cell`, `expand`, `partition`, `clean`), column mapping with import provenance, and `compute_update_diff` for match-and-update imports (composite keys; locked cells are flagged, never overwritten). The built-in InterfaceExport profiles reproduce `Logic_InterfaceExport_Import` exactly (regression-tested).
+- `Logic_Interface_Export.py` — Path-based interface export detection and parsing (the legacy import path).
+- `Logic_Table_Import.py` — the Import Profiles engine: CSV/Excel reader (delimiter sniffing, sheet/header-row selection, merged-cell fill), the declarative rule pipeline (`filter`, `derive`, `split_cell`, `expand`, `partition`, `clean`), column mapping with import provenance, and `compute_update_diff` for match-and-update imports (composite keys; locked cells are flagged, never overwritten). The built-in interface export profiles reproduce `Logic_Interface_Export` exactly (regression-tested).
 
 **Test design, injection, history**
 - `Logic_TestCase_Design.py` — the Markdown template language (`[Column]` tokens + `#if` conditionals), live preview, operation grouping, and bulk/individual `.md` export.

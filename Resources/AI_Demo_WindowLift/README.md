@@ -23,7 +23,7 @@ without needing proprietary C code. It's also the regression fixture behind
 | `src_v1/` | Version 1 C source (multi-file): `wlc_main`, `wlc_motor`, `wlc_sensor`, `wlc_types.h`. Functions, static (file-local) functions, globals, structs, a call graph with a hub (`WLC_UpdateStateMachine`), and `REQ-WLC-xxx` traces in comments. |
 | `src_v2/` | Version 2: **added** file/func (`wlc_safety.c` / `WLC_AutoReverse`), **modified** func (`WLC_DetectPinch` now calibration-driven with hysteresis), **deleted** func (`WLC_LegacyInit`), **modified** struct (`WLC_State_t.reverse_count`). Drives diffs / baselines / change-log. |
 | `wlc_v1.elf`, `wlc_v2.elf` | ARM ELF (with DWARF) built from each version. Symbols, sizes, params, structs, globals all populate. Function names match the architecture-import operations. |
-| `architecture_ports.csv` / `.xlsx` | InterfaceExport-style architecture import; the `Operations` column holds real WLC function names so symbol matching succeeds. |
+| `architecture_ports.csv` / `.xlsx` | Path-based architecture import; the `Operations` column holds real WLC function names so symbol matching succeeds. |
 | `requirements.csv` / `.xlsx` | Requirements (`REQ-WLC-001 …`) for the Advanced AI Chat "Import Requirements" flow and traceability. |
 | `Test Case Design/WindowLift_Test_Case_Design.md` | High-level test cases (TC.001…TC.005) in the app's HLT format, for the AI Test Generation tab. |
 | `build_elf.sh` | Rebuilds the ELFs from source. |

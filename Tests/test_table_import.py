@@ -1,6 +1,6 @@
 """
 #8 Import Profiles engine — reader, rule pipeline, mapping, update diff, and
-parity of the built-in InterfaceExport profile with the legacy importer.
+parity of the built-in interface export profile with the legacy importer.
 """
 import os
 import sys
@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.abspath("src"))
 
 from Application_Logic import Logic_Table_Import as ti
-from Application_Logic import Logic_InterfaceExport_Import as legacy
+from Application_Logic import Logic_Interface_Export as legacy
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def test_update_diff_composite_key_and_conflicts_and_orphans():
 
 
 # ---------------------------------------------------------------------------
-# Acceptance: the built-in InterfaceExport profile reproduces the legacy importer.
+# Acceptance: the built-in interface export profile reproduces the legacy importer.
 # ---------------------------------------------------------------------------
 def test_interface_export_profile_parity_with_legacy_importer():
     columns = ["Port", "Path", "Operations", "Required Interface"]
@@ -281,7 +281,7 @@ def client(tmp_path, monkeypatch):
 
 
 def _make_sample_csv(tmp_path) -> str:
-    p = tmp_path / "INTERFACE_EXPORT_export.csv"
+    p = tmp_path / "INTERFACE_EXPORT_sample.csv"
     rows = ["Port,Path,Operations,Required Interface"]
     for i in range(30):
         model = "ModelA" if i % 2 == 0 else "ModelB"
@@ -360,8 +360,8 @@ def test_profiles_crud_and_builtins(client):
     r = client.get("/api/import/profiles", headers=AUTH)
     profiles = r.json()["profiles"]
     builtins = [p for p in profiles if p["builtin"]]
-    assert {p["id"] for p in builtins} == {"builtin-interface_export-required",
-                                          "builtin-interface_export-all-ports"}
+    assert {p["id"] for p in builtins} == {"builtin-interface-export-required",
+                                          "builtin-interface-export-all-ports"}
 
     # Create → list → update → delete.
     body = {"name": "DNG TC IDs", "mode": "update",
@@ -401,10 +401,10 @@ def test_profiles_reject_invalid(client):
                     headers=AUTH)
     assert r.status_code == 400
     r = client.post("/api/import/profiles",
-                    json={"id": "builtin-interface_export-required", "name": "hack"},
+                    json={"id": "builtin-interface-export-required", "name": "hack"},
                     headers=AUTH)
     assert r.status_code == 400
-    assert client.delete("/api/import/profiles/builtin-interface_export-required",
+    assert client.delete("/api/import/profiles/builtin-interface-export-required",
                          headers=AUTH).status_code == 400
     assert client.delete("/api/import/profiles/nope",
                          headers=AUTH).status_code == 404
@@ -427,7 +427,7 @@ def test_append_diff_and_commit_end_to_end(client, tmp_path):
     body = {"path": path, "rules": rules,
             "mapping": {"Port": "Port Name", "Operations": "Function",
                         "Required Interface": "Interface"},
-            "mode": "append", "profile_name": "InterfaceExport test"}
+            "mode": "append", "profile_name": "Interface export test"}
 
     d = client.post("/api/import/diff", json=body, headers=AUTH)
     assert d.status_code == 200, d.text

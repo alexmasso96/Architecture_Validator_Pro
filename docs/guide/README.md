@@ -14,7 +14,7 @@ If you're new, read it top to bottom. If you're looking for one thing, jump stra
 |---|---------|---------------|
 | 1 | [Getting Started](01-getting-started.md) | Installing, launching, the Start screen, and how the app is laid out |
 | 2 | [The Workspace](02-validation-workspace.md) | The architecture matrix, models, columns, fuzzy symbol matching, and the column customizer |
-| 3 | [Importing Architecture](03-importing-architecture.md) | Bringing ports in from Excel, CSV, and InterfaceExport exports |
+| 3 | [Importing Architecture](03-importing-architecture.md) | Bringing ports in from Excel, CSV, and architecture interface exports |
 | 4 | [Releases & Baselines](04-releases-and-baselines.md) | Managing software releases (one or several symbol files each, e.g. FBL + APP), baselines, and change detection across releases |
 | 5 | [Test Design](05-test-case-design.md) | The Markdown template language, live preview, grouping, and exports |
 | 6 | [Collaboration & Safety](06-collaboration-and-safety.md) | Exclusive-edit locking, view-only mode, master-password encryption, and change history |
@@ -23,6 +23,7 @@ If you're new, read it top to bottom. If you're looking for one thing, jump stra
 | 9 | [Code Map](09-code-map.md) | The visual call-graph + read-only IDE joining the ELF to your C source |
 | 10 | [Change Log](10-change-log.md) | Side-by-side release diffs and the AI change-log summary |
 | 11 | [Test Injection](11-test-injection.md) | Splicing test code into production source without editing the originals |
+| 12 | [Pipeline CLI](12-pipeline-cli.md) | Running the full validation in a GitLab or GitHub build pipeline |
 
 ---
 

@@ -1,5 +1,5 @@
 """
-Tests for the InterfaceExport export parser (Logic_InterfaceExport_Import).
+Tests for the Interface export parser (Logic_Interface_Export).
 Pure-logic module: CSV/XLSX reading, path parsing, operation splitting,
 model preview and import-data building. No Qt required.
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.append(os.path.abspath("src"))
 
 import openpyxl
-from Application_Logic import Logic_InterfaceExport_Import as R
+from Application_Logic import Logic_Interface_Export as R
 
 
 P10 = "P10_SW_Arch_Public"
@@ -50,38 +50,38 @@ def _write_xlsx(path):
 # Detection
 # --------------------------------------------------------------------------
 
-def test_detect_interface_export_format_csv():
+def test_detect_interface_export_csv():
     with tempfile.TemporaryDirectory() as tmp:
         p = os.path.join(tmp, "export.csv")
         _write_csv(p)
-        is_rh, col = R.detect_interface_export_format(p)
+        is_rh, col = R.detect_interface_export(p)
         assert is_rh is True
         assert col == "Path"
 
 
-def test_detect_interface_export_format_xlsx():
+def test_detect_interface_export_xlsx():
     with tempfile.TemporaryDirectory() as tmp:
         p = os.path.join(tmp, "export.xlsx")
         _write_xlsx(p)
-        is_rh, col = R.detect_interface_export_format(p)
+        is_rh, col = R.detect_interface_export(p)
         assert is_rh is True
         assert col == "Path"
 
 
-def test_detect_interface_export_format_negative():
+def test_detect_interface_export_negative():
     with tempfile.TemporaryDirectory() as tmp:
         p = os.path.join(tmp, "plain.csv")
         with open(p, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["A", "B"])
             w.writerow(["1", "2"])
-        is_rh, col = R.detect_interface_export_format(p)
+        is_rh, col = R.detect_interface_export(p)
         assert is_rh is False
         assert col is None
 
 
-def test_detect_interface_export_format_missing_file():
-    is_rh, col = R.detect_interface_export_format("/no/such/file.csv")
+def test_detect_interface_export_missing_file():
+    is_rh, col = R.detect_interface_export("/no/such/file.csv")
     assert is_rh is False
     assert col is None
 

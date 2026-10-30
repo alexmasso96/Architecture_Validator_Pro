@@ -33,6 +33,7 @@ For a full, screenshot-by-screenshot walkthrough of every feature, see the **[Us
 - [Code Map](docs/guide/09-code-map.md)
 - [Change Log](docs/guide/10-change-log.md)
 - [Test Injection](docs/guide/11-test-injection.md)
+- [Pipeline CLI](docs/guide/12-pipeline-cli.md)
 
 > 💡 Every feature also has an **interactive in-app walkthrough** — open **Preferences → Tutorials** for a click-through demo of each view.
 
@@ -68,7 +69,7 @@ A **git-style side-by-side diff** between releases (file browser, old/new with s
 Splice extra C code — instrumentation, stubs, a test harness — into your firmware **without ever editing the real source files**. Edits are saved as *hooks* in the project (anchored to the surrounding lines, not brittle line numbers) and applied only to generated copies. Import helper `.c/.h` files alongside, then **export** build-ready code — *Modified files only* or a full *Reconstructed* tree — with your originals left untouched.
 
 ### 📥 Flexible architecture import
-Bring your architecture in from **Excel or CSV**. InterfaceExport path-based exports are detected automatically and routed through a dedicated import flow, and the classic sheet-per-model spreadsheet format is supported too.
+Bring your architecture in from **Excel or CSV**. Path-based interface exports are detected automatically and routed through a dedicated import flow, and the classic sheet-per-model spreadsheet format is supported too.
 
 **Import Profiles** handle every other format without code: build a reusable profile from declarative rules — *filter* rows, *derive* a column from if/else conditions, *split* a cell (e.g. a `::` path), *expand* multi-value cells into rows, *partition* into one model per value, *clean* values (incl. filling merged cells) — then map columns onto the table. A **live preview** runs against a sample file read once into memory and shows what each table column will receive, with per-rule row counts and a *show all rows* view for cross-checking. A profile can **append** rows or **match and update** existing ones by a key (e.g. fill a test-case ID into every function row of an interface). Every import shows a **diff before anything is written**. Profiles are auto-selected by filename pattern (e.g. `INTERFACE_EXPORT_*.xls*`).
 

@@ -96,7 +96,7 @@ export function ImportWizard({
       startReleaseImport(path);
       return;
     }
-    // tabular → analyze (detects InterfaceExport multi-model), then straight to mapping.
+    // tabular → analyze (detects a multi-model interface export), then straight to mapping.
     setStep({ k: "analyzing" });
     try {
       const a = await api.post<AnalyzeResult>("/import/analyze", { file_path: path });
@@ -166,7 +166,7 @@ export function ImportWizard({
       const r = await api.post<ReadResult>("/import/read", { file_path: file });
       setRead(r);
       // auto-map: exact name match; "Port Name"-like → Port Search col;
-      // InterfaceExport "Operations" → the Function Search col (operations are functions).
+      // Interface export "Operations" → the Function Search col (operations are functions).
       const aPathCol = a?.path_col ?? null;
       const opsCol = a?.ops_col ?? null;
       const m: Record<string, string> = {};
@@ -202,7 +202,7 @@ export function ImportWizard({
     }
   }
 
-  // ---- mapping → import (InterfaceExport multi-model split, or plain single-model) ----
+  // ---- mapping → import (interface export multi-model split, or plain single-model) ----
   async function runPortImport(file: string) {
     if (!read) return;
     const used = Object.entries(mapping).filter(([, d]) => d && d !== DONT);
@@ -214,7 +214,7 @@ export function ImportWizard({
     try {
       // Auto-create any columns the user mapped to "➕ Create new column".
       // New columns are Static Text named after the source (uniquified), appended
-      // to the layout (PUT /columns) so the bulk/interface_export insert can target them.
+      // to the layout (PUT /columns) so the bulk or interface export insert can target them.
       const existing = new Set(columns.map((c) => c.name));
       const newCols: ColumnSpec[] = [];
       const effective: Record<string, string> = {};
@@ -241,7 +241,7 @@ export function ImportWizard({
         setStep({ k: "running", msg: "Splitting packages into models…" });
         const colMapping = Object.fromEntries(usedEff);
         const r = await api.post<{ total_models: number; total_added: number; model_ids: number[] }>(
-          "/import/interface_export",
+          "/import/interface-export",
           {
             file_path: file,
             col_mapping: colMapping,
@@ -366,7 +366,7 @@ export function ImportWizard({
               <p className="iw-lead">
                 {isInterfaceExport ? (
                   <>
-                    InterfaceExport export — rows split into{" "}
+                    Interface export — rows split into{" "}
                     <b>{analysis?.models?.length ?? "?"} models</b> by package.
                   </>
                 ) : (

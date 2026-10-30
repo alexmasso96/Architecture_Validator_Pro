@@ -1,6 +1,7 @@
 stages:
   - test
   - coverage
+  - validate
 
 # Default docker image to run the jobs
 image: python:3.14
@@ -35,6 +36,28 @@ test_coverage:
     - coverage run -m pytest Tests/
     - coverage report
   coverage: '/TOTAL.*\s+(\d+)\%/'
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
+# Pipeline CLI run over the VCU corpus (the app's own nightly check when a
+# schedule is set up). The job's exit code is the validation result; a failed
+# run still uploads its report.
+cli_validation:
+  stage: validate
+  needs: []
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -r requirements.txt
+  script:
+    - python scripts/make_vcu_workbook.py
+    - python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
+  artifacts:
+    when: always
+    paths:
+      - Resources/VCU_TestProject/pipeline/results/
+    expire_in: 1 week
   rules:
     - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

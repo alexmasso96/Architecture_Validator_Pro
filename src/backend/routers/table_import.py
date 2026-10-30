@@ -9,7 +9,7 @@ Sessions are capped, TTL-evicted, and never persisted.
 Profiles: JSON in the per-user app-data directory (same pattern as prefs —
 they describe org file formats, not project data, so they are global across
 projects and exportable for sharing). Built-in read-only profiles reproduce
-the legacy InterfaceExport flows through the new engine.
+the legacy interface export flows through the new engine.
 """
 from __future__ import annotations
 
@@ -430,12 +430,12 @@ def _write_profiles(profiles: list[dict]) -> None:
 
 
 def _builtin_profiles() -> list[dict]:
-    """The legacy InterfaceExport flows as read-only profiles (standard export
+    """The legacy interface export flows as read-only profiles (standard export
     headers; the wizard re-binds detected column names when they differ)."""
     return [
         {
-            "id": "builtin-interface_export-required",
-            "name": "InterfaceExport ports (required interface)",
+            "id": "builtin-interface-export-required",
+            "name": "Interface export ports (required interface)",
             "builtin": True,
             "filename_pattern": "INTERFACE_EXPORT_*.xls*",
             "mode": "append",
@@ -445,8 +445,8 @@ def _builtin_profiles() -> list[dict]:
             "mapping": {}, "locked_targets": [], "key_columns": [],
         },
         {
-            "id": "builtin-interface_export-all-ports",
-            "name": "InterfaceExport ports (all P10 rows)",
+            "id": "builtin-interface-export-all-ports",
+            "name": "Interface export ports (all P10 rows)",
             "builtin": True,
             "filename_pattern": "",
             "mode": "append",

@@ -1,7 +1,7 @@
 """
-InterfaceExport Export Parser
-======================
-Parses InterfaceExport-exported CSV/XLSX port files for architecture import.
+Architecture Interface Export Parser
+====================================
+Parses exported CSV/XLSX port files for architecture import.
 
 Path pattern: Components::P_SW_Components::{Model}::P10_SW_Arch_Public::...
 Only rows containing P10_SW_Arch_Public are imported.
@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 # Detection
 # ---------------------------------------------------------------------------
 
-def detect_interface_export_format(file_path: str) -> Tuple[bool, Optional[str]]:
+def detect_interface_export(file_path: str) -> Tuple[bool, Optional[str]]:
     """
     Returns (is_interface_export, path_column_name).
     Heuristic: look for a column whose values contain '::'-delimited paths
@@ -84,7 +84,7 @@ def _read_raw(file_path: str, max_rows: int = None) -> Tuple[List[List[str]], Li
 # ---------------------------------------------------------------------------
 
 def extract_model_name(path: str) -> Optional[str]:
-    """Returns the 3rd segment of the InterfaceExport path (index 2)."""
+    """Returns the 3rd segment of the interface export path (index 2)."""
     parts = path.split("::")
     return parts[2] if len(parts) >= 3 else None
 
@@ -115,7 +115,7 @@ def detect_required_interface_col(
 
 def split_operations(ops_str: str) -> List[str]:
     """
-    Splits a InterfaceExport Operations cell into individual operation names.
+    Splits a interface export Operations cell into individual operation names.
     Cells use comma+newline (or just newline) as separators.
     openpyxl sometimes returns the XML CR entity _x000D_ instead of \r.
     """
@@ -125,7 +125,7 @@ def split_operations(ops_str: str) -> List[str]:
     parts = re.split(r'\r?\n', text)
     result = []
     for part in parts:
-        # Take only the portion before the first comma (trailing comma is a InterfaceExport separator)
+        # Take only the portion before the first comma (trailing comma is a separator in the export)
         cleaned = part.split(',', 1)[0].strip()
         if cleaned:
             result.append(cleaned)

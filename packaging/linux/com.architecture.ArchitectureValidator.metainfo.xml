@@ -4,11 +4,11 @@
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
   <name>Architecture Validator</name>
-  <summary>Validate embedded software architecture against ELF binaries and InterfaceExport models</summary>
+  <summary>Validate embedded software architecture against ELF binaries and architecture models</summary>
   <description>
     <p>
       Architecture Validator checks embedded software architecture models against
-      compiled ELF binaries and IBM InterfaceExport exports. It provides release
+      compiled ELF binaries and architecture interface exports. It provides release
       management, code mapping, change logs, and AI-assisted test design in a
       native desktop window (pywebview) over a FastAPI worker and a React UI.
     </p>

@@ -162,7 +162,7 @@ export function ProfileImportDialog({
         mode="import"
         exts={[".xlsx", ".xls", ".csv"]}
         title="Import table — choose an Excel/CSV file"
-        hint="Pick the exported table (InterfaceExport, DNG, …)"
+        hint="Pick the exported table (interface export, DNG, …)"
         onCancel={onClose}
         onConfirm={onFilePicked}
       />

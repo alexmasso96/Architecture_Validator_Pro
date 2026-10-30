@@ -62,9 +62,9 @@ def test_uncalled_leaf_fails_as_never_called():
     assert "Not called" in r["reason"]
 
 
-def test_missing_function_fails_as_not_found():
+def test_missing_function_is_not_matched():
     r = _verdict("ghost_func")
-    assert r["verdict"] == ct.FAILED
+    assert r["verdict"] == ct.NOT_MATCHED
     assert "not in this release's call tree" in r["reason"]
 
 
@@ -122,8 +122,8 @@ def test_run_on_rows_verdicts_and_evidence():
     counts = ct.run_on_rows(rows, "T", BINDING, CODE_MAP, None,
                             port_state_col="Port State", tested_at="T1")
     texts = [r["T"]["text"] for r in rows]
-    assert texts == [ct.PASSED, ct.FAILED, ct.NO_MATCH, ct.NO_RESULT]
-    assert counts == {ct.PASSED: 1, ct.FAILED: 1, ct.NO_MATCH: 1, ct.NO_RESULT: 1}
+    assert texts == [ct.PASSED, ct.FAILED, ct.NOT_MATCHED, ct.NO_RESULT]
+    assert counts == {ct.PASSED: 1, ct.FAILED: 1, ct.NOT_MATCHED: 1, ct.NO_RESULT: 1}
     first = rows[0]["T"]
     assert first["function"] == "app_run"
     assert first["tested_at"] == "T1"
@@ -466,7 +466,7 @@ def test_called_outside_the_main_tree_fails_and_names_callers():
     assert r["verdict"] == ct.FAILED and "called only by otherAppl" in r["reason"]
     r = ct.evaluate_from_mains("lonely", index, reach)
     assert r["verdict"] == ct.FAILED and "no function calls it" in r["reason"]
-    assert ct.evaluate_from_mains("ghost", index, reach)["verdict"] == ct.FAILED
+    assert ct.evaluate_from_mains("ghost", index, reach)["verdict"] == ct.NOT_MATCHED
     # Several main functions: any of them may reach it.
     assert ct.evaluate_from_mains("foreign", index,
                                   ct.Reach(index, ["modAppl", "otherAppl"]))["verdict"] == ct.PASSED
@@ -486,7 +486,7 @@ def test_run_on_rows_with_mains():
     rows = _rows_for("tested", "foreign", "")
     counts = ct.run_on_rows(rows, "T", b, DEEP, None, port_state_col=None,
                             tested_at="t", mains=["modAppl"])
-    assert counts == {ct.PASSED: 1, ct.FAILED: 1, ct.NO_MATCH: 1}
+    assert counts == {ct.PASSED: 1, ct.FAILED: 1, ct.NOT_MATCHED: 1}
     assert rows[0]["T"]["main_path"][0] == "modAppl" and rows[0]["T"]["mains"] == ["modAppl"]
     assert rows[1]["T"]["main_path"] == []
     # None of the main functions in this release's call tree → No Data.

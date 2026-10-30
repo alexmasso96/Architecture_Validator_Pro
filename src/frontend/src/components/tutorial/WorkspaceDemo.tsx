@@ -1,7 +1,7 @@
 import { TutorialShell, type TutorialStep } from "./TutorialShell";
 
 // Interactive walkthrough of the Workspace — the architecture-validation matrix
-// where InterfaceExport model ports are matched against the firmware's real ELF
+// where architecture model ports are matched against the firmware's real ELF
 // symbols. The mock screen is derived purely from the step index.
 
 type Highlight =
@@ -20,7 +20,7 @@ const STEPS: TutorialStep<Highlight>[] = [
     body: (
       <>
         The Workspace is the <strong>architecture-validation matrix</strong>. Each
-        row is a <em>port</em> from your InterfaceExport model; the columns confirm it
+        row is a <em>port</em> from your architecture model; the columns confirm it
         against the firmware's real ELF symbols. The goal: prove every designed
         interface actually exists in the built software.
       </>

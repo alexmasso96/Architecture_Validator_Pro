@@ -68,7 +68,8 @@ export const TEST_CLASS: Record<string, string> = {
   Passed: "p-green",
   Failed: "p-red",
   "Entry point": "p-blue",
-  "No Match": "p-grey",
+  "Not Matched": "p-grey",
+  "No Match": "p-grey",       // older runs' name for Not Matched
   "No Data": "p-grey",
   "No Result": "p-grey",
   [TEST_NOT_RUN]: "p-grey",

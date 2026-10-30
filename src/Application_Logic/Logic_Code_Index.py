@@ -486,7 +486,7 @@ def _extract_functions(content: str, relpath: str, known_types: Set[str]) -> Lis
     - Multi-line signatures
     - Complex return types (struct pointers, unsigned long long, etc.)
     - Trailing annotations (polyspace, PRQA, GCC attributes)
-    - InterfaceExport markers
+    - Code-generator markers
     """
     functions = []
     # Work on comment-stripped content for accuracy

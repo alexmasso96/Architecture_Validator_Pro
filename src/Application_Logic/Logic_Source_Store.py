@@ -52,11 +52,21 @@ def _norm_rel(rel_path: str) -> str:
     return rel_path.replace(os.sep, "/")
 
 
+def _norm_abs(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
 class FilesystemSourceProvider:
     """Reads source from a local directory (or a single file)."""
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, skip_dirs=SKIP_DIRS, exclude=()):
         self.root = root
+        self.skip_dirs = skip_dirs
+        self.exclude = tuple(_norm_abs(p) for p in exclude)
+
+    def _excluded(self, path: str) -> bool:
+        path = _norm_abs(path)
+        return any(path == e or path.startswith(e + os.sep) for e in self.exclude)
 
     def list_files(self, exts=None) -> List[SourceFile]:
         exts = exts or SOURCE_EXTENSIONS
@@ -75,7 +85,8 @@ class FilesystemSourceProvider:
                     pass
             return out
         for dirpath, dirs, names in os.walk(self.root):
-            if os.path.basename(dirpath).lower() in SKIP_DIRS:
+            if (os.path.basename(dirpath).lower() in self.skip_dirs
+                    or self._excluded(dirpath)):
                 dirs.clear()
                 continue
             for name in names:
@@ -83,6 +94,8 @@ class FilesystemSourceProvider:
                 if ext not in exts:
                     continue
                 ap = os.path.join(dirpath, name)
+                if self._excluded(ap):
+                    continue
                 try:
                     st = os.stat(ap)
                 except OSError:
@@ -115,6 +128,37 @@ class FilesystemSourceProvider:
 
     def change_key(self, sf: SourceFile) -> tuple:
         return (sf.size, sf.mtime)
+
+
+def root_prefixes(roots) -> List[str]:
+    """Stored-path prefix per source root: one root keeps plain relative paths;
+    several get their folder name (numbered on a clash) so two roots holding
+    the same relative path don't overwrite each other in the release."""
+    if len(roots) < 2:
+        return [""] * len(roots)
+    out: List[str] = []
+    for root in roots:
+        base = os.path.basename(os.path.normpath(root)) or "source"
+        name, n = base, 1
+        while name in out:
+            n += 1
+            name = f"{base}_{n}"
+        out.append(name)
+    return out
+
+
+def iter_source_roots(roots, exclude=(), counts=None) -> Iterator[Tuple[str, str]]:
+    """(rel_path, text) across explicitly listed source roots. Listing a folder
+    is the choice, so SKIP_DIRS does not apply; ``exclude`` paths are left out.
+    ``counts`` (a dict) receives the number of files read per root."""
+    for root, prefix in zip(roots, root_prefixes(roots)):
+        provider = FilesystemSourceProvider(root, skip_dirs=(), exclude=exclude)
+        if counts is not None:
+            counts[root] = 0
+        for rel_path, text in provider.iter_text():
+            if counts is not None:
+                counts[root] += 1
+            yield (f"{prefix}/{rel_path}" if prefix else rel_path), text
 
 
 class DbReleaseSourceProvider:

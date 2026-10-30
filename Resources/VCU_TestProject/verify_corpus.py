@@ -2,7 +2,7 @@
 """
 Verify the generated VCU corpus against the app's REAL code paths:
   1. ELFParser parses every release ELF (functions / params / structs / globals).
-  2. InterfaceExport import groups ports by component model + expands operations.
+  2. Interface export import groups ports by component model + expands operations.
   3. SymbolMatcher resolves every architecture Operation to its ELF symbol @100.
   4. The intended inter-release deltas are actually present in the ELF symbols.
 
@@ -15,7 +15,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from core import elf_parser  # noqa: E402
-from Application_Logic import Logic_InterfaceExport_Import as rh  # noqa: E402
+from Application_Logic import Logic_Interface_Export as rh  # noqa: E402
 from Application_Logic.Logic_Symbol_Matcher import SymbolMatcher  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -57,10 +57,10 @@ def main():
         check(n_params > 0, "%s has functions with DWARF parameters" % rel)
         check(len(p.global_vars_dwarf) > 0, "%s exposes DWARF globals" % rel)
 
-    print("\n=== 2. InterfaceExport architecture import (CSV) ===")
+    print("\n=== 2. Interface export architecture import (CSV) ===")
     csv_path = os.path.join(HERE, "releases", "R5.0", "architecture_ports.csv")
-    is_rh, path_col = rh.detect_interface_export_format(csv_path)
-    check(is_rh, "R5.0 ports CSV detected as InterfaceExport format (path col=%s)" % path_col)
+    is_rh, path_col = rh.detect_interface_export(csv_path)
+    check(is_rh, "R5.0 ports CSV detected as interface export format (path col=%s)" % path_col)
     cols, rows = rh.read_file(csv_path)
     preview = rh.get_model_preview(rows, path_col)
     print("  models:", ", ".join("%s=%d" % (k, v) for k, v in sorted(preview.items())))

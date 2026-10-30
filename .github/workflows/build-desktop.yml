@@ -3,7 +3,8 @@ name: Build Desktop App (pywebview)
 # Single pipeline for the Phase 3 desktop shell (ArchitectureValidatorDesktop.spec):
 # React SPA + FastAPI worker inside a native pywebview window.
 #
-#   test      → logic-layer pytest suite (Ubuntu).
+#   test      → logic-layer pytest suite + a pipeline CLI run over the VCU
+#               corpus (Ubuntu; also the nightly run).
 #   build     → matrix over windows/macos/linux. PyInstaller is not a
 #               cross-compiler, so each OS builds its own artifact; the matrix
 #               keeps the three legs in ONE job definition (no copy-paste) while
@@ -84,6 +85,20 @@ jobs:
       - name: Run test suite
         run: pytest Tests/ -q
 
+      - name: Run the pipeline CLI on the VCU test project
+        run: |
+          python scripts/make_vcu_workbook.py
+          python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
+
+      # A failed run is when the report matters most.
+      - name: Upload validation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcu-validation-results
+          path: Resources/VCU_TestProject/pipeline/results/
+          if-no-files-found: ignore
+
   build:
     # Skip the heavy 3-OS build on the nightly cron — that run only needs `test`.
     if: github.event_name != 'schedule'
@@ -158,6 +173,21 @@ jobs:
 
       - name: Build with PyInstaller
         run: pyinstaller ArchitectureValidatorDesktop.spec --noconfirm
+
+      # --- Pipeline CLI: every OS proves its own packaged binary end to end ---
+      - name: Build and test the pipeline CLI
+        shell: bash
+        run: |
+          pyinstaller ArchitectureValidatorCLI.spec --noconfirm
+          python scripts/make_vcu_workbook.py
+          dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
+          python -c "import platform, shutil; shutil.make_archive(f'architecture-validator-cli-{platform.system().lower()}-{platform.machine().lower()}', 'zip', 'dist', 'arch-validator')"
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-artifact-${{ matrix.os }}
+          path: architecture-validator-cli-*.zip
 
       # --- Package: Windows (per-arch zip: -x64 / -arm64) --------------------
       - name: Package Windows (zip)
@@ -278,3 +308,4 @@ jobs:
             architecture-validator-desktop-windows-x64.zip
             architecture-validator-desktop-windows-arm64.zip
             architecture-validator-desktop-macos.zip
+            architecture-validator-cli-*.zip

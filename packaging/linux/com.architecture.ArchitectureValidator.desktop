@@ -2,7 +2,7 @@
 Type=Application
 Name=Architecture Validator
 GenericName=Embedded Software Architecture Validation
-Comment=Validate embedded software architecture against ELF binaries and InterfaceExport models
+Comment=Validate embedded software architecture against ELF binaries and architecture models
 Exec=architecture-validator %f
 Icon=com.architecture.ArchitectureValidator
 Terminal=false

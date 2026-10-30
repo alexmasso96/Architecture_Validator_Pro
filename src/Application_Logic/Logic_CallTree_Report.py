@@ -38,7 +38,7 @@ _EXCLUDED = (ct.NO_RESULT, ct.NOT_RUN, "")
 
 _VERDICT_CLASS = {
     ct.PASSED: "pass", ct.FAILED: "fail", ct.ENTRY_POINT: "entry",
-    ct.NO_MATCH: "warn", ct.NO_DATA: "warn",
+    ct.NOT_MATCHED: "warn", ct.NO_DATA: "warn",
 }
 
 
@@ -248,6 +248,8 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
         for row_no, row in enumerate(rows, 1):
             cell = row.get(col_name)
             verdict = (cell.get("text") or "") if isinstance(cell, dict) else ""
+            if verdict == ct.LEGACY_NOT_MATCHED:
+                verdict = ct.NOT_MATCHED
             if verdict in _EXCLUDED:
                 skipped += 1
                 continue
@@ -352,7 +354,7 @@ def _badge(verdict: str) -> str:
 def _counts_line(counts: Dict[str, int]) -> str:
     if not counts:
         return '<span class="muted">no results</span>'
-    order = [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NO_MATCH, ct.NO_DATA]
+    order = [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NOT_MATCHED, ct.NO_DATA]
     keys = [k for k in order if k in counts] + sorted(k for k in counts if k not in order)
     return " ".join(f'{_badge(k)}<b>{counts[k]}</b>' for k in keys)
 
@@ -377,7 +379,7 @@ def _score_cell(value: Optional[float]) -> str:
 def _overall_html(data: dict) -> str:
     """Overall results: one row per verdict (count + share) and the score."""
     sc, totals = data["score"], data["totals"]
-    order = [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NO_MATCH, ct.NO_DATA]
+    order = [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NOT_MATCHED, ct.NO_DATA]
     keys = [k for k in order if k in (ct.PASSED, ct.FAILED) or totals.get(k)]
     keys += sorted(k for k in totals if k not in order)
     body = "".join(
@@ -422,7 +424,7 @@ def _models_html(data: dict) -> str:
             f'<th>Main function</th>'
             f'<th class="num">Results</th><th class="num">Passed</th>'
             f'{'<th class="num">Entry point</th>' if entry else ""}<th class="num">Failed</th>'
-            f'<th class="num" title="No Match / No Data">Other</th><th>Score</th>'
+            f'<th class="num" title="Not Matched / No Data">Other</th><th>Score</th>'
             f'</tr></thead><tbody>{"".join(rows)}</tbody><tfoot>{foot}</tfoot>'
             f'</table></div>')
 

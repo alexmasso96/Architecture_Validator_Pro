@@ -7,13 +7,13 @@ the side artefacts that Architecture Validator Pro consumes, so the whole app
 can be exercised (and stress-tested) without any proprietary firmware:
 
   * releases/<REL>/src/<component>/<module>.{c,h}   — a full C source tree per release
-  * releases/<REL>/architecture_ports.csv / .xlsx   — InterfaceExport-style port export
+  * releases/<REL>/architecture_ports.csv / .xlsx   — path-based port export
   * releases/<REL>/requirements.csv / .xlsx         — requirement traces
   * Test Case Design/<Component>_Test_Case_Design.md
   * CHANGELOG.md / README.md
 
 The codebase models a simplified automotive **Vehicle Control Unit (VCU)** with
-several software components (each = one InterfaceExport "model"): Body Control,
+several software components (each = one architecture "model"): Body Control,
 Powertrain, Battery Management, Thermal Management, Chassis Control,
 Diagnostics, Comm Gateway and Charging Control. Components, modules, functions,
 struct fields and signatures EVOLVE across five releases (R1.0 .. R5.0) so the

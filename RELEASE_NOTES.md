@@ -2,6 +2,17 @@
 
 In on-machine validation. Version numbers are bumped when the release is cut.
 
+## ⚙️ New: Pipeline CLI
+- **Run the full validation in a build pipeline** with one command, on GitLab or
+  GitHub: `arch-validator run --config validation.cfg`. See the
+  [Pipeline CLI guide](docs/guide/12-pipeline-cli.md).
+- **Input is one generated Excel workbook**: a sheet per architecture model plus
+  a main functions sheet. Paths and settings live in a `.cfg` file.
+- **Clear result**: exit code 0 passed, 1 test failed, 2 setup or tool error. The
+  HTML report and `.arch` are written either way when a test fails.
+- **Packaged for Windows, Linux and macOS** as a console build that needs no
+  Python and no desktop components.
+
 ## 📥 New: Import Profiles
 - **Import any table format without code.** Build a reusable profile from
   declarative rules (filter, derive if/else, split cell, expand to rows,
@@ -14,7 +25,7 @@ In on-machine validation. Version numbers are bumped when the release is cut.
   supported), e.g. filling one test-case ID into every function row of an interface.
 - **Diff before write**: every import shows exactly what will change before you
   apply it. Profiles are auto-selected by filename pattern.
-- The built-in InterfaceExport profiles reproduce the existing InterfaceExport import exactly;
+- The built-in interface export profiles reproduce the existing interface import exactly;
   the existing Import wizard is unchanged.
 
 ## 🔒 New: locked imported cells (TC. ID)

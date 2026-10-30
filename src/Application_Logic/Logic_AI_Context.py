@@ -867,12 +867,12 @@ _REQ_TEXT_HINTS = ("requirement text", "description", "text", "desc", "summary")
 def parse_requirements_file(file_path: str, max_rows: int = 500) -> List[Dict]:
     """Parse a CSV/XLSX requirements sheet into [{"id","text"}].
 
-    Reuses the PUBLIC reader in Logic_InterfaceExport_Import (read_file → (columns,
+    Reuses the PUBLIC reader in Logic_Interface_Export (read_file → (columns,
     rows-as-dicts)); does not touch private internals. Auto-detects id/text
     columns case-insensitively, falling back to the first two columns. Truncates
     at max_rows with a sentinel row.
     """
-    from Application_Logic.Logic_InterfaceExport_Import import read_file
+    from Application_Logic.Logic_Interface_Export import read_file
     logger.info("Reading requirements sheet: %s", os.path.basename(file_path))
     columns, rows = read_file(file_path)
     if not columns:

@@ -18,20 +18,20 @@ Some toolchains, notably **Renesas CC-RH / V850 for RH850**, put an underscore i
 ### Excel / CSV
 Standard spreadsheets are supported (`.xlsx`, `.xls`, `.csv`). In the classic **sheet-per-model** layout, each worksheet becomes its own architecture model and its rows become ports — handy when you maintain your architecture in Excel.
 
-### InterfaceExport path-based exports
-Exports from IBM InterfaceExport, where the architecture is encoded as hierarchical paths, are **detected automatically**. The tool reads the path structure, works out which model each port belongs to, and pulls out the operations associated with each interface. The wizard then lets you:
+### Path-based interface exports
+Architecture tool exports that encode the architecture as hierarchical paths are **detected automatically**. The tool reads the path structure, works out which model each port belongs to, and pulls out the operations associated with each interface. The wizard then lets you:
 
 - **Preview** the models and ports that will be created before committing.
 - **Choose which models** to import.
 - **Map the relevant columns** (such as the required-interface and operations columns) when they can't be inferred.
 
-A large InterfaceExport export becomes a populated, model-organised project in a couple of clicks instead of a manual re-keying exercise. Because a InterfaceExport export embeds many packages in one path column, the split into per-model row sets happens server-side in a single step.
+A large interface export becomes a populated, model-organised project in a couple of clicks instead of a manual re-keying exercise. Because an interface export embeds many packages in one path column, the split into per-model row sets happens server-side in a single step.
 
 ## Import Profiles (any other table format)
 
-For exports the built-in flows don't know — a DOORS Next Gen test-case sheet, a supplier's interface list, a differently shaped InterfaceExport export — create an **Import Profile** once and reuse it. A profile is a list of simple rules plus a column mapping. There is no scripting: every rule is a small form.
+For exports the built-in flows don't know — a DOORS Next Gen test-case sheet, a supplier's interface list, a differently shaped interface export — create an **Import Profile** once and reuse it. A profile is a list of simple rules plus a column mapping. There is no scripting: every rule is a small form.
 
-Open **Preferences → Import Profiles**. Built-in profiles (the InterfaceExport flows) are read-only; **Duplicate** one to customize it, or click **+ New**.
+Open **Preferences → Import Profiles**. Built-in profiles (the interface export flows) are read-only; **Duplicate** one to customize it, or click **+ New**.
 
 ### Rules
 

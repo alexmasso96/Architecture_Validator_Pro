@@ -22,8 +22,8 @@ the relationship to them instead:
 None of the main functions in the release's call tree → "No Data".
 
 Rows whose Port State is Retired/Deleted get "No Result" (as the release-result
-column does); an empty Match cell → "No Match"; no code map for the model and
-release → "No Data".
+column does); an empty Match cell or a matched name that is not in the call tree
+→ "Not Matched"; no code map for the model and release → "No Data".
 
 Callers come from the code map (source-derived edges) UNION the release's .o
 enrichment dataset (text relocations + inline expansions), so a function called
@@ -54,7 +54,8 @@ MAX_MAINS = 10
 PASSED = "Passed"
 FAILED = "Failed"
 ENTRY_POINT = "Entry point"
-NO_MATCH = "No Match"
+NOT_MATCHED = "Not Matched"
+LEGACY_NOT_MATCHED = "No Match"   # the same verdict in cells recorded by older runs
 NO_DATA = "No Data"
 NO_RESULT = "No Result"
 NOT_RUN = "Not Run"
@@ -88,6 +89,12 @@ def parse_match(value: str) -> str:
     v = (value or "").strip()
     m = _MATCH_RE.match(v)
     return (m.group(1) if m else v).strip()
+
+
+def match_score(value: str) -> Optional[int]:
+    """'Name (NN%)' → NN; None when the cell holds no score."""
+    m = _MATCH_RE.match((value or "").strip())
+    return int(m.group(2)) if m else None
 
 
 def function_match_columns(layout) -> List[str]:
@@ -312,7 +319,7 @@ def evaluate(name: str, index: CallIndex, strict: bool = False) -> dict:
     """Verdict + evidence for one matched function name."""
     key = index.resolve(name)
     if key is None:
-        return {"verdict": FAILED,
+        return {"verdict": NOT_MATCHED,
                 "reason": f"'{name}' is not in this release's call tree."}
     callers = index.callers.get(key, set())
     if strict:
@@ -385,7 +392,7 @@ def evaluate_from_mains(name: str, index: CallIndex, reach: Reach,
     Passed when a main function reaches it through any number of calls."""
     key = index.resolve(name)
     if key is None:
-        return {"verdict": FAILED,
+        return {"verdict": NOT_MATCHED,
                 "reason": f"'{name}' is not in this release's call tree."}
     callers = index.callers.get(key, set())
     if strict:
@@ -456,12 +463,15 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
                 code_map: Optional[dict],
                 object_pairs: Optional[Iterable[Tuple[str, str]]],
                 *, port_state_col: Optional[str], tested_at: str,
-                mains: Optional[Iterable[str]] = None) -> Dict[str, int]:
+                mains: Optional[Iterable[str]] = None,
+                min_match_score: Optional[int] = None) -> Dict[str, int]:
     """Evaluate every row in place. Manual overrides keep their verdict; the
     tool verdict and evidence are refreshed. Returns a verdict histogram.
 
     ``mains`` = the model's main functions: when given, a row passes only if
-    one of them reaches its function (see ``evaluate_from_mains``)."""
+    one of them reaches its function (see ``evaluate_from_mains``).
+    ``min_match_score`` = a scored match below it counts as Not Matched; a Match
+    cell the user picked by hand always counts."""
     index = CallIndex(code_map, object_pairs) if code_map else None
     built_at = (code_map or {}).get("built_at", "")
     strict = bool(binding.get("strict"))
@@ -471,11 +481,21 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
 
     for row in rows:
         state = cell_text(row.get(port_state_col)) if port_state_col else ""
-        name = parse_match(cell_text(row.get(binding["match_col"])))
+        match_cell = row.get(binding["match_col"])
+        match_text = cell_text(match_cell)
+        name = parse_match(match_text)
+        score = match_score(match_text)
+        picked = isinstance(match_cell, dict) and match_cell.get("user_changed")
         if state in ("Retired", "Deleted"):
             res = {"verdict": NO_RESULT, "reason": f"Port is {state}."}
         elif not name:
-            res = {"verdict": NO_MATCH, "reason": f"'{binding['match_col']}' is empty."}
+            res = {"verdict": NOT_MATCHED,
+                   "reason": f"'{binding['match_col']}' is empty."}
+        elif (min_match_score is not None and score is not None and not picked
+              and score < min_match_score):
+            res = {"verdict": NOT_MATCHED,
+                   "reason": f"Best match {name} scored {score}%, below the "
+                             f"{min_match_score}% threshold."}
         elif index is None:
             res = {"verdict": NO_DATA,
                    "reason": "No code map for this release — build it first."}

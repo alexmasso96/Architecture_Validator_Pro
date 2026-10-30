@@ -1,20 +1,20 @@
 """
-Import analysis router (plan §3.2, Excel/InterfaceExport import).
+Import analysis router (plan §3.2, Excel and interface export import).
 
 The interactive import is a Phase-2 wizard that composes small primitives:
 ``/analyze`` (stateless inspection) and ``/read`` (parsed rows) give server-side
 file access the browser can't have on network shares; plain Excel/CSV insertion
 uses ``POST /api/models/{id}/ports/bulk`` + ``fuzzy_rematch``.
 
-The one composite here is the **InterfaceExport multi-model split** (``/interface_export``):
-a InterfaceExport export embeds many packages in one path column, so it must fan out
+The one composite here is the **interface export multi-model split** (``/interface-export``):
+an interface export embeds many packages in one path column, so it must fan out
 into per-model row sets (create/append) in a single server-side step — the
 browser can't replicate the P10-filter / operation-expansion / path→model logic.
 
     POST /api/import/analyze {file_path}
       → {format: "elf"|"excel"|"interface_export"|"csv", sheets?, path_col?, required_col?, ops_col?, models?}
         ("elf" = an ELF image by content, whatever its extension)
-    POST /api/import/interface_export {file_path, col_mapping, path_col, ops_col?, required_col?}
+    POST /api/import/interface-export {file_path, col_mapping, path_col, ops_col?, required_col?}
       → {models: [{name, created, added}], total_models, total_added, model_ids}
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ def _guard(fn):
 
 
 def _detect_ops_col(columns: list, path_col: str, required_col=None):
-    """Guess the InterfaceExport 'Operations' source column (expands into one row per op)."""
+    """Guess the interface export 'Operations' source column (expands into one row per op)."""
     for col in columns:
         if col in (path_col, required_col):
             continue
@@ -61,8 +61,8 @@ def analyze(body: AnalyzeBody) -> dict:
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"No such file: {path}")
 
-    from Application_Logic.Logic_InterfaceExport_Import import (
-        detect_interface_export_format, read_file, get_model_preview,
+    from Application_Logic.Logic_Interface_Export import (
+        detect_interface_export, read_file, get_model_preview,
         detect_required_interface_col,
     )
 
@@ -70,7 +70,7 @@ def analyze(body: AnalyzeBody) -> dict:
         with open(path, "rb") as fh:
             if fh.read(4) == b"\x7fELF":
                 return {"format": "elf"}
-        is_interface_export, path_col = detect_interface_export_format(path)
+        is_interface_export, path_col = detect_interface_export(path)
         if is_interface_export:
             columns, rows = read_file(path)
             required_col = detect_required_interface_col(columns, path_col)
@@ -111,10 +111,10 @@ def read(body: ReadBody) -> dict:
     path = body.file_path
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail=f"No such file: {path}")
-    from Application_Logic.Logic_InterfaceExport_Import import read_file, detect_interface_export_format
+    from Application_Logic.Logic_Interface_Export import read_file, detect_interface_export
     try:
         columns, rows = read_file(path)
-        is_interface_export, path_col = detect_interface_export_format(path)
+        is_interface_export, path_col = detect_interface_export(path)
         if body.limit and body.limit > 0:
             rows = rows[: body.limit]
         return {
@@ -128,7 +128,7 @@ def read(body: ReadBody) -> dict:
         raise HTTPException(status_code=400, detail=f"Could not read file: {e}")
 
 
-class InterfaceExportImportBody(BaseModel):
+class InterfaceExportBody(BaseModel):
     file_path: str
     # {src_col -> table_col}; the path column is NOT included (it drives the split).
     col_mapping: dict[str, str]
@@ -138,11 +138,11 @@ class InterfaceExportImportBody(BaseModel):
     create_missing: bool = True          # create models that don't exist yet
 
 
-@router.post("/interface_export")
-def import_interface_export(body: InterfaceExportImportBody,
+@router.post("/interface-export")
+def import_interface_export(body: InterfaceExportBody,
                     state: AppState = Depends(get_state),
                     bus: EventBus = Depends(get_bus)) -> dict:
-    """Split a InterfaceExport export into per-model row sets and create/append each.
+    """Split an interface export into per-model row sets and create/append each.
 
     The path column groups rows by package (``extract_model_name`` = 3rd path
     segment); ``build_import_data`` applies the P10 filter, drops rows missing the
@@ -153,7 +153,7 @@ def import_interface_export(body: InterfaceExportImportBody,
     if not os.path.exists(body.file_path):
         raise HTTPException(status_code=404, detail=f"No such file: {body.file_path}")
 
-    from Application_Logic.Logic_InterfaceExport_Import import read_file, build_import_data
+    from Application_Logic.Logic_Interface_Export import read_file, build_import_data
 
     def go():
         db = state.require_edit()
@@ -189,7 +189,7 @@ def import_interface_export(body: InterfaceExportImportBody,
             model_ids.append(model.id)
 
         db.commit()
-        bus.publish("db-changed", {"reason": "interface_export-imported",
+        bus.publish("db-changed", {"reason": "interface-export-imported",
                                    "models": len(summary)})
         return {
             "models": summary,

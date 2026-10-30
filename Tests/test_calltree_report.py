@@ -68,10 +68,10 @@ def test_only_valid_result_rows_become_entries():
     ch = data["chapters"][0]
     # Retired port (No Result) and the never-run row are not valid results.
     assert [e["verdict"] for e in ch["entries"]] == \
-        [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NO_MATCH]
+        [ct.PASSED, ct.ENTRY_POINT, ct.FAILED, ct.NOT_MATCHED]
     assert ch["skipped"] == 2
     assert data["totals"] == {ct.PASSED: 1, ct.ENTRY_POINT: 1, ct.FAILED: 1,
-                              ct.NO_MATCH: 1}
+                              ct.NOT_MATCHED: 1}
     e = ch["entries"][0]
     assert (e["port"], e["function"], e["row"]) == ("motor stop", "motor_stop", 1)
     assert e["reason"].startswith("Called by 1")
@@ -273,7 +273,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
 
 def test_score_counts_entry_points_as_passing():
-    s = rep.score({ct.PASSED: 6, ct.ENTRY_POINT: 2, ct.FAILED: 1, ct.NO_MATCH: 1})
+    s = rep.score({ct.PASSED: 6, ct.ENTRY_POINT: 2, ct.FAILED: 1, ct.NOT_MATCHED: 1})
     assert (s["total"], s["passing"], s["failed"], s["other"]) == (10, 8, 1, 1)
     assert s["score"] == 80.0
     assert rep.score({})["score"] is None

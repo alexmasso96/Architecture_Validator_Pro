@@ -53,7 +53,7 @@ The title bar also has toolbar icons for **Import** and **Columns**, a **Save** 
 A typical first session looks like this:
 
 1. **Create a project** and import your first ELF release.
-2. **Import your architecture** ports from Excel, CSV, or a InterfaceExport export — see [Importing Architecture](03-importing-architecture.md).
+2. **Import your architecture** ports from Excel, CSV, or an architecture interface export — see [Importing Architecture](03-importing-architecture.md).
 3. **Review the matches** the tool proposes between ports and symbols in the [Workspace](02-validation-workspace.md).
 4. **Design and generate test cases** from your reviewed data — see [Test Design](05-test-case-design.md).
 
