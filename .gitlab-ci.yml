@@ -62,3 +62,32 @@ cli_validation:
     - if: $CI_PIPELINE_SOURCE == "push"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_PIPELINE_SOURCE == "schedule"
+
+# The same run on macOS, from source and as the packaged build (shell executor
+# on a machine tagged `macos`; untagged jobs stay on the Linux runner).
+cli_validation_macos:
+  stage: validate
+  needs: []
+  tags:
+    - macos
+  variables:
+    GIT_CLEAN_FLAGS: -ffdx -e .ci-venv/
+  before_script:
+    - export PATH="/opt/homebrew/bin:$PATH"
+    - python3.14 -m venv .ci-venv
+    - .ci-venv/bin/pip install --quiet --upgrade pip
+    - .ci-venv/bin/pip install --quiet -r requirements.txt
+  script:
+    - .ci-venv/bin/python scripts/make_vcu_workbook.py
+    - .ci-venv/bin/python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation.cfg
+    - .ci-venv/bin/pyinstaller ArchitectureValidatorCLI.spec --noconfirm
+    - dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
+  artifacts:
+    when: always
+    paths:
+      - Resources/VCU_TestProject/pipeline/results/
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
