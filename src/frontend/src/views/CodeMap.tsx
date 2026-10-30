@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -58,6 +59,10 @@ const MIN_W = 120;
 const MAX_W = 320;
 const ACCESS_TAG_W = 26; // "R" / "W" / "RW" tag inside variable nodes
 const MIN_SCALE = 0.5; // shrink big graphs to fit, but never below this
+const ZOOM_MIN = 0.1; // Ctrl+wheel zoom limits (absolute scale)
+const ZOOM_MAX = 4;
+const ZOOM_STEP = 1.0015; // per wheel deltaY pixel
+const DRAG_THRESHOLD = 4; // px before a press becomes a pan (keeps double-click)
 
 const ACCESS_TAG = { read: "R", write: "W", readwrite: "RW" } as const;
 const ACCESS_TEXT = {
@@ -130,6 +135,14 @@ function CallGraph({
   const bodyRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [hover, setHover] = useState<string | null>(null);
+  // User zoom as a multiplier on the fit scale (1 = fit); reset per graph.
+  const [zoom, setZoom] = useState(1);
+  const [panning, setPanning] = useState(false);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const scaleRef = useRef(1);
+  const fitRef = useRef(1);
+  // Graph point that must stay under the cursor after a zoom re-render.
+  const anchor = useRef<{ gx: number; gy: number; cx: number; cy: number } | null>(null);
 
   useEffect(() => {
     const el = bodyRef.current;
@@ -140,6 +153,72 @@ function CallGraph({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  useEffect(() => setZoom(1), [graph]);
+
+  // Ctrl/Cmd + wheel zooms around the cursor. Registered natively because
+  // React's wheel listener is passive and can't stop the page scrolling.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const svg = svgRef.current;
+      if (!svg) return;
+      const r = svg.getBoundingClientRect();
+      const s = scaleRef.current;
+      anchor.current = {
+        gx: (e.clientX - r.left) / s,
+        gy: (e.clientY - r.top) / s,
+        cx: e.clientX,
+        cy: e.clientY,
+      };
+      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      const fit = fitRef.current;
+      setZoom((z) => {
+        const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fit * z * Math.pow(ZOOM_STEP, -dy)));
+        return next / fit;
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Drag anywhere in the graph to pan (scrolls the body). The press only
+  // becomes a pan past a small threshold, so clicks/double-clicks still work.
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    const el = bodyRef.current;
+    if (!el) return;
+    if (e.button === 1) e.preventDefault(); // no autoscroll widget
+    const start = { x: e.clientX, y: e.clientY, sl: el.scrollLeft, st: el.scrollTop };
+    const id = e.pointerId;
+    let dragging = false;
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== id) return;
+      const dx = ev.clientX - start.x;
+      const dy = ev.clientY - start.y;
+      if (!dragging) {
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        dragging = true;
+        setPanning(true);
+        window.getSelection()?.removeAllRanges();
+      }
+      el.scrollLeft = start.sl - dx;
+      el.scrollTop = start.st - dy;
+    };
+    const up = (ev: PointerEvent) => {
+      if (ev.pointerId !== id) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (dragging) setPanning(false);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
 
   const layout = useMemo(() => {
     if (!graph || graph.nodes.length === 0) return null;
@@ -231,6 +310,32 @@ function CallGraph({
     return { pos, edges, width, height };
   }, [graph]);
 
+  // 1:1 when it fits; otherwise shrink (down to MIN_SCALE) and let it scroll.
+  // The user's Ctrl+wheel zoom then multiplies on top of that.
+  const fit =
+    layout && box.w && box.h
+      ? Math.max(
+          MIN_SCALE,
+          Math.min(1, (box.w - 8) / layout.width, (box.h - 8) / layout.height),
+        )
+      : 1;
+  const scale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, fit * zoom));
+  fitRef.current = fit;
+  scaleRef.current = scale;
+
+  // After a zoom re-render, scroll so the anchored graph point is back under
+  // the cursor.
+  useLayoutEffect(() => {
+    const a = anchor.current;
+    const el = bodyRef.current;
+    const svg = svgRef.current;
+    anchor.current = null;
+    if (!a || !el || !svg) return;
+    const r = svg.getBoundingClientRect();
+    el.scrollLeft += r.left + a.gx * scale - a.cx;
+    el.scrollTop += r.top + a.gy * scale - a.cy;
+  }, [scale]);
+
   if (!layout) {
     return (
       <div className="cm-graph-body" ref={bodyRef}>
@@ -240,11 +345,6 @@ function CallGraph({
   }
 
   const { pos, edges, width, height } = layout;
-  // 1:1 when it fits; otherwise shrink (down to MIN_SCALE) and let it scroll.
-  const scale =
-    box.w && box.h
-      ? Math.max(MIN_SCALE, Math.min(1, (box.w - 8) / width, (box.h - 8) / height))
-      : 1;
   const verification = !!graph?.edge_verification;
 
   const edgeClass = (e: (typeof edges)[number]) => {
@@ -260,96 +360,112 @@ function CallGraph({
     `url(#${uid}-${cls === "cm-edge-unverified" ? "cm-edge-plain" : cls})`;
 
   return (
-    <div className="cm-graph-body" ref={bodyRef}>
-      <svg
-        className={"cm-graph-svg" + (hover ? " hovering" : "")}
-        viewBox={`0 0 ${width} ${height}`}
-        width={width * scale}
-        height={height * scale}
+    <div className="cm-graph-wrap">
+      <div
+        className={"cm-graph-body pannable" + (panning ? " panning" : "")}
+        ref={bodyRef}
+        onPointerDown={onPointerDown}
       >
-        <defs>
-          {["cm-edge-plain", "cm-edge-verified", "cm-edge-read", "cm-edge-write"].map(
-            (cls) => (
-              <marker
-                key={cls}
-                id={`${uid}-${cls}`}
-                className={"cm-arrow " + cls}
-                viewBox="0 0 10 10"
-                refX={9}
-                refY={5}
-                markerUnits="userSpaceOnUse"
-                markerWidth={10}
-                markerHeight={10}
-                orient="auto-start-reverse"
-              >
-                <path d="M1.5 1.5 L9 5 L1.5 8.5 Q3.6 5 1.5 1.5 Z" />
-              </marker>
-            ),
-          )}
-        </defs>
-        <g className="cm-edges">
-          {edges.map((e, i) => {
-            const cls = edgeClass(e);
-            const lit = hover !== null && (e.a.node.name === hover || e.b.node.name === hover);
-            return (
-              <path
-                key={i}
-                className={cls + (lit ? " lit" : "")}
-                d={e.d}
-                markerEnd={markerFor(cls)}
-              >
-                {(cls === "cm-edge-verified" || cls === "cm-edge-unverified") && (
+        <svg
+          ref={svgRef}
+          className={"cm-graph-svg" + (hover ? " hovering" : "")}
+          viewBox={`0 0 ${width} ${height}`}
+          width={width * scale}
+          height={height * scale}
+        >
+          <defs>
+            {["cm-edge-plain", "cm-edge-verified", "cm-edge-read", "cm-edge-write"].map(
+              (cls) => (
+                <marker
+                  key={cls}
+                  id={`${uid}-${cls}`}
+                  className={"cm-arrow " + cls}
+                  viewBox="0 0 10 10"
+                  refX={9}
+                  refY={5}
+                  markerUnits="userSpaceOnUse"
+                  markerWidth={10}
+                  markerHeight={10}
+                  orient="auto-start-reverse"
+                >
+                  <path d="M1.5 1.5 L9 5 L1.5 8.5 Q3.6 5 1.5 1.5 Z" />
+                </marker>
+              ),
+            )}
+          </defs>
+          <g className="cm-edges">
+            {edges.map((e, i) => {
+              const cls = edgeClass(e);
+              const lit = hover !== null && (e.a.node.name === hover || e.b.node.name === hover);
+              return (
+                <path
+                  key={i}
+                  className={cls + (lit ? " lit" : "")}
+                  d={e.d}
+                  markerEnd={markerFor(cls)}
+                >
+                  {(cls === "cm-edge-verified" || cls === "cm-edge-unverified") && (
+                    <title>
+                      {e.verified
+                        ? "Verified by the object files (compiler-confirmed call)"
+                        : "Seen in source only — not confirmed by the object files " +
+                          "(possibly disabled by #ifdef, or an intra-file call the " +
+                          "relocations cannot see)"}
+                    </title>
+                  )}
+                </path>
+              );
+            })}
+          </g>
+          <g className="cm-nodes">
+            {[...pos.values()].map(({ x, y, w, node }) => {
+              const isParam = node.type === "param";
+              const isFocus = !isParam && (node.type === "center" || node.name === focus);
+              const tagW = isParam ? ACCESS_TAG_W : 0;
+              const access = node.access ?? "read";
+              return (
+                <g
+                  key={node.type + ":" + node.name}
+                  className={"cm-node " + node.type + (isFocus ? " focus" : "")}
+                  transform={`translate(${x},${y})`}
+                  onMouseEnter={() => setHover(node.name)}
+                  onMouseLeave={() => setHover(null)}
+                  onDoubleClick={() => !isFocus && !isParam && onFocus(node.name)}
+                >
                   <title>
-                    {e.verified
-                      ? "Verified by the object files (compiler-confirmed call)"
-                      : "Seen in source only — not confirmed by the object files " +
-                        "(possibly disabled by #ifdef, or an intra-file call the " +
-                        "relocations cannot see)"}
+                    {isParam
+                      ? `${node.name} — variable ${ACCESS_TEXT[access]} ${focus ?? "the focus"}`
+                      : node.name + (isFocus ? "" : " — double-click to focus")}
                   </title>
-                )}
-              </path>
-            );
-          })}
-        </g>
-        <g className="cm-nodes">
-          {[...pos.values()].map(({ x, y, w, node }) => {
-            const isParam = node.type === "param";
-            const isFocus = !isParam && (node.type === "center" || node.name === focus);
-            const tagW = isParam ? ACCESS_TAG_W : 0;
-            const access = node.access ?? "read";
-            return (
-              <g
-                key={node.type + ":" + node.name}
-                className={"cm-node " + node.type + (isFocus ? " focus" : "")}
-                transform={`translate(${x},${y})`}
-                onMouseEnter={() => setHover(node.name)}
-                onMouseLeave={() => setHover(null)}
-                onDoubleClick={() => !isFocus && !isParam && onFocus(node.name)}
-              >
-                <title>
-                  {isParam
-                    ? `${node.name} — variable ${ACCESS_TEXT[access]} ${focus ?? "the focus"}`
-                    : node.name + (isFocus ? "" : " — double-click to focus")}
-                </title>
-                <rect rx={isParam ? NODE_H / 2 : 8} width={w} height={NODE_H} />
-                {isParam && (
-                  <text className="cm-access" x={8 + tagW / 2} y={NODE_H / 2}>
-                    {ACCESS_TAG[access]}
+                  <rect rx={isParam ? NODE_H / 2 : 8} width={w} height={NODE_H} />
+                  {isParam && (
+                    <text className="cm-access" x={8 + tagW / 2} y={NODE_H / 2}>
+                      {ACCESS_TAG[access]}
+                    </text>
+                  )}
+                  <text x={tagW + (w - tagW) / 2} y={NODE_H / 2}>
+                    {fitLabel(node.name, w - tagW - 20)}
                   </text>
-                )}
-                <text x={tagW + (w - tagW) / 2} y={NODE_H / 2}>
-                  {fitLabel(node.name, w - tagW - 20)}
-                </text>
-              </g>
-            );
-          })}
-        </g>
-      </svg>
-      {graph?.truncated && (
-        <div className="cm-graph-note">
-          Showing {graph.max_nodes} of {graph.total_nodes} functions — reduce the
-          layers to see the full neighbourhood.
-        </div>
+                </g>
+              );
+            })}
+          </g>
+        </svg>
+        {graph?.truncated && (
+          <div className="cm-graph-note">
+            Showing {graph.max_nodes} of {graph.total_nodes} functions — reduce the
+            layers to see the full neighbourhood.
+          </div>
+        )}
+      </div>
+      {zoom !== 1 && (
+        <button
+          className="cm-zoom-badge"
+          title="Reset zoom (Ctrl + scroll to zoom)"
+          onClick={() => setZoom(1)}
+        >
+          {Math.round(scale * 100)}%
+        </button>
       )}
     </div>
   );

@@ -3718,6 +3718,39 @@ button.update-pill:hover {
   flex: none;
   margin: auto; /* centred, but still scrollable when larger than the pane */
 }
+.cm-graph-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  position: relative;
+}
+.cm-graph-body.pannable {
+  cursor: grab;
+}
+.cm-graph-body.panning,
+.cm-graph-body.panning .cm-node {
+  cursor: grabbing;
+}
+.cm-graph-body.pannable .cm-graph-svg {
+  user-select: none;
+}
+.cm-zoom-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cm-zoom-badge:hover {
+  color: var(--text);
+}
 .cm-graph-empty,
 .cm-nosource {
   padding: 20px;
