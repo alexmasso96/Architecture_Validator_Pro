@@ -193,6 +193,12 @@ jobs:
         run: |
           pyinstaller ArchitectureValidatorCLI.spec --noconfirm
           pip install -r Resources/VCU_TestProject/pipeline/requirements.txt
+          # Zig's native Windows ARM compiler crashes (access violation); its x64
+          # build runs fine under emulation. The CLI under test stays native.
+          if [ "${{ matrix.os }}" = "windows-11-arm" ]; then
+            pip install --target .zig-x64 --platform win_amd64 --only-binary=:all: --no-deps "$(grep '^ziglang' Resources/VCU_TestProject/pipeline/requirements.txt)"
+            export PYTHONPATH=.zig-x64
+          fi
           python Resources/VCU_TestProject/pipeline/build_firmware.py
           python Resources/VCU_TestProject/pipeline/make_workbook.py
           dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation.cfg
