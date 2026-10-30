@@ -119,6 +119,10 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 | `main.py` | Spawns the worker, waits for it to report its port and become ready, opens a native pywebview window pointed at the worker, and exposes native file dialogs + the session token to the SPA via pywebview's `js_api`. The token reaches the SPA through `js_api` / the URL fragment — **never over HTTP**. |
 | `worker.py` | Child entrypoint: binds an OS-assigned port, reports it to the parent over a pipe, and serves the FastAPI app with uvicorn until the parent goes away. Kept free of any GUI import so it is unit-testable headless. |
 
+### Pipeline CLI — `src/cli/`
+
+`main.py` is the headless `arch-validator run --config x.cfg` command for build pipelines. It runs the same job handlers as the desktop app, in its own process and one after another, with no web server or window: it gives `register_handlers` a small synchronous stand-in for `JobManager`. `Logic_Pipeline.py` holds its pure parts (see below). Exit code 0 = passed, 1 = architecture test failed, 2 = setup or tool error. See the [Pipeline CLI guide](guide/12-pipeline-cli.md).
+
 ### Backend worker — `src/backend/`
 
 | Module | Role |
@@ -165,6 +169,7 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 - `Logic_Architecture_Models.py` — multiple architecture models per project (create, duplicate, soft-delete, restore, reorder).
 - `Logic_Release_Manager.py` — `ReleaseManager`: software releases + baselines; ELF shared by `elf_hash`; lazy loading of the active release only.
 - `Logic_Symbol_Matcher.py` — `rapidfuzz` fuzzy matching over DB-loaded name strings (`find_best_match`, `find_top_matches`, threshold). The pool includes functions that exist only as inline expansions (no symbol, no address).
+- `Logic_Pipeline.py` — the CLI's `.cfg` parsing, architecture workbook reader, table layout, and the pass/fail rule of a run.
 - `Logic_Release_Results.py` — per-release validation result derivation (Pass / Block / No Result / Not Run).
 - `Logic_CallTree_Test.py` — call-tree Test columns: bindings (`{column: {release_id, match_col, strict}}` in project meta `calltree_test_columns`, reconciled on every layout save so renames are followed and dangling bindings rejected), the merged caller index (code-map edges ∪ the release's `.o` relocation/inline edges), the verdict rules (Passed / Entry point / Failed / Not Matched / No Data / No Result), and manual overrides that survive re-runs. Results are recorded in the row cells with their evidence and the code-map `built_at` stamp (stale detection). Run by the `run_calltree_tests` job; per-model status at `GET /api/models/{id}/calltree-tests`.
 - `Logic_Release_Source_Picker.py` — shared release-dropdown helper for the source pickers (every "pick a folder" became a release dropdown).
@@ -285,6 +290,8 @@ For frontend iteration, run Vite (`npm run dev` in `src/frontend`) and point it 
 
 - **macOS / Linux:** `scripts/build_desktop.sh`
 - **Windows:** `scripts/build_desktop.ps1`
+
+**Pipeline CLI:** `ArchitectureValidatorCLI.spec` builds a separate console bundle, `dist/arch-validator/`, without the window or the frontend. PyInstaller doesn't cross-compile, so each OS builds its own. CI compiles the demo firmware in `Resources/VCU_TestProject/pipeline` on every platform and runs the packaged CLI on it.
 
 ---
 

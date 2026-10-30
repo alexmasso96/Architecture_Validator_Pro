@@ -1,6 +1,4 @@
-# Unreleased (planned v3.1.0) — Import Profiles, object-file enrichment, parser & stability fixes
-
-In on-machine validation. Version numbers are bumped when the release is cut.
+# v3.1.0 — Pipeline CLI, Import Profiles, object-file enrichment, parser & stability fixes
 
 ## ⚙️ New: Pipeline CLI
 - **Run the full validation in a build pipeline** with one command, on GitLab or

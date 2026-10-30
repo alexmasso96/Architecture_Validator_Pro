@@ -83,6 +83,9 @@ All your data lives in one editable table of ports × columns. A drag-and-drop c
 
 Cells filled by an import (such as test-case IDs) are **locked 🔒**: they can't be edited by hand, and later imports won't overwrite them — a differing value is flagged in the import diff instead. Unlocking is an explicit right-click action recorded in the history.
 
+### ⚙️ Pipeline CLI
+Run the full validation in a GitLab or GitHub build pipeline with one command: `arch-validator run --config validation.cfg`. It reads a generated Excel workbook and the build's symbol, source and object files, tests every architecture model, writes the HTML report and `.arch` project, and returns a pass or fail exit code. Packaged for Windows, Linux and macOS, with a [working demo](Resources/VCU_TestProject/pipeline/README.md) to copy from. See the [Pipeline CLI guide](docs/guide/12-pipeline-cli.md).
+
 ### 🔁 Release management, baselining & change detection
 Manage multiple **software releases** in a single project, each carrying its own ELF data. Creating a release **auto-baselines** the previous one; frozen baselines are read-only and **write-protected at the database layer**, and unfreezing requires the project master password. Compare against a baseline to surface changes — differences are colour-coded so you can **approve or reject** them release over release, and every freeze/unfreeze is recorded in history.
 
@@ -125,7 +128,7 @@ A project is one portable `.arch` file (a SQLite database under the hood), keepi
 | AI providers | Copilot / Anthropic / OpenAI / Gemini, self-hosted Ollama / vLLM, over `requests` |
 | Project storage | SQLite |
 | Security | `bcrypt` (master password), `cryptography` (encrypted AI credentials, history protection) |
-| Packaging | `PyInstaller` onedir desktop bundle (Windows/macOS/Linux) |
+| Packaging | `PyInstaller` onedir desktop bundle and console CLI (Windows/macOS/Linux) |
 
 ---
 
