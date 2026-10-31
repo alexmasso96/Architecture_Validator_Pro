@@ -10,7 +10,7 @@ A complete, working example of the [Pipeline CLI](../../../docs/guide/12-pipelin
 | `build_rh850_toolchain.sh` | Builds the free GCC compiler for RH850, needed only for the `rh850` target |
 | `make_workbook.py` | Stands in for your architecture export: writes the workbook the CLI reads |
 | `validation-arm.cfg`, `validation-rh850.cfg` | The CLI's settings for each target |
-| `verify_faults.py` | Checks that deliberately wrong parameter ports fail for the right reasons |
+| `verify_faults.py` | Checks that deliberately wrong parameter ports fail for the right reasons, with and without the source |
 | `requirements.txt` | Tools for the two stand-in scripts (the CLI doesn't need them) |
 | `example-gitlab-ci.yml` | A GitLab job to copy from |
 | `example-github-workflow.yml` | A GitHub Actions workflow to copy from |

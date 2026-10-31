@@ -105,49 +105,100 @@ fn load_and_relocate_section(
 
 type Reader<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
 
-/// Compiler-verified reference edges from `.text*` relocations (ET_REL only —
-/// linked images carry no text relocations, yielding an empty list).
+/// The name in `symbols` (start, size, name; sorted by start) covering `offset`:
+/// the last one starting at or before it (zero-size symbols cover to the next).
+fn symbol_covering(symbols: &[(u64, u64, String)], offset: u64) -> Option<&str> {
+    let i = symbols.partition_point(|(a, _, _)| *a <= offset);
+    if i == 0 {
+        return None;
+    }
+    let (start, size, name) = &symbols[i - 1];
+    if *size > 0 && offset >= start + size {
+        return None;
+    }
+    Some(name)
+}
+
+/// Where in its target section a section-relative relocation points. PC-relative
+/// addends depend on the instruction's encoding, and an in-place addend is only
+/// readable as a plain word, so those stay unknown rather than name a neighbour.
+fn section_target_offset(
+    code: &[u8],
+    offset: u64,
+    reloc: &object::Relocation,
+    is_little_endian: bool,
+) -> Option<u64> {
+    if matches!(reloc.kind(), object::RelocationKind::Relative) {
+        return None;
+    }
+    let addend = if reloc.has_implicit_addend() {
+        if reloc.size() != 32 {
+            return None;
+        }
+        let at = offset as usize;
+        let raw: [u8; 4] = code.get(at..at + 4)?.try_into().ok()?;
+        let word = if is_little_endian { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) };
+        word as i32 as i64
+    } else {
+        reloc.addend()
+    };
+    u64::try_from(addend).ok()
+}
+
+/// Compiler-verified references from `.text*` relocations (ET_REL only — linked
+/// images carry no text relocations, yielding empty lists).
 ///
 /// Every relocation in a text section is a reference from the function whose
 /// [address, address+size) range covers the relocation offset to the named
-/// target symbol. Defined data symbols are skipped (literal-pool loads of
-/// globals); undefined targets are kept even though their type is unknowable
-/// (cross-TU callees are usually STT_NOTYPE) — downstream consumers match
-/// edges against known function names, so extern-data noise is inert. This
-/// deliberately avoids per-architecture relocation-type tables so it works
-/// unchanged for ARM, TriCore, and RH850 objects.
-fn extract_call_edges(elf_file: &object::File<'_>) -> Vec<CallEdge> {
+/// target symbol. A defined data symbol is a data reference (a literal-pool load
+/// of a global); so is a section-relative target inside one, which is how a
+/// `static` variable is usually addressed. Undefined targets are call edges even
+/// though their type is unknowable (cross-TU callees are usually STT_NOTYPE):
+/// consumers match edges against known names, so extern data ends up there and
+/// is found by name. This deliberately avoids per-architecture relocation-type
+/// tables so it works unchanged for ARM, TriCore, and RH850 objects, and it can't
+/// tell a read from a write.
+fn extract_references(elf_file: &object::File<'_>) -> (Vec<CallEdge>, Vec<CallEdge>) {
     use object::RelocationTarget;
 
-    // Function ranges per section: (start, size, name), sorted by start.
-    let mut by_section: HashMap<object::SectionIndex, Vec<(u64, u64, String)>> = HashMap::new();
+    // A Thumb function's symbol has bit 0 set, which isn't part of its address.
+    let code_mask: u64 = if elf_file.architecture() == object::Architecture::Arm { !1 } else { !0 };
+
+    // Function and data ranges per section, sorted by start.
+    let mut functions: HashMap<object::SectionIndex, Vec<(u64, u64, String)>> = HashMap::new();
+    let mut variables: HashMap<object::SectionIndex, Vec<(u64, u64, String)>> = HashMap::new();
     for sym in elf_file.symbols() {
-        if sym.kind() != SymbolKind::Text {
-            continue;
-        }
+        let (ranges, mask) = match sym.kind() {
+            SymbolKind::Text => (&mut functions, code_mask),
+            SymbolKind::Data => (&mut variables, !0),
+            _ => continue,
+        };
         if let object::SymbolSection::Section(idx) = sym.section() {
             if let Ok(name) = sym.name() {
                 if !name.is_empty() {
-                    by_section.entry(idx).or_default().push(
-                        (sym.address(), sym.size(), name.to_string()));
+                    ranges.entry(idx).or_default().push(
+                        (sym.address() & mask, sym.size(), name.to_string()));
                 }
             }
         }
     }
-    for v in by_section.values_mut() {
+    for v in functions.values_mut().chain(variables.values_mut()) {
         v.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
+    let is_little_endian = elf_file.is_little_endian();
     let mut edges: HashSet<CallEdge> = HashSet::new();
+    let mut data_refs: HashSet<CallEdge> = HashSet::new();
     for section in elf_file.sections() {
         let sec_name = section.name().unwrap_or("");
         if sec_name != ".text" && !sec_name.starts_with(".text.") {
             continue;
         }
-        let funcs = match by_section.get(&section.index()) {
+        let funcs = match functions.get(&section.index()) {
             Some(f) if !f.is_empty() => f,
             _ => continue,
         };
+        let code = section.data().unwrap_or(&[]);
         for (offset, reloc) in section.relocations() {
             let target = match reloc.target() {
                 RelocationTarget::Symbol(idx) => match elf_file.symbol_by_index(idx) {
@@ -156,30 +207,37 @@ fn extract_call_edges(elf_file: &object::File<'_>) -> Vec<CallEdge> {
                 },
                 _ => continue, // section-relative targets: not name-resolvable here
             };
-            if target.kind() == SymbolKind::Data {
-                continue; // defined data symbol: a literal-pool load, not a call
+            let caller = match symbol_covering(funcs, offset) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            if target.kind() == SymbolKind::Section {
+                let variable = target.section_index()
+                    .and_then(|idx| variables.get(&idx))
+                    .zip(section_target_offset(code, offset, &reloc, is_little_endian))
+                    .and_then(|(symbols, at)| symbol_covering(symbols, at));
+                if let Some(name) = variable {
+                    data_refs.insert(CallEdge { from: caller, to: name.to_string() });
+                }
+                continue;
             }
-            let callee = match target.name() {
+            let name = match target.name() {
                 Ok(n) if !n.is_empty() => n.to_string(),
                 _ => continue,
             };
-            // Caller = last function starting at or before the offset whose
-            // range covers it (zero-size symbols cover to the next start).
-            let i = funcs.partition_point(|(a, _, _)| *a <= offset);
-            if i == 0 {
-                continue;
+            if target.kind() == SymbolKind::Data {
+                data_refs.insert(CallEdge { from: caller, to: name });
+            } else {
+                edges.insert(CallEdge { from: caller, to: name });
             }
-            let (start, size, caller) = &funcs[i - 1];
-            if *size > 0 && offset >= start + size {
-                continue;
-            }
-            edges.insert(CallEdge { from: caller.clone(), to: callee });
         }
     }
 
     let mut out: Vec<CallEdge> = edges.into_iter().collect();
+    let mut out_refs: Vec<CallEdge> = data_refs.into_iter().collect();
     out.sort(); // deterministic JSON output
-    out
+    out_refs.sort();
+    (out, out_refs)
 }
 
 #[derive(Serialize)]
@@ -433,8 +491,8 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
     let digest = md5::compute(&mmap);
     let elf_hash = format!("{:x}", digest);
 
-    // Compiler-verified reference edges from .text relocations (ET_REL only).
-    let call_edges = extract_call_edges(&elf_file);
+    // Compiler-verified references from .text relocations (ET_REL only).
+    let (call_edges, data_refs) = extract_references(&elf_file);
 
     // 1. Extract symbols
     let mut symbols = Vec::new();
@@ -541,6 +599,7 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
                 "global_vars": HashMap::<String, String>::new(),
                 "producer": "",
                 "call_edges": call_edges,
+                "data_refs": data_refs,
                 "inlined_functions": Vec::<InlinedCall>::new(),
                 "cu_files": Vec::<String>::new(),
             });
@@ -927,6 +986,7 @@ fn parse_elf_impl(elf_path: &str) -> PyResult<String> {
         "global_vars": global_vars,
         "producer": producer,
         "call_edges": call_edges,
+        "data_refs": data_refs,
         "inlined_functions": inlined_functions,
         "cu_files": cu_files,
     });

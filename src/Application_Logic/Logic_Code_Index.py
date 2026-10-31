@@ -41,11 +41,8 @@ from dataclasses import dataclass, field
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 SOURCE_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx"}
-# No file size limit (see Logic_Source_Store): large generated sources count.
-
-# Generous per-function cap: parameter tests look variables up in these lists,
-# so a generated function must not lose the one being tested.
-MAX_VAR_ACCESSES = 2000
+# No file or function size limit (see Logic_Source_Store): large generated
+# sources count, and tests look functions and variables up by name.
 
 # Directories that never contain test-relevant source code
 SKIP_DIRS = {
@@ -606,7 +603,7 @@ def _extract_functions(content: str, relpath: str, known_types: Set[str]) -> Lis
             depth = 0
             body_end = brace_line
 
-            for j in range(brace_line, min(brace_line + 5000, n_lines)):
+            for j in range(brace_line, n_lines):
                 line_text = lines[j]
                 for ch in line_text:
                     if ch == '{':
@@ -965,8 +962,7 @@ def _extract_var_accesses(body: str, own_vars: Set[str]) -> Tuple[List[str], Lis
             elif eq_pos != 0:  # Don't add LHS as read when it's pure assignment target
                 reads.add(name)
 
-    return (sorted(reads)[:MAX_VAR_ACCESSES], sorted(writes)[:MAX_VAR_ACCESSES],
-            assignments[:MAX_VAR_ACCESSES])
+    return sorted(reads), sorted(writes), assignments
 
 
 # ─── Global Variable Extraction ──────────────────────────────────────────────

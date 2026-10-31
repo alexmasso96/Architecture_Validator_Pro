@@ -1,9 +1,10 @@
 """
 #6A — native-parser enrichment output for `.o` objects.
 
-Three new JSON fields from rust_elf_parser.parse_elf:
+New JSON fields from rust_elf_parser.parse_elf:
   * call_edges         — compiler-verified reference edges from .text
                          relocations (each names caller and callee),
+  * data_refs          — the same, for the data symbols a function references,
   * inlined_functions  — DW_TAG_inlined_subroutine expansions (functions the
                          optimizer pasted into callers: no call instruction,
                          possibly no symbol),
@@ -56,6 +57,60 @@ def _compile(tmp_path, name, args, source=None):
     subprocess.run([CLANG, "-c", "--target=armv7-none-eabi", *args, src, "-o", out],
                    check=True)
     return out
+
+
+DATA_SRC = """
+extern int g_extern;
+int g_global;
+static volatile int s_first;
+static volatile int s_second;
+const int g_table[4] = {1, 2, 3, 4};
+#define RTE_WRITE_SPEED(v) (g_global = (v))
+int get_extern(void) { return g_extern; }
+void write_macro(int v) { RTE_WRITE_SPEED(v); }
+void set_first(int v) { s_first = v; }
+void set_second(int v) { s_second = v; }
+int read_table(int i) { return g_table[i]; }
+"""
+
+
+def _references(path):
+    data = json.loads(ep.rust_elf_parser.parse_elf(path))
+    return ({(r["from"], r["to"]) for r in data["data_refs"]},
+            {(e["from"], e["to"]) for e in data["call_edges"]})
+
+
+@pytest.mark.parametrize("target", [["--target=armv7-none-eabi"],
+                                    ["--target=thumbv7em-none-eabi"],
+                                    ["--target=thumbv7em-none-eabi", "-mno-movt"]])
+@pytest.mark.parametrize("flags", [["-O0"], ["-O2"], ["-O2", "-fdata-sections"]])
+def test_data_refs_name_each_variable(tmp_path, target, flags):
+    path = _compile(tmp_path, "data.o", [*target, *flags], source=DATA_SRC)
+    refs, edges = _references(path)
+    # Only the variables each function really touches, so a neighbour never shows.
+    assert refs == {("write_macro", "g_global"), ("set_first", "s_first"),
+                    ("set_second", "s_second"), ("read_table", "g_table")}
+    # Undefined data looks like any other extern, so it stays with the call edges.
+    assert edges == {("get_extern", "g_extern")}
+
+
+def test_thumb_call_in_the_first_instruction_is_its_own_function(tmp_path):
+    source = "void leaf(void); void before(void) {} void first(void) { leaf(); }"
+    path = _compile(tmp_path, "thumb.o", ["--target=thumbv7em-none-eabi", "-O2"], source=source)
+    assert _references(path)[1] == {("first", "leaf")}
+
+
+def test_linked_image_has_no_data_refs(tmp_path):
+    data = json.loads(ep.rust_elf_parser.parse_elf(LINKED_ELF))
+    assert isinstance(data["data_refs"], list)
+
+
+def test_leading_underscore_is_stripped_from_data_refs():
+    data = {"symbols": [{"name": f"_Bms_{i}", "symbol_type": "STT_FUNC", "section": ".text"}
+                        for i in range(ep.LEADING_UNDERSCORE_MIN_FUNCS)],
+            "data_refs": [{"from": "_Bms_0", "to": "_g_state"}]}
+    assert ep.normalize_native_output(data)
+    assert data["data_refs"] == [{"from": "Bms_0", "to": "g_state"}]
 
 
 def test_call_edges_from_text_relocations(tmp_path):
@@ -236,6 +291,7 @@ def test_object_import_job_end_to_end(tmp_path):
         assert s["config"]["dataset_hash"] == body["result"]["dataset_hash"]
         assert s["summary"]["edges"] >= 2      # compute→add, compute→sub
         assert s["summary"]["inlined"] >= 1    # outer←helper
+        assert s["summary"]["data_refs"] >= 1
         assert s["summary"]["failed"] == 0
 
         # Re-import produces the same dataset hash (re-import detection).
@@ -253,6 +309,7 @@ def test_object_import_job_end_to_end(tmp_path):
         client.delete(f"/api/releases/{rid}/objects", headers=AUTH)
         s2 = client.get(f"/api/releases/{rid}/objects", headers=AUTH).json()
         assert s2["summary"]["objects"] == 0
+        assert s2["summary"]["data_refs"] == 0
         assert s2["config"]["obj_dir"] == str(objdir)
 
 

@@ -570,6 +570,15 @@ class ProjectDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_release_object_edges
                     ON release_object_edges(release_id);
+                CREATE TABLE IF NOT EXISTS release_object_data_refs (
+                    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+                    function   TEXT    NOT NULL,
+                    symbol     TEXT    NOT NULL,
+                    rel_path   TEXT    NOT NULL DEFAULT '',
+                    PRIMARY KEY (release_id, function, symbol, rel_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_release_object_data_refs
+                    ON release_object_data_refs(release_id);
                 CREATE TABLE IF NOT EXISTS release_inlined_functions (
                     release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
                     name       TEXT    NOT NULL,
@@ -1707,18 +1716,21 @@ class ProjectDatabase:
                 "exclude_globs": row[2], "dataset_hash": row[3]}
 
     def replace_release_objects(self, release_id: int, objects, edges,
-                                inlined, dataset_hash: str) -> None:
+                                inlined, dataset_hash: str, data_refs=()) -> None:
         """Atomically replace a release's whole object dataset.
 
         objects: iterable of (rel_path, cu_file, content_hash, status)
         edges:   iterable of (caller, callee, rel_path)
         inlined: iterable of (name, caller, rel_path)
+        data_refs: iterable of (function, symbol, rel_path)
         """
         with self._conn:
             self._conn.execute(
                 "DELETE FROM release_objects WHERE release_id=?", (release_id,))
             self._conn.execute(
                 "DELETE FROM release_object_edges WHERE release_id=?", (release_id,))
+            self._conn.execute(
+                "DELETE FROM release_object_data_refs WHERE release_id=?", (release_id,))
             self._conn.execute(
                 "DELETE FROM release_inlined_functions WHERE release_id=?",
                 (release_id,))
@@ -1732,6 +1744,10 @@ class ProjectDatabase:
                 "(release_id, caller, callee, rel_path) VALUES (?,?,?,?)",
                 [(release_id, *e) for e in edges])
             self._conn.executemany(
+                "INSERT OR REPLACE INTO release_object_data_refs "
+                "(release_id, function, symbol, rel_path) VALUES (?,?,?,?)",
+                [(release_id, *r) for r in data_refs])
+            self._conn.executemany(
                 "INSERT OR REPLACE INTO release_inlined_functions "
                 "(release_id, name, caller, rel_path) VALUES (?,?,?,?)",
                 [(release_id, *i) for i in inlined])
@@ -1743,6 +1759,13 @@ class ProjectDatabase:
         """Unique (caller, callee) pairs across all of the release's objects."""
         cur = self._conn.execute(
             "SELECT DISTINCT caller, callee FROM release_object_edges "
+            "WHERE release_id=?", (release_id,))
+        return {(r[0], r[1]) for r in cur.fetchall()}
+
+    def get_release_object_data_refs(self, release_id: int) -> set:
+        """Unique (function, data symbol) pairs across the release's objects."""
+        cur = self._conn.execute(
+            "SELECT DISTINCT function, symbol FROM release_object_data_refs "
             "WHERE release_id=?", (release_id,))
         return {(r[0], r[1]) for r in cur.fetchall()}
 
@@ -1767,6 +1790,10 @@ class ProjectDatabase:
             "SELECT COUNT(*) FROM (SELECT DISTINCT caller, callee "
             "FROM release_object_edges WHERE release_id=?)",
             (release_id,)).fetchone()[0]
+        n_refs = self._conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT function, symbol "
+            "FROM release_object_data_refs WHERE release_id=?)",
+            (release_id,)).fetchone()[0]
         n_inl = self._conn.execute(
             "SELECT COUNT(*) FROM release_inlined_functions WHERE release_id=?",
             (release_id,)).fetchone()[0]
@@ -1777,7 +1804,8 @@ class ProjectDatabase:
                 "WHERE release_id=? AND status != 'ok' ORDER BY rel_path",
                 (release_id,)).fetchall()]
         return {"objects": int(n_obj or 0), "failed": int(n_err or 0),
-                "edges": int(n_edges or 0), "inlined": int(n_inl or 0),
+                "edges": int(n_edges or 0), "data_refs": int(n_refs or 0),
+                "inlined": int(n_inl or 0),
                 "errors": errors}
 
     def delete_release_objects(self, release_id: int) -> None:
@@ -1787,6 +1815,8 @@ class ProjectDatabase:
                 "DELETE FROM release_objects WHERE release_id=?", (release_id,))
             self._conn.execute(
                 "DELETE FROM release_object_edges WHERE release_id=?", (release_id,))
+            self._conn.execute(
+                "DELETE FROM release_object_data_refs WHERE release_id=?", (release_id,))
             self._conn.execute(
                 "DELETE FROM release_inlined_functions WHERE release_id=?",
                 (release_id,))

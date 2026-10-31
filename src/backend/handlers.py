@@ -494,8 +494,8 @@ def _make_import_source(state: AppState):
 
 # ----------------------------------------------------------------------
 # import_objects — #6: scan a build-output folder of .o files and store the
-# enrichment dataset (compiler-verified call edges, inlined functions, file
-# attribution) keyed to a release. Requires the native parser: the relocation
+# enrichment dataset (compiler-verified call edges and data references, inlined
+# functions, file attribution) keyed to a release. Requires the native parser: the relocation
 # and inlined-subroutine extraction only exists in rust_elf_parser.
 # ----------------------------------------------------------------------
 def _make_import_objects(state: AppState):
@@ -534,7 +534,7 @@ def _make_import_objects(state: AppState):
             raise ProjectError(
                 f"No object files matched {include_glob!r} under {obj_dir}.")
 
-        objects, edges, inlined = [], [], []
+        objects, edges, inlined, data_refs = [], [], [], []
         for idx, p in enumerate(paths, 1):
             if cancel.is_set():
                 raise ProjectError("Import cancelled.")
@@ -564,6 +564,8 @@ def _make_import_objects(state: AppState):
             objects.append((rel, cu[0], content_hash, "ok"))
             for e in data.get("call_edges") or []:
                 edges.append((e["from"], e["to"], rel))
+            for r in data.get("data_refs") or []:
+                data_refs.append((r["from"], r["to"], rel))
             for i in data.get("inlined_functions") or []:
                 inlined.append((i["name"], i["caller"], rel))
 
@@ -578,7 +580,7 @@ def _make_import_objects(state: AppState):
                 release_id, str(root), include_glob,
                 params.get("exclude_globs") or "")
             wdb.replace_release_objects(
-                release_id, objects, edges, inlined, dataset_hash)
+                release_id, objects, edges, inlined, dataset_hash, data_refs)
             wdb.commit()
 
         state.bus.publish("db-changed",
@@ -587,6 +589,7 @@ def _make_import_objects(state: AppState):
         return {"release_id": release_id, "objects": ok,
                 "failed": len(objects) - ok,
                 "edges": len({(e[0], e[1]) for e in edges}),
+                "data_refs": len({(r[0], r[1]) for r in data_refs}),
                 "inlined": len(set(inlined)), "dataset_hash": dataset_hash}
     return handler
 
@@ -641,10 +644,15 @@ def _make_run_calltree_tests(state: AppState):
             if variable_test is not None:
                 hashes = [f["elf_hash"] for f in
                           wdb.get_release_symbol_files(binding["release_id"])]
+                variables = set(wdb.get_variable_names(hashes)) if hashes else set()
+                # Extern data is an undefined target, so it sits with the call edges.
+                data_refs = wdb.get_release_object_data_refs(binding["release_id"])
+                if data_refs:
+                    data_refs |= {p for p in object_pairs or () if p[1] in variables}
                 variable_test.update(
                     search_col=rep.port_name_column(layout, binding["match_col"]),
                     min_score=params.get("min_variable_score", ct.DEFAULT_VARIABLE_SCORE),
-                    globals=set(wdb.get_variable_names(hashes)) if hashes else set())
+                    globals=variables, object_refs=data_refs)
             # Every model needs its main function(s): the test checks that
             # they reach each port's function (the UI asks before running).
             mains = ct.parse_mains(wdb.get_meta(ct.MAINS_KEY, "{}"))

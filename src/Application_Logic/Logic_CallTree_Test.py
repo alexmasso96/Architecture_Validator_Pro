@@ -39,6 +39,11 @@ pointer). The function is the row's nearest Function Search match to the left,
 and helpers it calls count too. A row with no parameter in that column has
 nothing to test, so it reports No Result.
 
+When the release has .o files, their data relocations name each variable a
+function references. That confirms an access the source shows, and passes one it
+doesn't (a macro, assembly, or no source imported). A relocation can't tell a read
+from a write, so such a pass says the direction isn't confirmed.
+
 Results are RECORDED (not recomputed on view) so an ASPICE verdict is stable;
 each cell carries its evidence, the run time and the code-map build time (for
 the stale marker). A tester may override a verdict while the release is active
@@ -498,9 +503,11 @@ def _reachable(start: str, index: CallIndex) -> List[Tuple[str, List[str]]]:
 
 
 def evaluate_variable(variable: str, function: str, direction: str, index: CallIndex,
-                      functions: Dict[str, dict], globals_: Set[str]) -> dict:
+                      functions: Dict[str, dict], globals_: Set[str],
+                      object_refs: Optional[Set[Tuple[str, str]]] = None) -> dict:
     """Is ``variable`` used by ``function``, or a helper it calls, the way the
-    port's direction says?"""
+    port's direction says? ``object_refs`` = the release's (function, variable)
+    pairs from .o data relocations; empty without them."""
     key = index.resolve(function)
     if key is None:
         return {"verdict": NOT_MATCHED,
@@ -534,7 +541,14 @@ def evaluate_variable(variable: str, function: str, direction: str, index: CallI
                 return True
         return False
 
-    if globals_ and root not in globals_ and param is None and not seen_as_variable():
+    def referenced():
+        for fname, path in chain:
+            if object_refs and (fname, root) in object_refs:
+                return root, fname, path
+        return None
+
+    if (globals_ and root not in globals_ and param is None and not seen_as_variable()
+            and not referenced()):
         return {"verdict": NOT_MATCHED,
                 "reason": f"{variable} is not a variable in this release."}
 
@@ -548,10 +562,11 @@ def evaluate_variable(variable: str, function: str, direction: str, index: CallI
     def passed(hit, what: str) -> dict:
         name, fname, path = hit
         route = f" (through {' → '.join(path)})" if len(path) > 1 else ""
+        confirmed = " Confirmed by its object file." if (fname, root) in (object_refs or ()) else ""
         return {"verdict": PASSED, "access": what, "access_path": path,
-                "reason": f"{fname} {what} {name}{route}."}
+                "reason": f"{fname} {what} {name}{route}.{confirmed}"}
 
-    if (functions.get(key) or {}).get("returns_vars") is None:
+    if not object_refs and (functions.get(key) or {}).get("returns_vars") is None:
         return {"verdict": NO_DATA,
                 "reason": f"No source data for {key}: import the release's source "
                           "and rebuild its Code Map."}
@@ -572,7 +587,16 @@ def evaluate_variable(variable: str, function: str, direction: str, index: CallI
             return {"verdict": FAILED,
                     "reason": f"Wrong direction: {reads[1]} only reads {variable}, "
                               "but the port provides it."}
-    return {"verdict": FAILED, "reason": f"{key} does not use {variable}."}
+    hit = referenced()
+    if hit:
+        name, fname, path = hit
+        route = f" (through {' → '.join(path)})" if len(path) > 1 else ""
+        return {"verdict": PASSED, "access": "references", "access_path": path,
+                "reason": f"{fname} references {name} in its object file{route}. "
+                          "The source doesn't show how, so the direction isn't confirmed."}
+    cut = (f" Only the first {MAX_ACCESS_NODES} functions it calls were checked."
+           if len(chain) >= MAX_ACCESS_NODES else "")
+    return {"verdict": FAILED, "reason": f"{key} does not use {variable}.{cut}"}
 
 
 def _evaluate_variable_row(row: dict, variable_test: dict, index: Optional[CallIndex],
@@ -615,7 +639,8 @@ def _evaluate_variable_row(row: dict, variable_test: dict, index: Optional[CallI
                "reason": "No code map for this release — build it first."}
     else:
         res = evaluate_variable(variable, function, variable_test["direction"], index,
-                                functions, variable_test.get("globals") or set())
+                                functions, variable_test.get("globals") or set(),
+                                variable_test.get("object_refs"))
     return {**res, **names}
 
 
@@ -669,7 +694,7 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
     ``min_match_score`` = a scored match below it counts as Not Matched; a Match
     cell the user picked by hand always counts.
     ``variable_test`` = a variable column's ``variable_test_spec`` plus its
-    search_col, min_score and the release's globals."""
+    search_col, min_score, and the release's globals and object_refs."""
     index = CallIndex(code_map, object_pairs) if code_map else None
     built_at = (code_map or {}).get("built_at", "")
     strict = bool(binding.get("strict"))

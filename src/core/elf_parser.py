@@ -150,7 +150,7 @@ def strip_leading_underscore(name: str) -> str:
 
 def normalize_native_output(data: dict) -> bool:
     """Apply the leading-underscore normalization to rust_elf_parser JSON in
-    place (symbols, functions, call edges). Returns True when names were
+    place (symbols, functions, call edges, data references). Returns True when names were
     rewritten; records it as ``data["symbol_prefix_stripped"]``. DWARF-derived
     names (structures, globals, inlined functions) are already plain."""
     defined_funcs = [s.get("name", "") for s in data.get("symbols") or []
@@ -162,7 +162,7 @@ def normalize_native_output(data: dict) -> bool:
         s["name"] = strip_leading_underscore(s.get("name", ""))
     for f in data.get("functions") or []:
         f["name"] = strip_leading_underscore(f.get("name", ""))
-    for e in data.get("call_edges") or []:
+    for e in (data.get("call_edges") or []) + (data.get("data_refs") or []):
         e["from"] = strip_leading_underscore(e.get("from", ""))
         e["to"] = strip_leading_underscore(e.get("to", ""))
     data["symbol_prefix_stripped"] = "_"

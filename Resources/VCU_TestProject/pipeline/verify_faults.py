@@ -1,7 +1,9 @@
 """Prove the CLI catches bad parameter ports, not only that good ones pass.
 
 Runs one validation over a workbook with one deliberately wrong port per kind of
-failure and checks it fails for the right reasons.
+failure and checks it fails for the right reasons. A second run leaves the source
+out: object files alone still show which variables a function references, but not
+which way, so the wrong directions pass and say the direction isn't confirmed.
 
     python verify_faults.py <validation cfg> <CLI command...>
 """
@@ -30,6 +32,29 @@ EXPECTED = {
     "required-parameter": ["Wrong direction", "does not use", "Not Matched"],
     "provided-parameter": ["Wrong direction"],
 }
+OBJECTS_ONLY = "in its object file"
+EXPECTED_WITHOUT_SOURCE = {
+    "required-parameter": [OBJECTS_ONLY, "does not use", "Not Matched"],
+    "provided-parameter": [OBJECTS_ONLY],
+}
+
+
+def check(command: list, name: str, text: str, expected: dict) -> list:
+    """The problems with one run that should fail for the expected reasons."""
+    config = HERE / f"{name}.cfg"
+    config.write_text(re.sub(r"^name = .*$", f"name = {name}", text, flags=re.M),
+                      encoding="utf-8")
+    result = subprocess.run(command + ["run", "--config", str(config)],
+                            capture_output=True, text=True)
+    print(result.stdout)
+    errors = []
+    if result.returncode != 1:
+        errors.append(f"{name}: expected exit code 1, got {result.returncode}")
+    for suffix, phrases in expected.items():
+        report = HERE / "results" / f"{name}-{suffix}.html"
+        html = report.read_text(encoding="utf-8") if report.exists() else ""
+        errors += [f"{report.name} doesn't mention '{p}'" for p in phrases if p not in html]
+    return errors
 
 
 def main() -> int:
@@ -46,23 +71,11 @@ def main() -> int:
     mains.append(["Faults", "Vcu_Cyclic10ms"])
     workbook.save(HERE / "faults.xlsx")
 
-    name = f"{config.stem}-faults"
     text = config.read_text(encoding="utf-8")
     text = re.sub(r"^workbook = .*$", "workbook = faults.xlsx", text, flags=re.M)
-    text = re.sub(r"^name = .*$", f"name = {name}", text, flags=re.M)
-    faults_config = HERE / f"{name}.cfg"
-    faults_config.write_text(text, encoding="utf-8")
-
-    result = subprocess.run(command + ["run", "--config", str(faults_config)],
-                            capture_output=True, text=True)
-    print(result.stdout)
-    errors = []
-    if result.returncode != 1:
-        errors.append(f"expected exit code 1, got {result.returncode}")
-    for suffix, phrases in EXPECTED.items():
-        report = HERE / "results" / f"{name}-{suffix}.html"
-        html = report.read_text(encoding="utf-8") if report.exists() else ""
-        errors += [f"{report.name} doesn't mention '{p}'" for p in phrases if p not in html]
+    errors = check(command, f"{config.stem}-faults", text, EXPECTED)
+    errors += check(command, f"{config.stem}-objects",
+                    re.sub(r"^source = .*\n", "", text, flags=re.M), EXPECTED_WITHOUT_SOURCE)
     for error in errors:
         print(f"FAULT CHECK FAILED: {error}")
     if not errors:

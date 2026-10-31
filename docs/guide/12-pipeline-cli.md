@@ -149,7 +149,26 @@ Each column in `parameter_columns` gets its own test and report, `<name>-<column
 
 Using it the wrong way round fails the run with "Wrong direction". A parameter that matches nothing above `min_parameter_score` is `Not Matched` and counts towards `max_unmatched`. That threshold is lower than the function one because generated variable names rarely match exactly. A row with nothing in that column has no parameter to test, so it's ignored.
 
-This test reads the source, so the run needs `source` listed. Its checks come from C source analysis: an access made only through a pointer alias or from assembly isn't seen yet.
+The direction comes from the source, so list `source`. With `objects` listed too, the compiler's data relocations name every variable a function references:
+
+| The run has | An access the source shows | An access the source doesn't show, such as a macro or assembly |
+|---|---|---|
+| `source` and `objects` | Tested, and the report says the object file confirms it | `Passed`, and the report says the direction isn't confirmed |
+| `source` only | Tested | `Failed` |
+| `objects` only | `Passed`, direction not confirmed | `Passed`, direction not confirmed |
+| Neither | `No Data` | `No Data` |
+
+A relocation shows that a function uses a variable, not whether it reads or writes it, so a wrong direction is only caught when the source shows the access. A variable reached only through a pointer stored elsewhere, such as in a table of pointers, isn't seen either way. Relocations are read from the object files, because a linked image no longer has them.
+
+### Size limits
+
+The C source analysis has no limit on file size, function length, or the number of variables in a function, so a large generated function is analysed in full. The limits that remain are:
+
+| Limit | Value | What happens |
+|---|---|---|
+| Main functions per model | 10 | Extra rows are ignored |
+| Functions followed for one parameter port | 5000, closest first | A `Failed` result says the check was cut short |
+| Callers listed for one port in the report | 25 | The report still shows the total |
 
 ### How the result is decided
 

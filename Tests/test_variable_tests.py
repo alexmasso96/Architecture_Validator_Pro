@@ -45,6 +45,12 @@ def _evaluate(variable, function="take", direction=ct.REQUIRED):
                                 FUNCTIONS, GLOBALS)
 
 
+def _evaluate_with_objects(variable, refs, function="take", direction=ct.REQUIRED,
+                           functions=None):
+    return ct.evaluate_variable(variable, function, direction, ct.CallIndex(CODE_MAP),
+                                functions or FUNCTIONS, GLOBALS, refs)
+
+
 # ---------------------------------------------------------------------------
 # Direction from the column title
 # ---------------------------------------------------------------------------
@@ -152,6 +158,53 @@ def test_function_without_source_is_no_data():
 # ---------------------------------------------------------------------------
 # Rows
 # ---------------------------------------------------------------------------
+def test_object_reference_passes_what_the_source_misses():
+    res = _evaluate_with_objects("g_unused", {("take", "g_unused")})
+    assert res["verdict"] == ct.PASSED
+    assert res["access"] == "references" and res["access_path"] == ["take"]
+    assert "direction isn't confirmed" in res["reason"]
+
+
+def test_object_reference_in_a_helper_names_the_path():
+    res = _evaluate_with_objects("g_unused", {("helper", "g_unused")}, direction=ct.PROVIDED)
+    assert res["verdict"] == ct.PASSED
+    assert res["access_path"] == ["take", "helper"]
+
+
+def test_object_reference_covers_a_field_through_its_variable():
+    res = _evaluate_with_objects("g_unused.limit", {("take", "g_unused")})
+    assert res["verdict"] == ct.PASSED and "references g_unused" in res["reason"]
+
+
+def test_object_reference_never_overrules_a_seen_direction():
+    res = _evaluate_with_objects("g_written", {("take", "g_written")})
+    assert res["verdict"] == ct.FAILED and "Wrong direction" in res["reason"]
+
+
+def test_object_reference_confirms_a_seen_access():
+    res = _evaluate_with_objects("g_read", {("take", "g_read")})
+    assert res["verdict"] == ct.PASSED and "Confirmed by its object file" in res["reason"]
+    assert "Confirmed" not in _evaluate_with_objects("g_read", {("x", "y")})["reason"]
+
+
+def test_another_functions_object_reference_does_not_count():
+    res = _evaluate_with_objects("g_unused", {("unrelated", "g_unused")})
+    assert res["verdict"] == ct.FAILED and "does not use" in res["reason"]
+
+
+def test_object_reference_proves_a_variable_the_symbols_miss():
+    res = _evaluate_with_objects("s_private", {("take", "s_private")})
+    assert res["verdict"] == ct.PASSED
+
+
+def test_objects_answer_without_source():
+    functions = {"take": {"reads_vars": [], "writes_vars": [], "calls": []}}
+    assert _evaluate_with_objects("g_unused", {("take", "g_unused")},
+                                  functions=functions)["verdict"] == ct.PASSED
+    assert _evaluate_with_objects("g_unused", {("take", "g_read")},
+                                  functions=functions)["verdict"] == ct.FAILED
+
+
 BINDING = {"release_id": 1, "match_col": "Required Param (Match)", "strict": False}
 SPEC = {**ct.variable_test_spec(LAYOUT, "Required Param (Match)"),
         "search_col": "Required Param", "min_score": 70, "globals": GLOBALS}
@@ -179,6 +232,19 @@ def test_row_passes_and_records_evidence():
     assert (cell["function"], cell["variable"], cell["direction"]) == \
         ("take", "g_read", ct.REQUIRED)
     assert cell["access"] == "reads" and "main_path" not in cell
+
+
+def test_failure_says_when_the_helpers_were_cut_short(monkeypatch):
+    monkeypatch.setattr(ct, "MAX_ACCESS_NODES", 2)
+    assert "first 2 functions" in _evaluate("g_unused")["reason"]
+    monkeypatch.setattr(ct, "MAX_ACCESS_NODES", 3)
+    assert "first" not in _evaluate("g_unused")["reason"]
+
+
+def test_rows_use_the_object_references():
+    row = _row(variable="g_unused (100%)")
+    spec = {**SPEC, "object_refs": {("take", "g_unused")}}
+    assert _run(row, spec=spec)["auto"] == ct.PASSED
 
 
 def test_port_with_no_parameter_here_is_no_result():
@@ -351,9 +417,15 @@ def test_compound_assignment_is_a_write_and_a_read(indexed):
 
 
 def test_a_big_function_keeps_every_access(tmp_path):
-    lines = "\n".join(f"    g_{i:03d} = 1u;" for i in range(120))
-    (tmp_path / "big.c").write_text(f"void big(void)\n{{\n{lines}\n}}\n", encoding="utf-8")
-    assert len(ci.build_index(str(tmp_path)).functions["big"].writes_vars) == 120
+    # Bigger than any size limit this index used to have: generated step
+    # functions run to thousands of lines.
+    count = 6000
+    lines = "\n".join(f"    g_{i:04d} = g_in;" for i in range(count))
+    (tmp_path / "big.c").write_text(
+        f"void leaf(void);\nvoid big(void)\n{{\n{lines}\n    leaf();\n}}\n", encoding="utf-8")
+    big = ci.build_index(str(tmp_path)).functions["big"]
+    assert len(big.writes_vars) == count
+    assert "leaf" in big.calls
 
 
 def test_local_shadowing_a_global_is_not_its_read(indexed):

@@ -35,6 +35,8 @@ The graph then shows two kinds of edges, explained in the legend:
 
 This works without disassembly, so it also covers targets the disassembler doesn't support (e.g. RH850). Objects built with **link-time optimization (LTO)** contain compiler intermediate code rather than machine code; they are listed as skipped instead of being imported.
 
+The same relocations name the variables each function references, which [parameter port tests](02-validation-workspace.md#call-tree-test-columns) use.
+
 The object files are an addition to the release, never a replacement for its ELF: addresses and sizes still come from the linked binary.
 
 **Inlined functions.** When the optimizer inlines a function into its callers, the function often has no symbol of its own, so a debugger can't find it even though its code runs. The debug info still records every inline expansion; those functions are offered in the Workspace **match picker** tagged *inlined* (no address), so a port isn't flagged as missing just because its function was inlined.
