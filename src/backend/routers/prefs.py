@@ -74,6 +74,22 @@ def read_pref(key: str, default: str | None = None) -> str | None:
         return _read().get(key, default)
 
 
+def write_pref(key: str, value: str | None) -> None:
+    """Stores a preference for this user and machine; None deletes it."""
+    with _lock:
+        data = _read()
+        if value is None:
+            data.pop(key, None)
+        else:
+            data[key] = value
+        _write(data)
+
+
+def app_data_dir() -> Path:
+    """This user's app-data folder, for state that belongs to the machine."""
+    return _store_path().parent
+
+
 class PrefPatch(BaseModel):
     key: str
     value: str | None = None  # None deletes the key

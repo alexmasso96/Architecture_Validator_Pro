@@ -19,9 +19,10 @@ import os
 import shutil
 import tempfile
 import threading
+import uuid
 from typing import Optional
 
-from Application_Logic.Logic_Database import ProjectDatabase
+from Application_Logic.Logic_Database import ProjectDatabase, is_network_path
 from Application_Logic.Logic_Architecture_Models import ArchitectureManager
 from Application_Logic.Logic_Release_Manager import ReleaseManager
 from Application_Logic.Logic_Security import SecurityManager
@@ -60,6 +61,16 @@ class AppState:
         self._matchers: dict = {}   # ((hash, …), release_id) -> SymbolMatcher (name-list cache)
         self._hb_thread: Optional[threading.Thread] = None
         self._hb_stop: Optional[threading.Event] = None
+        self._build_run_active: bool = False
+        self.active_run_id: Optional[int] = None
+
+        # Sync (#16). With a tracked project the session opens the local copy,
+        # and the lock and binary store stay on the shared path. ``sync_hold``
+        # names who a pull is coming from while reads are stopped.
+        self.sync_entry: Optional[dict] = None
+        self.sync_token: Optional[str] = None
+        self.sync_hold: Optional[str] = None
+        self._sync_bridge = None
 
         # Per-block at-rest encryption (master-password protected projects). The
         # .arch is a PLAINTEXT SQLite file opened directly — only sensitive content
@@ -73,6 +84,34 @@ class AppState:
         self._block_cipher = None
         self._temp_dir: Optional[str] = None
         self._atexit_registered: bool = False
+
+    def begin_build_run(self) -> None:
+        """Marks a build run as started. The project stays open until it ends,
+        because the run holds the edit lock."""
+        with self._lock:
+            if self._build_run_active:
+                raise ProjectError("A build run is already in progress.")
+            self._build_run_active = True
+
+    def end_build_run(self) -> None:
+        with self._lock:
+            self._build_run_active = False
+            self.active_run_id = None
+
+    def _refuse_during_build_run(self) -> None:
+        if self._build_run_active:
+            raise ProjectError("A build run is in progress. Cancel it first.")
+
+    @property
+    def shared_path(self) -> Optional[str]:
+        """Where the project lives for other users: the lock and the binary store
+        belong here."""
+        return self.sync_entry["remote"] if self.sync_entry else self.project_path
+
+    def sync_store(self):
+        from Application_Logic.Logic_Sync_Worker import SyncStore
+        from .routers.prefs import app_data_dir
+        return SyncStore(str(app_data_dir() / "sync"))
 
     def block_cipher(self):
         """The session's per-block content cipher (or None). Read by worker
@@ -205,24 +244,15 @@ class AppState:
         No password (or a test-bypass password) → fully plaintext SQLite.
         """
         with self._lock:
+            self._refuse_during_build_run()
             self._close_locked()
             if os.path.exists(path):
                 raise ProjectError(f"File already exists: {path}")
 
-            encrypted = not crypto.bypasses_encryption(password)
+            if is_network_path(path):
+                return self._new_shared_project(path, password)
 
-            db = ProjectDatabase()
-            db.open(path)               # plaintext SQLite directly at path
-            cipher = None
-            if encrypted:
-                cipher = self._init_block_encryption(db, password)
-                db.set_block_cipher(cipher)
-            # Seed the default table layout so a brand-new project opens with the
-            # same basic columns the PyQt6 app provided (Logic_Column_Layout).
-            from Application_Logic.Logic_Column_Layout import DEFAULT_COLUMN_LAYOUT
-            db.save_column_layout(DEFAULT_COLUMN_LAYOUT)
-            db.commit()
-
+            db, cipher, encrypted = self._create_project_db(path, password)
             acquired, msg = FileLockManager.acquire_lock(path)
             if not acquired:
                 db.close()
@@ -236,6 +266,40 @@ class AppState:
             self.bus.publish("db-changed", {"reason": "new"})
             return self.status()
 
+    def _create_project_db(self, path: str, password: Optional[str]) -> tuple:
+        encrypted = not crypto.bypasses_encryption(password)
+        db = ProjectDatabase()
+        db.open(path)               # plaintext SQLite directly at path
+        cipher = None
+        if encrypted:
+            cipher = self._init_block_encryption(db, password)
+            db.set_block_cipher(cipher)
+        # Seed the default table layout so a brand-new project opens with the
+        # same basic columns the PyQt6 app provided (Logic_Column_Layout).
+        from Application_Logic.Logic_Column_Layout import DEFAULT_COLUMN_LAYOUT
+        db.save_column_layout(DEFAULT_COLUMN_LAYOUT)
+        db.commit()
+        return db, cipher, encrypted
+
+    def _new_shared_project(self, path: str, password: Optional[str]) -> dict:
+        """Creates the project locally and publishes it, because SQLite can't be
+        trusted to write to a share. It's tracked with no extra steps."""
+        from Application_Logic import Logic_Sync_Engine as engine
+
+        store = self.sync_store()
+        folder = os.path.join(store.root, f"new-{uuid.uuid4().hex}")
+        os.makedirs(folder)
+        try:
+            local = os.path.join(folder, os.path.basename(path))
+            db, _cipher, _encrypted = self._create_project_db(local, password)
+            db.close()
+            user = FileLockManager.get_username()
+            engine.publish(local, path, user)
+            store.add(path, user)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        return self.open_project(path, MODE_EXCLUSIVE, password)
+
     def open_project(self, path: str, mode: str = MODE_EXCLUSIVE,
                      password: Optional[str] = None) -> dict:
         """Open an existing .arch. ``mode`` is 'exclusive' or 'view'.
@@ -247,9 +311,14 @@ class AppState:
         if mode not in (MODE_VIEW, MODE_EXCLUSIVE):
             raise ProjectError(f"Unknown mode: {mode}")
         with self._lock:
+            self._refuse_during_build_run()
             self._close_locked()
-            if not os.path.exists(path):
+            if not os.path.exists(path) and self.sync_store().find(path) is None:
                 raise ProjectError(f"No such file: {path}")
+
+            local = self._sync_open(path, mode)
+            if local is not None:
+                path = local
 
             # Resolve the per-block cipher (and migrate a legacy whole-file
             # ARCHENC1 project to per-block in place). Raises PasswordRequired /
@@ -257,7 +326,7 @@ class AppState:
             cipher = self._resolve_cipher_on_open(path, password)
             encrypted = cipher is not None
 
-            if mode == MODE_EXCLUSIVE:
+            if mode == MODE_EXCLUSIVE and self.sync_entry is None:
                 acquired, msg = FileLockManager.acquire_lock(path)
                 if not acquired:
                     # Fall back to view-only with the contended-lock detail.
@@ -277,6 +346,7 @@ class AppState:
             self._password = password
             self._block_cipher = cipher
             self._wire(db, path, mode)
+            self._sync_session_started()
             self.bus.publish("db-changed", {"reason": "open"})
             return self.status()
 
@@ -326,14 +396,22 @@ class AppState:
                 # column level, so the .arch on disk is durable after the commit.
             except Exception as e:  # noqa: BLE001
                 raise ProjectError(f"Save failed: {e}") from e
+            self._request_push()
             self.bus.publish("db-changed", {"reason": "save"})
             return self.status()
 
     def close_project(self) -> dict:
         with self._lock:
+            self._refuse_during_build_run()
             self._close_locked()
             self.bus.publish("db-changed", {"reason": "close"})
             return self.status()
+
+    def shutdown_project(self) -> None:
+        """Closes the project as the worker exits, even during a build run. An
+        unfinished run is offered for resuming on the next start."""
+        with self._lock:
+            self._close_locked()
 
     # ------------------------------------------------------------------
     def status(self) -> dict:
@@ -353,7 +431,7 @@ class AppState:
                 release_count = len(self.release_manager.releases)
             return {
                 "open": self.is_open,
-                "path": self.project_path,
+                "path": self.shared_path,
                 "mode": self.mode,
                 # A loaded baseline is a read-only snapshot: edits are blocked even
                 # in an exclusive-edit project, so fold it into can_edit.
@@ -366,6 +444,7 @@ class AppState:
                 "lock_info": self.lock_info,
                 "lock_lost": self.lock_lost,
                 "encrypted": self._encrypted,
+                "tracked": self.sync_entry is not None,
             }
 
     # ------------------------------------------------------------------
@@ -385,9 +464,9 @@ class AppState:
         self.lock_lost = False
         if mode == MODE_EXCLUSIVE:
             self.lock_info = {"held": True, "by": FileLockManager.get_username()}
-            self._start_heartbeat(path)
+            self._start_heartbeat(self.shared_path)
         else:
-            self.lock_info = FileLockManager.check_lock(path)
+            self.lock_info = FileLockManager.check_lock(self.shared_path, self.sync_token)
 
     # ------------------------------------------------------------------
     # Per-block encryption helpers (call with self._lock held)
@@ -535,14 +614,172 @@ class AppState:
         (sqlite connections are thread-affine) — it only reads/writes the lock file.
         """
         while not stop.wait(self._heartbeat_interval):
+            # A share that has dropped out isn't a takeover. The session stays
+            # open, and the lock is checked again once the share is back.
+            if not os.path.isdir(os.path.dirname(path) or "."):
+                continue
             try:
-                status = FileLockManager.check_lock(path)
+                status = FileLockManager.check_lock(path, self.sync_token)
             except Exception:  # noqa: BLE001 — lock file race; try again next tick
+                continue
+            if status.get("status") == "unreadable":  # not a takeover; try again next tick
                 continue
             if status.get("status") != "locked_by_me":
                 self._on_lock_lost(status)
                 return
-            FileLockManager.write_heartbeat(path)
+            FileLockManager.write_heartbeat(path, self.sync_token)
+
+    # ------------------------------------------------------------------
+    # Sync (#16) (call with self._lock held unless noted)
+    # ------------------------------------------------------------------
+    def _sync_open(self, path: str, mode: str) -> Optional[str]:
+        """Prepares a tracked project and returns its local copy, or None for a
+        project that isn't shared. A project with a manifest beside it is tracked
+        here too, so nobody edits the shared copy behind the others' backs. If the
+        share can't be reached, an existing local copy still opens to view."""
+        from Application_Logic import Logic_Sync_Engine as engine
+
+        store = self.sync_store()
+        user = FileLockManager.get_username()
+        entry = store.find(path)
+        try:
+            if entry is None:
+                if engine.read_manifest(path) is None:
+                    return None
+                entry = store.add(path, user)
+        except (engine.SyncError, OSError):
+            return None
+
+        token = uuid.uuid4().hex
+        reachable = os.path.isfile(entry["remote"])
+        if mode == MODE_EXCLUSIVE:
+            if not reachable:
+                raise ProjectError("The shared copy can't be reached, so the project "
+                                   "can only be opened to view.")
+            self._use_worker_lock_watch(store, entry)
+            acquired, msg = FileLockManager.acquire_lock(entry["remote"], token)
+            if not acquired:
+                self.lock_info = FileLockManager.check_lock(entry["remote"])
+                raise ProjectError(f"Locked by another session: {msg}")
+        try:
+            if not os.path.exists(entry["local"]):
+                if not reachable:
+                    raise ProjectError("The shared copy can't be reached, and there's "
+                                       "no local copy yet.")
+                engine.clone(entry["remote"], entry["local"])
+            elif reachable:
+                local = engine.local_state(entry["local"])
+                manifest = engine.read_manifest(entry["remote"])
+                if manifest and manifest["revision"] > local["base"]:
+                    if local["dirty"]:
+                        engine.save_conflict_copy(entry["local"], entry["remote"], user)
+                        engine.clone(entry["remote"], entry["local"])
+                    else:
+                        engine.pull(entry["local"], entry["remote"])
+        except engine.SyncError as e:
+            if mode == MODE_EXCLUSIVE:
+                FileLockManager.release_lock(entry["remote"], token)
+                raise ProjectError(f"The project couldn't be brought up to date: {e}") from e
+            logger.warning("Opening the local copy without syncing: %s", e)
+        except ProjectError:
+            if mode == MODE_EXCLUSIVE:
+                FileLockManager.release_lock(entry["remote"], token)
+            raise
+        self.sync_entry = entry
+        self.sync_token = token
+        return entry["local"]
+
+    def _use_worker_lock_watch(self, store, entry: dict) -> None:
+        """The always-running worker may have watched this lock for hours, so a
+        stopped session's lock doesn't need another 10 minutes here."""
+        from Application_Logic.Logic_Sync_Worker import lock_age_seconds
+
+        lock_file = FileLockManager.get_lock_file_path(entry["remote"])
+        try:
+            with open(lock_file, "r") as f:
+                contents = f.read()
+        except OSError:
+            return
+        age = lock_age_seconds(store, entry, contents)
+        if age is not None:
+            FileLockManager.seed_observation(lock_file, contents, age)
+
+    def _sync_session_started(self) -> None:
+        from Application_Logic.Logic_Sync_Worker import SESSION_FILE, write_json
+        from .sync_bridge import SyncBridge
+
+        if self.sync_entry is None:
+            return
+        store = self.sync_store()
+        write_json(store.control(self.sync_entry, SESSION_FILE),
+                   {"pid": os.getpid(), "mode": self.mode})
+        self._sync_bridge = SyncBridge(self, store, self.sync_entry)
+        self._sync_bridge.start()
+        self.ensure_sync_worker()
+
+    def ensure_sync_worker(self) -> None:
+        from Application_Logic.Logic_Sync_Worker import worker_running
+        from desktop.sync_worker import reap_stopped, start_detached
+
+        if os.environ.get("ARCH_SYNC_WORKER") == "off":
+            return
+        reap_stopped()
+        if worker_running(self.sync_store()):
+            return
+        try:
+            start_detached()
+        except OSError:
+            logger.warning("Could not start the Sync Worker", exc_info=True)
+
+    def _request_push(self, closing: bool = False) -> None:
+        """Asks the worker to publish. With ``closing``, it also releases the lock
+        once the last push has finished."""
+        from Application_Logic.Logic_Sync_Worker import PUSH_REQUEST, write_json
+
+        if self.sync_entry is None or self.mode != MODE_EXCLUSIVE or self.lock_lost:
+            return
+        store = self.sync_store()
+        write_json(store.control(self.sync_entry, PUSH_REQUEST),
+                   {"token": self.sync_token, "release_lock": closing})
+        self.ensure_sync_worker()
+
+    def publish_now(self) -> None:
+        """Publishes work finished in the background, without waiting for Save."""
+        with self._lock:
+            self._request_push()
+
+    def _sync_session_ended(self) -> None:
+        from Application_Logic.Logic_Sync_Worker import SESSION_FILE, remove_file
+
+        store = self.sync_store()
+        entry = self.sync_entry
+        if self._sync_bridge is not None:
+            self._sync_bridge.stop()
+            self._sync_bridge = None
+        try:
+            self._request_push(closing=True)
+            remove_file(store.control(entry, SESSION_FILE))
+            self.ensure_sync_worker()
+        except OSError:
+            logger.warning("Error ending the sync session", exc_info=True)
+        self.sync_entry = None
+        self.sync_token = None
+        self.sync_hold = None
+
+    def reload_after_pull(self) -> None:
+        """Re-reads what the session caches from the database, because a pull
+        changed it underneath. Runs on the bridge thread."""
+        with self._lock:
+            if self.is_open:
+                self.arch_manager.load_registry()
+                self.release_manager.load_registry()
+                self.invalidate_matchers()
+        self.bus.publish("db-changed", {"reason": "sync-pull"})
+
+    def on_sync_stopped(self, status: dict) -> None:
+        """Called on the bridge thread: this session's edits can't be published,
+        so it drops to view-only."""
+        self._on_lock_lost({"status": "sync_stopped", "message": status.get("message", "")})
 
     def _on_lock_lost(self, info: dict) -> None:
         # Minimal, thread-safe: flip a flag + publish. require_edit() then refuses
@@ -560,7 +797,9 @@ class AppState:
                 self.db.close()
             except Exception:  # noqa: BLE001
                 logger.warning("Error closing DB", exc_info=True)
-        if self.project_path and self.mode == MODE_EXCLUSIVE:
+        if self.sync_entry is not None:
+            self._sync_session_ended()
+        elif self.project_path and self.mode == MODE_EXCLUSIVE:
             try:
                 FileLockManager.release_lock(self.project_path)
             except Exception:  # noqa: BLE001

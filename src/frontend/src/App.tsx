@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api/client";
-import type { JobPayload, ProjectStatus } from "./api/types";
+import type { JobPayload, ProjectStatus, SyncOverview, SyncStatus } from "./api/types";
 import { useSSE } from "./api/useSSE";
 import { nativeSetTitle } from "./native";
 import { useUpdateCheck } from "./update";
@@ -13,6 +13,8 @@ import { AIChat } from "./views/AIChat";
 import { AIGeneration } from "./views/AIGeneration";
 import { ChangeLog } from "./views/ChangeLog";
 import { CodeMap } from "./views/CodeMap";
+import { SyncPanel } from "./components/SyncPanel";
+import { TestBuilds } from "./views/TestBuilds";
 import { TestCodeInjection } from "./views/TestCodeInjection";
 import { TestDesign } from "./views/TestDesign";
 import { Workspace } from "./views/Workspace";
@@ -59,6 +61,21 @@ export default function App() {
     reloadStatus();
   }, [reloadStatus]);
 
+  const [injectionPage, setInjectionPage] = useState<"hooks" | "builds">("hooks");
+  const [sync, setSync] = useState<SyncStatus | null>(null);
+  const [syncOpen, setSyncOpen] = useState(false);
+
+  useEffect(() => {
+    if (!status?.tracked) {
+      setSync(null);
+      return;
+    }
+    api
+      .get<SyncOverview>("/sync/status")
+      .then((o) => setSync(o.current))
+      .catch(() => setSync(null));
+  }, [status?.tracked, status?.path]);
+
   const toast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimer.current) window.clearTimeout(toastTimer.current);
@@ -72,7 +89,10 @@ export default function App() {
   useSSE(
     useCallback(
       (e) => {
-        if (e.event === "lock" || e.event === "lock_lost") {
+        if (e.event === "sync") {
+          setSync(e.data as SyncStatus);
+          reloadStatus();
+        } else if (e.event === "lock" || e.event === "lock_lost") {
           reloadStatus();
           if (e.event === "lock_lost" || e.data?.lock_lost) {
             toast("Edit lock lost — switched to view-only");
@@ -232,7 +252,11 @@ export default function App() {
 
       {status.lock_lost && (
         <div className="banner err">
-          ⚠ The edit lock was taken by another user. You are now in view-only mode.
+          ⚠{" "}
+          {String(
+            status.lock_info?.message ?? "The edit lock was taken by another user.",
+          )}{" "}
+          You are now in view-only mode.
         </div>
       )}
       {!status.lock_lost && status.mode === "view" && !viewBannerDismissed && (
@@ -252,6 +276,8 @@ export default function App() {
       {activeTab === "Workspace" ? (
         <Workspace
           status={status}
+          sync={sync}
+          onSync={() => setSyncOpen(true)}
           onReloadStatus={reloadStatus}
           toast={toast}
           importOpen={importOpen}
@@ -278,15 +304,54 @@ export default function App() {
           onFocusConsumed={() => setCodeMapFocus(null)}
         />
       ) : activeTab === "Test Injection" ? (
-        <TestCodeInjection toast={toast} canEdit={canEdit} />
+        <div className="tb-host">
+          <div className="tb-switch">
+            <div className="tci-modeswitch">
+              <button
+                className={injectionPage === "hooks" ? "active" : ""}
+                onClick={() => setInjectionPage("hooks")}
+              >
+                Test Code
+              </button>
+              <button
+                className={injectionPage === "builds" ? "active" : ""}
+                onClick={() => setInjectionPage("builds")}
+              >
+                Test Builds
+              </button>
+            </div>
+          </div>
+          {injectionPage === "hooks" ? (
+            <TestCodeInjection toast={toast} canEdit={canEdit} />
+          ) : (
+            <TestBuilds toast={toast} canEdit={canEdit} />
+          )}
+        </div>
       ) : activeTab === "Change Log" ? (
         <ChangeLog toast={toast} />
       ) : (
         <div className="center-msg">{activeTab} — coming in a later Phase 2 slice.</div>
       )}
 
+      {sync?.state === "pulling" && (
+        <div className="modal-overlay">
+          <div className="modal confirm-modal">
+            <div className="confirm-body">{sync.message}</div>
+          </div>
+        </div>
+      )}
+      {syncOpen && (
+        <SyncPanel
+          status={status}
+          toast={toast}
+          onClose={() => setSyncOpen(false)}
+          onChanged={reloadStatus}
+        />
+      )}
+
       <JobProgressOverlay
-        jobs={Object.values(activeJobs)}
+        // A build run lasts all night and shows its progress on its own page.
+        jobs={Object.values(activeJobs).filter((j) => j.kind !== "test_build_run")}
         onCancel={(id) => {
           api
             .post(`/jobs/${id}/cancel`)

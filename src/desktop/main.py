@@ -21,6 +21,7 @@ from pathlib import Path
 import webview
 
 from backend.security import generate_token
+from desktop import sync_window, sync_worker
 from desktop.worker import spawn_worker, wait_until_ready
 
 logger = logging.getLogger(__name__)
@@ -537,6 +538,14 @@ if __name__ == "__main__":
     # Required so the spawned worker re-executes correctly inside a frozen
     # (PyInstaller) bundle; a no-op in a normal interpreter.
     multiprocessing.freeze_support()
+
+    # The frozen app is also the Sync Worker, a separate process that outlives it.
+    if sync_worker.FLAG in sys.argv:
+        sync_worker.main()
+        sys.exit(0)
+    if sync_worker.WINDOW_FLAG in sys.argv:
+        sync_window.main()
+        sys.exit(0)
 
     # Arm crash logging before anything else can fail. A windowed build has no
     # console, so without this an early failure (e.g. the Windows winforms/

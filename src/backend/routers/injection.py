@@ -13,7 +13,6 @@ console can scroll logs live. It runs independently of export.
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import threading
 import uuid
@@ -28,6 +27,8 @@ from ..security import require_token
 from ..state import AppState, ProjectError
 
 from Application_Logic import Logic_Code_Injection as injection
+from Application_Logic import Logic_Test_Builds as test_builds
+from Application_Logic.Logic_File_Locking import FileLockManager
 from Application_Logic.Logic_Source_Store import (
     FilesystemSourceProvider, SourceFile, SOURCE_EXTENSIONS,
     release_source_provider,
@@ -54,12 +55,14 @@ def _guard(fn):
 # ----------------------------------------------------------------------
 # Production-source helpers (active release's DB-stored source)
 # ----------------------------------------------------------------------
-def _production_provider(state: AppState):
-    """A source provider for the active release's production source, or raise."""
+def _production_provider(state: AppState, release_id: Optional[int] = None):
+    """A source provider for a release's production source, or raise. Without
+    ``release_id`` it's the active release."""
     db = state.require_open()
-    rm = state.require_releases()
-    active = rm.get_active_release()
-    rid = active.id if active else None
+    rid = release_id
+    if rid is None:
+        active = state.require_releases().get_active_release()
+        rid = active.id if active else None
     provider = release_source_provider(db, rid)
     if provider is None:
         raise ProjectError(
@@ -403,14 +406,27 @@ class ExportBody(BaseModel):
     mode: str = "modified"        # "modified" | "reconstruct"
     out_dir: str
     overwrite: bool = False       # allow writing into a non-empty directory
+    release_id: Optional[int] = None    # defaults to the active release
+    continue_anyway: bool = False       # past the clean-release lock
+    continue_reason: str = ""
 
 
-def _write_file(out_dir: str, rel_path: str, text: str) -> str:
-    target = os.path.join(out_dir, rel_path.replace("/", os.sep))
-    os.makedirs(os.path.dirname(target) or out_dir, exist_ok=True)
-    with open(target, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-    return target
+def require_clean_lock(state: AppState, release_id: int, continue_anyway: bool,
+                       reason: str = "") -> None:
+    """Stops before code changes if the release's clean data isn't imported.
+    Continuing is the user's responsibility and is recorded, so it needs a
+    session that can write."""
+    db = state.require_open()
+    rm = state.require_releases()
+    name = next((r.name for r in rm.releases if r.id == release_id), "")
+    lock = test_builds.clean_lock_status(db, release_id, name)
+    if lock["ok"]:
+        return
+    if not continue_anyway:
+        raise HTTPException(status_code=409, detail={"code": "clean_lock", **lock})
+    db = state.require_edit()
+    db.add_clean_lock_override(release_id, lock["missing"], reason,
+                               FileLockManager.get_username())
 
 
 @router.post("/projects/{test_project_id}/export")
@@ -429,39 +445,15 @@ def export(test_project_id: int, body: ExportBody,
                 "Output directory is not empty. Enable overwrite to proceed.")
         os.makedirs(out_dir, exist_ok=True)
 
-        provider = _production_provider(state)
-        all_injections = db.list_injections(test_project_id)
-        by_file: dict[str, list] = {}
-        for inj in all_injections:
-            by_file.setdefault(inj["src_file_path"], []).append(inj)
-
-        written: list[str] = []
-        conflicts: list[dict] = []
-
-        def emit_production(rel_path: str):
-            text = provider.read_file(rel_path)
-            if text is None:
-                return
-            hooks = by_file.get(rel_path)
-            if hooks:
-                text, results = injection.apply_injections(text, hooks)
-                conflicts.extend(
-                    {"src_file_path": rel_path, "injection_id": r["injection_id"]}
-                    for r in results if not r["applied"])
-            written.append(_write_file(out_dir, rel_path, text))
-
-        if body.mode == "modified":
-            for rel_path in by_file:
-                emit_production(rel_path)
-        else:  # reconstruct: every production file
-            for sf in provider.list_files():
-                emit_production(sf.rel_path)
-
-        # Test helper files are always exported (under their own rel paths).
-        for f in db.list_test_project_files(test_project_id):
-            text = db.read_test_project_file(test_project_id, f["rel_path"])
-            if text is not None:
-                written.append(_write_file(out_dir, f["rel_path"], text))
+        release_id = body.release_id
+        if release_id is None:
+            release_id = state.require_releases().get_active_release().id
+        require_clean_lock(state, release_id, body.continue_anyway, body.continue_reason)
+        provider = _production_provider(state, release_id)
+        files, conflicts = test_builds.render_hooked_files(
+            db, provider, test_project_id, body.mode)
+        written = [test_builds.write_source_file(out_dir, rel_path, text)
+                   for rel_path, text in files.items()]
 
         return {"out_dir": out_dir, "count": len(written),
                 "written": written, "conflicts": conflicts}
@@ -518,21 +510,7 @@ def set_settings(body: SettingsBody, state: AppState = Depends(get_state)) -> di
     return _guard(go)
 
 
-def _build_argv(terminal: str, command: str, cwd: str, distro: str) -> list[str]:
-    """Construct the platform/terminal-appropriate argv for ``command``."""
-    if terminal == "cmd":
-        return ["cmd.exe", "/c", command]
-    if terminal == "powershell":
-        return ["powershell.exe", "-NoProfile", "-Command", command]
-    if terminal == "wsl":
-        inner = f"cd {shlex.quote(cwd)} && {command}" if cwd else command
-        argv = ["wsl.exe"]
-        if distro:
-            argv += ["-d", distro]
-        argv += ["--", "sh", "-c", inner]
-        return argv
-    # bash (default)
-    return ["bash", "-lc", command]
+_build_argv = test_builds.build_argv
 
 
 class BuildBody(BaseModel):

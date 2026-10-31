@@ -15,7 +15,7 @@ import { api, ApiError } from "./api/client";
 
 // Single source of truth for the running version. Keep in lockstep with
 // package.json / RELEASE_NOTES.md on every release.
-export const APP_VERSION = "3.1.1";
+export const APP_VERSION = "3.2.0";
 
 export const GITHUB_REPO = "alexmasso96/Embeded-Software-Architecture-Validation";
 export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;

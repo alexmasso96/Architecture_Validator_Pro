@@ -37,6 +37,8 @@ def register_handlers(jobs: JobManager, state: AppState) -> None:
     jobs.register("import_source", _make_import_source(state))
     jobs.register("import_objects", _make_import_objects(state))
     jobs.register("run_calltree_tests", _make_run_calltree_tests(state))
+    jobs.register("test_build_run", _make_test_build_run(state))
+    jobs.register("mapped_switch", _make_mapped_switch(state))
 
 
 # ----------------------------------------------------------------------
@@ -731,4 +733,104 @@ def _make_import_symbols(state: AppState):
             raise ProjectError("file_path and release_id are required.")
         kind = _detect_import_kind(file_path)
         return _import_symbol_file(state, params, progress, kind=kind)
+    return handler
+
+
+# ----------------------------------------------------------------------
+# test_build_run — #15: an overnight series of test builds, one after another.
+# Holds the session's edit lock for the whole run. With ``resume_run_id`` it
+# picks up a run that a stopped app left unfinished.
+# ----------------------------------------------------------------------
+def _make_test_build_run(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        from Application_Logic import Logic_Test_Builds as tb
+        from Application_Logic.Logic_Sleep_Guard import prevent_sleep
+
+        from .routers.prefs import app_data_dir
+        from .routers.test_builds import binary_store
+
+        state.require_edit()
+        state.begin_build_run()
+        try:
+            with _worker_db(state) as wdb, prevent_sleep():
+                store = binary_store(state)
+                run_id = params.get("resume_run_id")
+                if run_id is None:
+                    run_id = _start_build_run(state, wdb, store, params)
+                state.active_run_id = run_id
+
+                def on_line(item: dict, line: str) -> None:
+                    state.bus.publish("build", {
+                        "build_id": f"run-{run_id}", "event": "log",
+                        "build_name": item["build_name"], "line": line})
+
+                result = tb.execute_run(tb.RunContext(
+                    db=wdb, store=store, now=wdb._now_iso, on_line=on_line,
+                    work_dir=str(app_data_dir() / "build_runs"
+                                 / wdb.get_meta("project_uuid", "") / str(run_id)),
+                    progress=progress, cancel=cancel,
+                    lock_lost=lambda: state.lock_lost), run_id)
+        finally:
+            state.end_build_run()
+        state.publish_now()
+        state.bus.publish("db-changed", {"reason": "test-build-run-finished"})
+        return result
+    return handler
+
+
+def _start_build_run(state: AppState, wdb, store, params: dict) -> int:
+    from Application_Logic import Logic_Test_Builds as tb
+    from Application_Logic.Logic_File_Locking import FileLockManager
+
+    build_ids = params.get("build_ids") or []
+    if not build_ids:
+        raise ProjectError("Choose at least one test build.")
+    overridden = tuple(params.get("continue_anyway") or ())
+    names = {r.id: r.name for r in state.require_releases().releases}
+    report = tb.preflight(wdb, store, build_ids, overridden, names)
+    if report["problems"]:
+        raise ProjectError("Pre-flight found problems: " + "; ".join(
+            p["problem"] for p in report["problems"]))
+    user = FileLockManager.get_username()
+    for lock in report["locks"]:
+        if not lock["ok"]:
+            wdb.add_clean_lock_override(lock["release_id"], lock["missing"],
+                                        params.get("continue_reason", ""), user)
+    return tb.start_run(wdb, user, tb.plan_run(wdb, build_ids))
+
+
+# ----------------------------------------------------------------------
+# mapped_switch — #15: replace the mapped folder's files with a captured build.
+# Reads the store and writes to the user's drive, so it needs no edit lock.
+# ----------------------------------------------------------------------
+def _make_mapped_switch(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        from Application_Logic import Logic_Mapped_Release as mapped
+        from Application_Logic.Logic_Test_Builds import CAPTURE_COMPLETE
+
+        from .routers.test_builds import binary_store, mapped_folder, mapped_identity
+
+        with _worker_db(state) as wdb:
+            folder = mapped_folder(state)
+            if not folder:
+                raise ProjectError("Choose the mapped folder first.")
+            build = wdb.get_test_build(params.get("build_id"))
+            if build is None:
+                raise ProjectError("No such test build.")
+            active = state.require_releases().get_active_release()
+            if active is None or build["release_id"] != active.id:
+                raise ProjectError("This build belongs to another release. Each "
+                                   "release needs its own builds.")
+            if build["capture_status"] != CAPTURE_COMPLETE:
+                raise ProjectError(f"{build['name']} has no complete capture.")
+            manifest = wdb.get_build_manifest(build["id"])
+            try:
+                result = mapped.switch(
+                    folder, binary_store(state), manifest, mapped_identity(state, build),
+                    allow_outside_changes=bool(params.get("allow_outside_changes")),
+                    progress=progress)
+            except mapped.SwitchError as e:
+                detail = f": {', '.join(e.files)}" if e.files else ""
+                raise ProjectError(f"{e}{detail}") from e
+        return {**result, "build_name": build["name"]}
     return handler

@@ -14,6 +14,7 @@ export interface ProjectStatus {
   release_count: number;
   lock_info: Record<string, unknown> | null;
   lock_lost: boolean;
+  tracked?: boolean;
 }
 
 export interface ModelInfo {
@@ -386,6 +387,98 @@ export interface BuildSettings {
   build_cwd: string;
   make_script: string;
   source_path: string;
+}
+
+// Test Builds (#15) — mirrors backend/routers/test_builds.py.
+export interface TestBuild {
+  id: number;
+  release_id: number;
+  test_project_id: number | null;
+  name: string;
+  is_main: boolean;
+  build_command: string;
+  build_cwd: string;
+  clean_command: string;
+  terminal: TerminalKind;
+  wsl_distro: string;
+  source_dir: string;
+  output_dir: string;
+  capture_status: string;
+  captured_at: string;
+  files: number;
+  size: number;
+}
+
+export interface TrackedArtifact {
+  path: string;
+  is_folder: boolean;
+  include_patterns: string;
+  exclude_patterns: string;
+  role: string;
+}
+
+export interface CleanLockStatus {
+  ok: boolean;
+  missing: string[];
+  message: string;
+  release_id: number;
+  release_name: string;
+}
+
+export interface PreflightReport {
+  items: { test_build_id: number | null; build_name: string; release_id: number }[];
+  problems: {
+    test_build_id: number | null;
+    build_name: string;
+    release_id: number | null;
+    problem: string;
+  }[];
+  warnings: { build_name: string; warning: string }[];
+  locks: CleanLockStatus[];
+}
+
+export interface BuildRunItem {
+  id: number;
+  build_name: string;
+  status: string;
+  returncode: number | null;
+  message: string;
+  conflicts: unknown[];
+  has_log: boolean;
+}
+
+export interface BuildRun {
+  id: number;
+  started_at: string;
+  ended_at: string;
+  username: string;
+  status: string;
+  items: BuildRunItem[];
+}
+
+export interface MappedStatus {
+  folder: string;
+  build_id: number | null;
+  build_name: string | null;
+  release_name: string | null;
+  warning: string;
+  interrupted: { target: string; release: string; previous: string } | null;
+  targets: { id: number; name: string; is_main: boolean }[];
+}
+
+// Sync (#16) — mirrors backend/routers/sync.py.
+export interface SyncStatus {
+  state?: string;
+  message?: string;
+  last_synced?: string;
+  revision?: number;
+  by?: string;
+}
+
+export interface SyncOverview {
+  worker_running: boolean;
+  current: SyncStatus | null;
+  hold_by: string | null;
 }
 
 // AI providers (GET /api/ai/providers) — mirrors backend/routers/ai.py.

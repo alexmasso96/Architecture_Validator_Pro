@@ -198,7 +198,8 @@ def test_export_modified_only(client):
                 headers=AUTH)
     with tempfile.TemporaryDirectory() as out:
         r = client.post(f"/api/injection/projects/{pid}/export",
-                        json={"mode": "modified", "out_dir": out, "overwrite": True},
+                        json={"mode": "modified", "out_dir": out, "overwrite": True,
+                              "continue_anyway": True},
                         headers=AUTH)
         assert r.status_code == 200, r.text
         injected = open(os.path.join(out, "src", "main.c")).read()
@@ -211,7 +212,8 @@ def test_export_reconstruct(client):
     _add_hook(client, pid, injected_code="ASSERT(1);")
     with tempfile.TemporaryDirectory() as out:
         r = client.post(f"/api/injection/projects/{pid}/export",
-                        json={"mode": "reconstruct", "out_dir": out, "overwrite": True},
+                        json={"mode": "reconstruct", "out_dir": out, "overwrite": True,
+                              "continue_anyway": True},
                         headers=AUTH)
         assert r.status_code == 200, r.text
         assert os.path.exists(os.path.join(out, "src", "main.c"))

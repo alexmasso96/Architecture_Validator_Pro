@@ -46,6 +46,8 @@ hiddenimports = [
 ]
 hiddenimports += collect_submodules('uvicorn')
 hiddenimports += collect_submodules('webview')
+# The Sync Worker's tray icon: pystray picks its platform backend at runtime.
+hiddenimports += collect_submodules('pystray')
 
 # Windows: pywebview's default backend is winforms, which imports `clr`
 # (pythonnet) and bootstraps the .NET runtime through `clr_loader`. PyInstaller's

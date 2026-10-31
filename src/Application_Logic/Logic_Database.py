@@ -16,6 +16,7 @@ import datetime
 import threading
 import time
 import logging
+import uuid
 from contextlib import contextmanager
 from typing import Optional
 
@@ -50,7 +51,7 @@ def _timed(label: str, **extra):
     detail = " ".join(f"{k}={v}" for k, v in extra.items())
     _perf_logger.info("[PERF] %-45s %6.1f ms  %s", label, ms, detail)
 
-DB_SCHEMA_VERSION = 4
+DB_SCHEMA_VERSION = 5
 
 # Component name given to a release's symbol file when none is chosen — and to
 # the single ELF of a project created before releases had several files.
@@ -182,6 +183,13 @@ def _is_network_path_windows(db_path: str) -> bool:
     except Exception:
         pass
     return False
+
+
+def is_network_path(db_path: str) -> bool:
+    """Whether a project path is on a network share, as far as this OS can tell."""
+    if sys.platform == "win32":
+        return _is_network_path_windows(db_path)
+    return _is_network_fs_posix(db_path)
 
 
 def _is_network_fs_posix(db_path: str) -> bool:
@@ -776,6 +784,120 @@ class ProjectDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_test_code_injections
                     ON test_code_injections(test_project_id);
+
+                -- Test Builds (#15): real-ECU builds saved per release. The Main
+                -- capture is the row with is_main=1 and no test project. Binaries
+                -- live in Project.arch.binaries/; build_manifests lists them.
+                CREATE TABLE IF NOT EXISTS test_builds (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    release_id      INTEGER NOT NULL
+                                        REFERENCES releases(id) ON DELETE CASCADE,
+                    test_project_id INTEGER
+                                        REFERENCES test_projects(id) ON DELETE CASCADE,
+                    name            TEXT    NOT NULL,
+                    is_main         INTEGER NOT NULL DEFAULT 0,
+                    build_command   TEXT    NOT NULL DEFAULT '',
+                    build_cwd       TEXT    NOT NULL DEFAULT '',
+                    clean_command   TEXT    NOT NULL DEFAULT '',
+                    terminal        TEXT    NOT NULL DEFAULT 'bash',
+                    wsl_distro      TEXT    NOT NULL DEFAULT '',
+                    source_dir      TEXT    NOT NULL DEFAULT '',
+                    output_dir      TEXT    NOT NULL DEFAULT '',
+                    capture_status  TEXT    NOT NULL DEFAULT 'none',
+                    captured_at     TEXT    NOT NULL DEFAULT '',
+                    created_at      TEXT    NOT NULL DEFAULT ''
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_test_builds_name
+                    ON test_builds(release_id, name);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_test_builds_main
+                    ON test_builds(release_id) WHERE is_main=1;
+
+                -- What a capture saves. test_build_id NULL is the project-wide
+                -- list; a build with rows of its own uses only those.
+                CREATE TABLE IF NOT EXISTS tracked_artifacts (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    test_build_id    INTEGER
+                                         REFERENCES test_builds(id) ON DELETE CASCADE,
+                    path             TEXT    NOT NULL,
+                    is_folder        INTEGER NOT NULL DEFAULT 0,
+                    include_patterns TEXT    NOT NULL DEFAULT '',
+                    exclude_patterns TEXT    NOT NULL DEFAULT '',
+                    role             TEXT    NOT NULL DEFAULT 'Flash'
+                );
+                CREATE INDEX IF NOT EXISTS idx_tracked_artifacts
+                    ON tracked_artifacts(test_build_id);
+
+                CREATE TABLE IF NOT EXISTS build_runs (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT    NOT NULL DEFAULT '',
+                    ended_at   TEXT    NOT NULL DEFAULT '',
+                    username   TEXT    NOT NULL DEFAULT '',
+                    status     TEXT    NOT NULL DEFAULT 'running'
+                );
+
+                CREATE TABLE IF NOT EXISTS build_run_items (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id        INTEGER NOT NULL
+                                      REFERENCES build_runs(id) ON DELETE CASCADE,
+                    test_build_id INTEGER
+                                      REFERENCES test_builds(id) ON DELETE SET NULL,
+                    build_name    TEXT    NOT NULL DEFAULT '',
+                    release_id    INTEGER,
+                    position      INTEGER NOT NULL DEFAULT 0,
+                    status        TEXT    NOT NULL DEFAULT 'pending',
+                    returncode    INTEGER,
+                    message       TEXT    NOT NULL DEFAULT '',
+                    log_gzip      BLOB,
+                    conflicts     TEXT    NOT NULL DEFAULT '[]',
+                    started_at    TEXT    NOT NULL DEFAULT '',
+                    ended_at      TEXT    NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_build_run_items
+                    ON build_run_items(run_id);
+
+                CREATE TABLE IF NOT EXISTS build_manifests (
+                    test_build_id INTEGER NOT NULL
+                                      REFERENCES test_builds(id) ON DELETE CASCADE,
+                    rel_path      TEXT    NOT NULL,
+                    role          TEXT    NOT NULL DEFAULT 'Flash',
+                    size          INTEGER NOT NULL DEFAULT 0,
+                    sha256        TEXT    NOT NULL,
+                    PRIMARY KEY (test_build_id, rel_path)
+                );
+
+                -- Sync (#16): one row per section per push, and what each
+                -- section's state is. Triggers that set `dirty` are added when
+                -- a project is tracked (Logic_Sync_Sections).
+                CREATE TABLE IF NOT EXISTS sync_sections (
+                    scope    TEXT    NOT NULL,
+                    section  TEXT    NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    dirty    INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (scope, section)
+                );
+                CREATE TABLE IF NOT EXISTS sync_log (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    revision     INTEGER NOT NULL,
+                    timestamp    TEXT    NOT NULL DEFAULT '',
+                    username     TEXT    NOT NULL DEFAULT '',
+                    hostname     TEXT    NOT NULL DEFAULT '',
+                    release_id   INTEGER,
+                    release_name TEXT    NOT NULL DEFAULT '',
+                    model_id     INTEGER,
+                    section      TEXT    NOT NULL DEFAULT '',
+                    action       TEXT    NOT NULL DEFAULT '',
+                    rows_changed INTEGER NOT NULL DEFAULT 0
+                );
+
+                -- "Continue anyway" answers to the clean-release lock.
+                CREATE TABLE IF NOT EXISTS clean_lock_overrides (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    release_id INTEGER REFERENCES releases(id) ON DELETE CASCADE,
+                    missing    TEXT    NOT NULL DEFAULT '',
+                    reason     TEXT    NOT NULL DEFAULT '',
+                    username   TEXT    NOT NULL DEFAULT '',
+                    created_at TEXT    NOT NULL DEFAULT ''
+                );
             """)
 
             # Add parser_backend column to elf_index if missing (Phase 13 migration)
@@ -847,6 +969,11 @@ class ProjectDatabase:
                 "FROM releases r WHERE COALESCE(r.elf_hash, '') != '' AND NOT EXISTS "
                 " (SELECT 1 FROM release_symbol_files s WHERE s.release_id = r.id)",
                 (DEFAULT_SYMBOL_COMPONENT,))
+
+            # A project keeps this identity when it's moved or copied.
+            self._conn.execute(
+                "INSERT OR IGNORE INTO project_meta (key, value) VALUES ('project_uuid', ?)",
+                (uuid.uuid4().hex,))
 
             # Record / upgrade the schema version on the SAME connection+transaction
             # (must NOT call set_meta here — it opens its own `with self._conn`).
@@ -1926,6 +2053,243 @@ class ProjectDatabase:
                 "WHERE test_project_id=? AND rel_path=?", (test_project_id, rel_path))
 
     # -- injection hooks ------------------------------------------------
+    # ------------------------------------------------------------------
+    # Test Builds (#15)
+    # ------------------------------------------------------------------
+    _TEST_BUILD_TEXT = ("build_command", "build_cwd", "clean_command")
+    _TEST_BUILD_PLAIN = ("name", "terminal", "wsl_distro", "source_dir", "output_dir",
+                         "capture_status", "captured_at")
+
+    def _test_build_row(self, r) -> dict:
+        return {"id": r[0], "release_id": r[1], "test_project_id": r[2], "name": r[3],
+                "is_main": bool(r[4]), "build_command": self._dec_text("E", r[5]),
+                "build_cwd": self._dec_text("E", r[6]),
+                "clean_command": self._dec_text("E", r[7]), "terminal": r[8],
+                "wsl_distro": r[9], "source_dir": r[10], "output_dir": r[11],
+                "capture_status": r[12], "captured_at": r[13], "created_at": r[14]}
+
+    _TEST_BUILD_SELECT = (
+        "SELECT id, release_id, test_project_id, name, is_main, build_command, "
+        "build_cwd, clean_command, terminal, wsl_distro, source_dir, output_dir, "
+        "capture_status, captured_at, created_at FROM test_builds ")
+
+    def create_test_build(self, release_id: int, name: str, test_project_id=None,
+                          is_main: bool = False, **fields) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO test_builds (release_id, test_project_id, name, is_main, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (release_id, test_project_id, name, 1 if is_main else 0,
+                 self._now_iso()))
+            build_id = cur.lastrowid
+        if fields:
+            self.update_test_build(build_id, **fields)
+        return build_id
+
+    def update_test_build(self, build_id: int, **fields) -> None:
+        sets, params = [], []
+        for key, value in fields.items():
+            if key in self._TEST_BUILD_TEXT:
+                value = self._enc_text("E", value)
+            elif key not in self._TEST_BUILD_PLAIN:
+                raise ValueError(f"Unknown test build field: {key}")
+            sets.append(f"{key}=?")
+            params.append(value)
+        if not sets:
+            return
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE test_builds SET {', '.join(sets)} WHERE id=?",
+                (*params, build_id))
+
+    def get_test_build(self, build_id: int):
+        row = self._conn.execute(
+            self._TEST_BUILD_SELECT + "WHERE id=?", (build_id,)).fetchone()
+        return self._test_build_row(row) if row else None
+
+    def list_test_builds(self, release_id: int = None) -> list:
+        """The release's builds with Main first, or every build if no release."""
+        where, params = "", ()
+        if release_id is not None:
+            where, params = "WHERE release_id=? ", (release_id,)
+        rows = self._conn.execute(
+            self._TEST_BUILD_SELECT + where + "ORDER BY is_main DESC, name", params)
+        return [self._test_build_row(r) for r in rows.fetchall()]
+
+    def get_main_build(self, release_id: int):
+        row = self._conn.execute(
+            self._TEST_BUILD_SELECT + "WHERE release_id=? AND is_main=1",
+            (release_id,)).fetchone()
+        return self._test_build_row(row) if row else None
+
+    def delete_test_build(self, build_id: int) -> None:
+        """Removes the build and its manifest. Blobs stay until a store cleanup."""
+        with self._conn:
+            self._conn.execute("DELETE FROM test_builds WHERE id=?", (build_id,))
+
+    def _artifact_rows(self, where: str, params: tuple) -> list:
+        rows = self._conn.execute(
+            "SELECT id, test_build_id, path, is_folder, include_patterns, "
+            f"exclude_patterns, role FROM tracked_artifacts WHERE {where} ORDER BY id",
+            params)
+        return [{"id": r[0], "test_build_id": r[1], "path": r[2], "is_folder": bool(r[3]),
+                 "include_patterns": r[4], "exclude_patterns": r[5], "role": r[6]}
+                for r in rows.fetchall()]
+
+    def list_tracked_artifacts(self, test_build_id: int = None) -> list:
+        """The list stored for exactly this scope (None = the project-wide list)."""
+        if test_build_id is None:
+            return self._artifact_rows("test_build_id IS NULL", ())
+        return self._artifact_rows("test_build_id=?", (test_build_id,))
+
+    def tracked_artifacts_for_build(self, test_build_id: int) -> list:
+        return (self.list_tracked_artifacts(test_build_id)
+                or self.list_tracked_artifacts(None))
+
+    def replace_tracked_artifacts(self, test_build_id, artifacts: list) -> None:
+        """Replaces one scope's list (test_build_id None = project-wide)."""
+        with self._conn:
+            if test_build_id is None:
+                self._conn.execute(
+                    "DELETE FROM tracked_artifacts WHERE test_build_id IS NULL")
+            else:
+                self._conn.execute(
+                    "DELETE FROM tracked_artifacts WHERE test_build_id=?", (test_build_id,))
+            self._conn.executemany(
+                "INSERT INTO tracked_artifacts (test_build_id, path, is_folder, "
+                "include_patterns, exclude_patterns, role) VALUES (?, ?, ?, ?, ?, ?)",
+                [(test_build_id, a["path"], 1 if a.get("is_folder") else 0,
+                  a.get("include_patterns", ""), a.get("exclude_patterns", ""),
+                  a.get("role", "Flash")) for a in artifacts])
+
+    def get_build_manifest(self, build_id: int) -> list:
+        rows = self._conn.execute(
+            "SELECT rel_path, role, size, sha256 FROM build_manifests "
+            "WHERE test_build_id=? ORDER BY rel_path", (build_id,))
+        return [{"rel_path": r[0], "role": r[1], "size": r[2], "sha256": r[3]}
+                for r in rows.fetchall()]
+
+    def replace_build_manifest(self, build_id: int, entries: list, status: str,
+                               captured_at: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM build_manifests WHERE test_build_id=?", (build_id,))
+            self._conn.executemany(
+                "INSERT INTO build_manifests (test_build_id, rel_path, role, size, sha256) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(build_id, e["rel_path"], e["role"], e["size"], e["sha256"])
+                 for e in entries])
+            self._conn.execute(
+                "UPDATE test_builds SET capture_status=?, captured_at=? WHERE id=?",
+                (status, captured_at, build_id))
+
+    def get_referenced_blob_hashes(self) -> set:
+        rows = self._conn.execute("SELECT DISTINCT sha256 FROM build_manifests")
+        return {r[0] for r in rows.fetchall()}
+
+    def get_build_manifest_size(self, build_id: int) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM build_manifests WHERE test_build_id=?",
+            (build_id,)).fetchone()
+        return int(row[0] or 0)
+
+    def create_build_run(self, username: str, items: list) -> int:
+        """``items`` holds dicts with test_build_id, build_name and release_id, in run order."""
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO build_runs (started_at, username, status) "
+                "VALUES (?, ?, 'running')",
+                (self._now_iso(), username))
+            run_id = cur.lastrowid
+            self._conn.executemany(
+                "INSERT INTO build_run_items (run_id, test_build_id, build_name, "
+                "release_id, position) VALUES (?, ?, ?, ?, ?)",
+                [(run_id, it["test_build_id"], it["build_name"], it["release_id"], i)
+                 for i, it in enumerate(items)])
+        return run_id
+
+    def finish_build_run(self, run_id: int, status: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE build_runs SET status=?, ended_at=? WHERE id=?",
+                (status, self._now_iso(), run_id))
+
+    def set_build_run_status(self, run_id: int, status: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE build_runs SET status=? WHERE id=?", (status, run_id))
+
+    def update_build_run_item(self, item_id: int, **fields) -> None:
+        allowed = {"status", "returncode", "message", "conflicts", "started_at", "ended_at"}
+        unknown = set(fields) - allowed - {"log"}
+        if unknown:
+            raise ValueError(f"Unknown build run item fields: {sorted(unknown)}")
+        sets, params = [], []
+        log = fields.pop("log", None)
+        if log is not None:
+            sets.append("log_gzip=?")
+            params.append(self._enc_blob("D", gzip.compress(log)))
+        for key, value in fields.items():
+            sets.append(f"{key}=?")
+            params.append(value)
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE build_run_items SET {', '.join(sets)} WHERE id=?",
+                (*params, item_id))
+
+    def get_build_run(self, run_id: int):
+        row = self._conn.execute(
+            "SELECT id, started_at, ended_at, username, status FROM build_runs WHERE id=?",
+            (run_id,)).fetchone()
+        if not row:
+            return None
+        items = self._conn.execute(
+            "SELECT id, test_build_id, build_name, release_id, position, status, "
+            "returncode, message, conflicts, started_at, ended_at, log_gzip IS NOT NULL "
+            "FROM build_run_items WHERE run_id=? ORDER BY position", (run_id,))
+        return {"id": row[0], "started_at": row[1], "ended_at": row[2], "username": row[3],
+                "status": row[4],
+                "items": [{"id": r[0], "test_build_id": r[1], "build_name": r[2],
+                           "release_id": r[3], "position": r[4], "status": r[5],
+                           "returncode": r[6], "message": r[7],
+                           "conflicts": json.loads(r[8] or "[]"), "started_at": r[9],
+                           "ended_at": r[10], "has_log": bool(r[11])}
+                          for r in items.fetchall()]}
+
+    def list_build_runs(self, limit: int = 20) -> list:
+        rows = self._conn.execute(
+            "SELECT id FROM build_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [self.get_build_run(r[0]) for r in rows]
+
+    def get_unfinished_build_run(self):
+        row = self._conn.execute(
+            "SELECT id FROM build_runs WHERE status='running' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return self.get_build_run(row[0]) if row else None
+
+    def read_build_run_log(self, item_id: int):
+        row = self._conn.execute(
+            "SELECT log_gzip FROM build_run_items WHERE id=?", (item_id,)).fetchone()
+        if not row or row[0] is None:
+            return None
+        return gzip.decompress(self._dec_blob("D", row[0])).decode("utf-8", errors="replace")
+
+    def add_clean_lock_override(self, release_id: int, missing: list, reason: str,
+                                username: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO clean_lock_overrides (release_id, missing, reason, "
+                "username, created_at) VALUES (?, ?, ?, ?, ?)",
+                (release_id, ", ".join(missing), reason, username,
+                 self._now_iso()))
+
+    def list_clean_lock_overrides(self, release_id: int) -> list:
+        rows = self._conn.execute(
+            "SELECT missing, reason, username, created_at FROM clean_lock_overrides "
+            "WHERE release_id=? ORDER BY id DESC", (release_id,))
+        return [{"missing": r[0], "reason": r[1], "username": r[2], "created_at": r[3]}
+                for r in rows.fetchall()]
+
     def add_injection(self, test_project_id: int, src_file_path: str,
                       function_name: str = "", line_above_code: str = "",
                       line_below_code: str = "", injected_code: str = "",

@@ -17,6 +17,7 @@ import type {
   TestProject,
   TestProjectFile,
 } from "../api/types";
+import { useConfirm } from "../components/ConfirmDialog";
 import { FolderPicker } from "../components/FolderPicker";
 import { FileIcon, FolderIcon } from "../components/Icons";
 
@@ -241,6 +242,7 @@ export function TestCodeInjection({
   canEdit: boolean;
 }) {
   const theme = useMonacoTheme();
+  const { confirm, confirmNode } = useConfirm();
 
   // -- data ----------------------------------------------------------------
   const [projects, setProjects] = useState<TestProject[]>([]);
@@ -736,18 +738,38 @@ export function TestCodeInjection({
     }
   }
 
-  async function runExport(modeSel: "modified" | "reconstruct", outDir: string) {
+  async function runExport(
+    modeSel: "modified" | "reconstruct",
+    outDir: string,
+    continueAnyway = false,
+  ) {
     if (activeProject == null) return;
     try {
       const r = await api.post<{ count: number; conflicts: unknown[] }>(
         `/injection/projects/${activeProject}/export`,
-        { mode: modeSel, out_dir: outDir, overwrite: true },
+        {
+          mode: modeSel,
+          out_dir: outDir,
+          overwrite: true,
+          continue_anyway: continueAnyway,
+        },
       );
       toast(
         `Exported ${r.count} file(s)` +
           (r.conflicts.length ? ` (${r.conflicts.length} conflict(s) skipped)` : ""),
       );
     } catch (e) {
+      const lock = (e as ApiError).body as { code?: string; message?: string } | undefined;
+      if (lock?.code === "clean_lock") {
+        const ok = await confirm({
+          title: "Clean release data is missing",
+          message: `${lock.message} You can import them later from Test Builds. Continuing is your responsibility and is recorded under your name.`,
+          confirmLabel: "Continue anyway",
+          danger: true,
+        });
+        if (ok) await runExport(modeSel, outDir, true);
+        return;
+      }
       toast(`Export failed: ${(e as Error).message}`);
     }
   }
@@ -1195,6 +1217,7 @@ export function TestCodeInjection({
           onConfirm={(path) => importHelpers(path)}
         />
       )}
+      {confirmNode}
     </div>
   );
 }

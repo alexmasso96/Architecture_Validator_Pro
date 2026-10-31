@@ -41,11 +41,15 @@ from .routers import releases as releases_router
 from . import net
 from .routers import net as net_router
 from .routers import symbols as symbols_router
+from .routers import sync as sync_router
 from .routers import table_import as table_import_router
+from .routers import test_builds as test_builds_router
 from .routers import testdesign as testdesign_router
 from .routers import update as update_router
 
 logger = logging.getLogger(__name__)
+
+SYNC_HOLD_ALLOWED = ("/api/events", "/api/project/status", "/api/sync")
 
 
 def create_app(
@@ -66,13 +70,26 @@ def create_app(
             yield
         finally:
             jobs.shutdown()
-            state.close_project()
+            state.shutdown_project()
 
     app = FastAPI(title="Architecture Validator — Worker", lifespan=lifespan)
     app.state.bus = bus
     app.state.appstate = state
     app.state.jobs = jobs
     app.state.token = token or os.environ.get("ARCH_API_TOKEN") or generate_token()
+
+    @app.middleware("http")
+    async def _stop_reads_during_pull(request, call_next):
+        # A pull applies in one transaction, and the UI shows who it's from until
+        # it ends. Only what's needed to follow its progress stays available.
+        path = request.url.path
+        if (state.sync_hold is not None and path.startswith("/api/")
+                and not path.startswith(SYNC_HOLD_ALLOWED)):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content={"detail": {
+                "code": "sync_in_progress", "by": state.sync_hold,
+                "message": f"Syncing changes from {state.sync_hold}"}})
+        return await call_next(request)
 
     @app.exception_handler(sqlite3.ProgrammingError)
     async def _closed_db_conflict(request, exc: sqlite3.ProgrammingError):
@@ -124,6 +141,8 @@ def create_app(
     app.include_router(testdesign_router.router)
     app.include_router(prefs_router.router)
     app.include_router(table_import_router.router)
+    app.include_router(test_builds_router.router)
+    app.include_router(sync_router.router)
     app.include_router(update_router.router)
     app.include_router(net_router.router)
 

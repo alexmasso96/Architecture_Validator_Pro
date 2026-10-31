@@ -75,6 +75,21 @@ def test_exclusive_open_refused_when_locked_by_other(project_path):
                       json={"path": project_path, "mode": "view"}, headers=AUTH).status_code == 200
 
 
+def test_heartbeat_ignores_an_unreadable_lock(project_path):
+    """A failed read of the lock file on a NAS isn't a takeover."""
+    app = create_app(token=TOKEN, heartbeat_interval=0.1)
+    with TestClient(app) as c:
+        c.post("/api/project/open", json={"path": project_path, "mode": "exclusive"}, headers=AUTH)
+        lock_file = FileLockManager.get_lock_file_path(project_path)
+        original = open(lock_file).read()
+        with open(lock_file, "w") as f:
+            f.write("{ cut off")
+        time.sleep(0.5)
+        assert c.get("/api/project/status", headers=AUTH).json()["lock_lost"] is False
+        with open(lock_file, "w") as f:
+            f.write(original)
+
+
 def test_heartbeat_detects_lock_takeover(project_path):
     # Fast heartbeat so the takeover is noticed quickly.
     app = create_app(token=TOKEN, heartbeat_interval=0.1)

@@ -32,8 +32,8 @@ def _tables(d):
 # ---------------------------------------------------------------------------
 
 def test_new_db_has_v2_tables_and_version(db):
-    assert DB_SCHEMA_VERSION == 4
-    assert db.get_meta("schema_version") == "4"
+    assert DB_SCHEMA_VERSION == 5
+    assert db.get_meta("schema_version") == "5"
     t = _tables(db)
     assert "ai_model_mindmaps" in t
     assert "ai_code_diffs" in t
@@ -48,7 +48,7 @@ def test_v1_project_upgrades_on_reopen(tmp_path):
     d.close()
     # Reopen → _create_schema runs the in-block upgrade (no set_meta re-entrancy).
     d2 = ProjectDatabase(); d2.open(p)
-    assert d2.get_meta("schema_version") == "4"
+    assert d2.get_meta("schema_version") == "5"
     assert d2.get_meta("ai_prompt") == "keep me"
     assert "ai_model_mindmaps" in _tables(d2)
     d2.close()

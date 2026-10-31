@@ -15,10 +15,13 @@ export function getToken(): string {
 export class ApiError extends Error {
   status: number;
   detail: string;
-  constructor(status: number, detail: string) {
+  // The whole detail when the worker sent structured data, such as clean_lock.
+  body: unknown;
+  constructor(status: number, detail: string, body?: unknown) {
     super(`${status}: ${detail}`);
     this.status = status;
     this.detail = detail;
+    this.body = body;
   }
 }
 
@@ -26,6 +29,7 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  raw = false,
 ): Promise<T> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${getToken()}`,
@@ -40,20 +44,24 @@ async function request<T>(
 
   if (!res.ok) {
     let detail = res.statusText;
+    let body: unknown;
     try {
       const j = await res.json();
-      detail = j.detail ?? detail;
+      body = j.detail;
+      detail = (typeof body === "object" ? (body as { message?: string })?.message : body as string) ?? detail;
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, String(detail));
+    throw new ApiError(res.status, String(detail), body);
   }
   if (res.status === 204) return undefined as T;
+  if (raw) return (await res.text()) as T;
   return (await res.json()) as T;
 }
 
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
+  text: (path: string) => request<string>("GET", path, undefined, true),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),

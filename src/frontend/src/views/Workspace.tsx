@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import { isDesktop, nativeSaveFile } from "../native";
 import { useColumns, useModels, usePorts, useReleases } from "../api/hooks";
 import { useSSE } from "../api/useSSE";
-import type { MainFunctionsInfo, ProjectStatus, TestColumnStatus } from "../api/types";
+import type { MainFunctionsInfo, ProjectStatus, TestColumnStatus, SyncStatus } from "../api/types";
 import {
   cellText,
   initCyclicValue,
@@ -61,8 +61,12 @@ export function Workspace({
   columnsOpen,
   onCloseColumns,
   onShowInCodeMap,
+  sync,
+  onSync,
 }: {
   status: ProjectStatus;
+  sync: SyncStatus | null;
+  onSync: () => void;
   onReloadStatus: () => void;
   toast: (msg: string) => void;
   importOpen: boolean;
@@ -762,6 +766,8 @@ export function Workspace({
         modelStatus={activeModel?.status ?? null}
         rowCount={allRows.length}
         reviewedCount={reviewedCount}
+        sync={sync}
+        onSync={onSync}
       />
 
       {filterMenu && (

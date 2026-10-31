@@ -37,6 +37,8 @@ httpx>=0.27
 # Phase 3 — pywebview desktop shell (native window + file dialogs). On macOS this
 # pulls pyobjc (WKWebView); on Windows it uses the system WebView2 runtime.
 pywebview>=5.0
+# The Sync Worker's tray icon (its menu-bar icon on macOS).
+pystray==0.19.5
 # Windows-only: pywebview's winforms backend loads .NET through pythonnet +
 # clr_loader, and the two MUST be a compatible pair. Left unpinned, pip can mix
 # an older pythonnet with clr_loader>=0.2.6, which crashes at startup with
