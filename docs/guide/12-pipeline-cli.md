@@ -44,6 +44,8 @@ The pipeline generates one `.xlsx` file, usually from an architecture interface 
 | BodyControl | Bcm_InitAll |
 | Powertrain | Pwt_MainTask |
 
+To test parameter ports as well, add columns with `required` or `provided` in the title and list them under `parameter_columns`. See [Parameter ports](#parameter-ports).
+
 The rules are strict because nobody reviews the file during a run:
 
 - A main functions row that names no sheet stops the run with exit code 2. Excel limits sheet names to 31 characters, so check long model names.
@@ -74,9 +76,12 @@ object_pattern = **/*.obj
 function_column = Function
 port_column = Port Name
 variable_column = Parameter
+parameter_columns = Required Parameter
+    Provided Parameter
 
 [test]
 min_match_score = 90
+min_parameter_score = 70
 max_unmatched = 0
 strict = false
 
@@ -104,7 +109,9 @@ Relative paths start from the `.cfg` file's folder. `${NAME}` reads an environme
 | `columns.function_column` | `Mapped Func` | Workbook column holding the function to test |
 | `columns.port_column` | `Input Port` | Workbook column holding the port name |
 | `columns.variable_column` | `Mapped Parameter` | Workbook column holding the variable name |
-| `test.min_match_score` | `90` | Lowest score that counts as a match |
+| `columns.parameter_columns` | None | Workbook columns holding parameter ports, one per line; each title needs `required` or `provided` |
+| `test.min_match_score` | `90` | Lowest score that counts as a function match |
+| `test.min_parameter_score` | `70` | Lowest score that counts as a parameter match |
 | `test.max_unmatched` | `0` | How many `Not Matched` ports the run may have and still pass; `-1` means no limit |
 | `test.strict` | `false` | Count compiler-verified calls only (needs object files) |
 | `security.encryption` | `none` | `none`, `config` or `env` |
@@ -131,12 +138,25 @@ Each port's function is matched to the closest symbol, with a score out of 100:
 
 A port also reports `Not Matched` when its cell is empty, or when the matched name isn't in the call tree, so nothing could be traced for it.
 
+### Parameter ports
+
+Each column in `parameter_columns` gets its own test and report, `<name>-<column>.html`, next to the main `<name>.html`. The title sets the direction:
+
+| Title has | Passes when the row's function, or a function it calls, ... |
+|---|---|
+| `required` | has the variable as a parameter, or reads it |
+| `provided` | returns it, writes it, or stores it through an output pointer |
+
+Using it the wrong way round fails the run with "Wrong direction". A parameter that matches nothing above `min_parameter_score` is `Not Matched` and counts towards `max_unmatched`. That threshold is lower than the function one because generated variable names rarely match exactly. A row with nothing in that column has no parameter to test, so it's ignored.
+
+This test reads the source, so the run needs `source` listed. Its checks come from C source analysis: an access made only through a pointer alias or from assembly isn't seen yet.
+
 ### How the result is decided
 
 | Result | Effect |
 |---|---|
 | `Passed`, `Entry point` | OK |
-| `No Result` (retired or deleted port) | Ignored |
+| `No Result` (retired or deleted port, or no parameter in that column) | Ignored |
 | `Not Matched` | Fails the run once there are more than `max_unmatched`, never with `-1` |
 | `Failed`, `No Data` | Always fails the run |
 

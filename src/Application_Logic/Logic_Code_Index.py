@@ -43,6 +43,10 @@ from dataclasses import dataclass, field
 SOURCE_EXTENSIONS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx"}
 # No file size limit (see Logic_Source_Store): large generated sources count.
 
+# Generous per-function cap: parameter tests look variables up in these lists,
+# so a generated function must not lose the one being tested.
+MAX_VAR_ACCESSES = 2000
+
 # Directories that never contain test-relevant source code
 SKIP_DIRS = {
     ".git", ".svn", ".hg", "__pycache__", "node_modules",
@@ -96,6 +100,9 @@ class FunctionInfo:
     calls: List[str] = field(default_factory=list)
     reads_vars: List[str] = field(default_factory=list)
     writes_vars: List[str] = field(default_factory=list)
+    # Globals whose value leaves the function: returned or stored through a
+    # non-const pointer parameter.
+    returns_vars: List[str] = field(default_factory=list)
     conditions: List[str] = field(default_factory=list)
     local_vars: List[Tuple[str, str]] = field(default_factory=list)
     switch_cases: List[str] = field(default_factory=list)
@@ -688,6 +695,68 @@ def _analyze_function_body(func: FunctionInfo, body: str, known_types: Set[str])
 
     # Extract variable reads/writes and assignments
     func.reads_vars, func.writes_vars, func.assignments = _extract_var_accesses(body, own_vars)
+    func.returns_vars = _extract_returned_vars(body, param_names, local_names,
+                                               func.assignments, _out_pointer_params(func.signature))
+
+
+def _out_pointer_params(signature: str) -> Set[str]:
+    """Names of the non-const pointer parameters in a function signature."""
+    inner = signature[signature.find('(') + 1:signature.rfind(')')]
+    out = set()
+    for param in inner.split(','):
+        m = re.search(r'\*\s*([A-Za-z_]\w*)\s*(?:\[\s*\])?\s*$', param)
+        if m and 'const' not in param.split('*')[0].split():
+            out.add(m.group(1))
+    return out
+
+
+_VALUE_RE = re.compile(
+    r'\b[A-Za-z_]\w*(?:\s*(?:\.\s*[A-Za-z_]\w*|->\s*[A-Za-z_]\w*|\[[^\]]*\]))*\b(?!\s*\()')
+
+
+def _value_names(expr: str) -> List[str]:
+    """Identifiers and access paths in an expression, without whitespace."""
+    return [re.sub(r'\s+', '', m.group(0)) for m in _VALUE_RE.finditer(expr)]
+
+
+def _path_root(path: str) -> str:
+    return re.split(r'\.|->|\[', path, maxsplit=1)[0]
+
+
+def _extract_returned_vars(body: str, param_names: Set[str], local_names: Set[str],
+                           assignments: List[str], out_params: Set[str]) -> List[str]:
+    """Globals whose value leaves the function: in a ``return`` or stored
+    through an output pointer. A returned local is followed through its
+    assignments, so ``x = g_a; return x;`` finds ``g_a``."""
+    assigned: Dict[str, List[str]] = {}
+    sources = [m.group(1) for m in re.finditer(r'\breturn\b([^;]*);', body)]
+    for text in assignments:
+        lhs, _, rhs = text.partition(' = ')
+        target = lhs.replace(' ', '').lstrip('*(')
+        root = _path_root(target)
+        if root in out_params and (lhs.lstrip().startswith('*') or target != root):
+            sources.append(rhs)
+        elif root in local_names:
+            assigned.setdefault(root, []).append(rhs)
+
+    found: Set[str] = set()
+    seen: Set[str] = set()
+    pending = list(sources)
+    while pending:
+        for name in _value_names(pending.pop()):
+            root = _path_root(name)
+            if root in C_KEYWORDS or root in param_names:
+                continue
+            if root in local_names:
+                if root not in seen:
+                    seen.add(root)
+                    pending.extend(assigned.get(root, []))
+            else:
+                found.add(name)
+    return sorted(found)
+
+
+_STATEMENT_KEYWORDS = {"return", "goto", "else", "case", "do"}
 
 
 def _extract_locals(body: str) -> List[Tuple[str, str]]:
@@ -710,6 +779,9 @@ def _extract_locals(body: str) -> List[Tuple[str, str]]:
         var_type = m.group(1).strip()
         var_name = m.group(2).strip()
         # Filter: skip if type is a keyword used as prefix for next word
+        # (`return g_value;` has the same shape as a declaration).
+        if var_type in _STATEMENT_KEYWORDS:
+            continue
         if var_name and var_name not in C_KEYWORDS and not var_name.startswith('__'):
             locals_found.append((var_type, var_name))
     return locals_found
@@ -777,6 +849,12 @@ def _extract_switch_cases(body: str) -> List[str]:
     return cases
 
 
+def _is_step(line: str, start: int, end: int) -> bool:
+    """True when the name at line[start:end] is incremented or decremented."""
+    return (line[end:].lstrip().startswith(('++', '--'))
+            or line[:start].rstrip().endswith(('++', '--')))
+
+
 def _extract_var_accesses(body: str, own_vars: Set[str]) -> Tuple[List[str], List[str], List[str]]:
     """
     Extract variable accesses (reads and writes) that are NOT local/param.
@@ -841,7 +919,10 @@ def _extract_var_accesses(body: str, own_vars: Set[str]) -> Tuple[List[str], Lis
             if pos_after < len(stripped) and stripped[pos_after:pos_after + 1] == '(':
                 continue
 
-            if eq_pos > 0 and m.start() < eq_pos:
+            if _is_step(stripped, m.start(), m.end()):
+                writes.add(path)
+                reads.add(path)
+            elif eq_pos > 0 and m.start() < eq_pos:
                 writes.add(path)
                 if compound:
                     reads.add(path)
@@ -866,19 +947,26 @@ def _extract_var_accesses(body: str, own_vars: Set[str]) -> Tuple[List[str], Lis
             if name.isupper() and len(name) <= 3:
                 continue
             # Skip if it's the type in a declaration (heuristic: at start of line before another ident)
-            if m.start() == 0 or stripped[:m.start()].strip() == '':
+            # An assignment or ++/-- straight after the name can't be one.
+            step = _is_step(stripped, m.start(), m.end())
+            assigned = eq_pos > 0 and not stripped[m.end():eq_pos].strip()
+            if stripped[:m.start()].strip() == '' and not (step or assigned):
                 # Could be a declaration - skip
                 continue
 
             # This looks like a global/module-scope variable reference
-            if eq_pos > 0 and m.start() < eq_pos:
+            if step:
+                writes.add(name)
+                reads.add(name)
+            elif eq_pos > 0 and m.start() < eq_pos:
                 writes.add(name)
                 if compound:
                     reads.add(name)
             elif eq_pos != 0:  # Don't add LHS as read when it's pure assignment target
                 reads.add(name)
 
-    return sorted(reads)[:40], sorted(writes)[:25], assignments[:20]
+    return (sorted(reads)[:MAX_VAR_ACCESSES], sorted(writes)[:MAX_VAR_ACCESSES],
+            assignments[:MAX_VAR_ACCESSES])
 
 
 # ─── Global Variable Extraction ──────────────────────────────────────────────

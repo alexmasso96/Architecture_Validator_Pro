@@ -18,8 +18,17 @@ HERE = Path(__file__).resolve().parent
 PORTS = HERE.parent / "releases" / "R5.0" / "architecture_ports.csv"
 OUTPUT = HERE / "interfaces.xlsx"
 
-COLUMNS = ["Port Name", "Operations", "Direction", "Return Type"]
+COLUMNS = ["Port Name", "Operations", "Direction", "Return Type",
+           "Required Parameter", "Provided Parameter"]
 MAIN_FUNCTIONS = ("Vcu_InitAll", "Vcu_Cyclic10ms")
+
+
+def parameters(operation: str) -> tuple[str, str]:
+    """A required and a provided parameter the operation really uses."""
+    state = "g_" + operation.rsplit("_", 1)[0].lower() + "_state"
+    if operation.endswith("_Init"):
+        return "cfg", f"{state}.phase"
+    return f"{state}.value", f"{state}.uptime_ticks"
 
 
 def main() -> None:
@@ -37,7 +46,7 @@ def main() -> None:
         sheet = workbook.create_sheet(name)
         sheet.append(COLUMNS)
         for row in rows:
-            sheet.append([row[c] for c in COLUMNS])
+            sheet.append([row[c] for c in COLUMNS[:4]] + list(parameters(row["Operations"])))
     mains = workbook.create_sheet("Main Functions")
     mains.append(["Model", "Main Function"])
     for name in models:

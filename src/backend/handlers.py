@@ -599,6 +599,7 @@ def _make_import_objects(state: AppState):
 def _make_run_calltree_tests(state: AppState):
     def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
         import datetime as _dt
+        from Application_Logic import Logic_CallTree_Report as rep
         from Application_Logic import Logic_CallTree_Test as ct
         from Application_Logic.Logic_File_Locking import FileLockManager
         from backend.routers.architecture import _release_flags, _test_bindings
@@ -634,10 +635,21 @@ def _make_run_calltree_tests(state: AppState):
                     object_pairs.add((inl["caller"], inl["name"]))
             model_ids = _resolve_model_ids(state, params, wdb)
             names = {m.id: m.name for m in state.require_arch().models}
+            # A variable column checks parameter ports: it starts from the
+            # row's function, not from a main function.
+            variable_test = ct.variable_test_spec(layout, binding["match_col"])
+            if variable_test is not None:
+                hashes = [f["elf_hash"] for f in
+                          wdb.get_release_symbol_files(binding["release_id"])]
+                variable_test.update(
+                    search_col=rep.port_name_column(layout, binding["match_col"]),
+                    min_score=params.get("min_variable_score", ct.DEFAULT_VARIABLE_SCORE),
+                    globals=set(wdb.get_variable_names(hashes)) if hashes else set())
             # Every model needs its main function(s): the test checks that
             # they reach each port's function (the UI asks before running).
             mains = ct.parse_mains(wdb.get_meta(ct.MAINS_KEY, "{}"))
-            unset = [names.get(mid, str(mid)) for mid in model_ids if not mains.get(mid)]
+            unset = ([] if variable_test is not None else
+                     [names.get(mid, str(mid)) for mid in model_ids if not mains.get(mid)])
             # ``allow_missing_mains`` (the CLI): keep testing the other models;
             # a model without a main function reports No Data on its rows.
             if unset and not params.get("allow_missing_mains"):
@@ -651,8 +663,10 @@ def _make_run_calltree_tests(state: AppState):
                 rows = wdb.get_model_rows(mid)
                 counts = ct.run_on_rows(rows, col_name, binding, code_map, object_pairs,
                                         port_state_col=port_state_col,
-                                        tested_at=tested_at, mains=mains.get(mid, []),
-                                        min_match_score=params.get("min_match_score"))
+                                        tested_at=tested_at,
+                                        mains=None if variable_test else mains.get(mid, []),
+                                        min_match_score=params.get("min_match_score"),
+                                        variable_test=variable_test)
                 wdb.save_model_rows(mid, rows)
                 summary.append({"model_id": mid, "model": names.get(mid, ""),
                                 "counts": counts, "has_code_map": bool(code_map)})

@@ -58,6 +58,8 @@ ForTesting/
 
 # Pipeline demo: generated workbook and results (build/ is ignored above)
 Resources/VCU_TestProject/pipeline/interfaces.xlsx
+Resources/VCU_TestProject/pipeline/faults.xlsx
+Resources/VCU_TestProject/pipeline/validation-*-faults.cfg
 Resources/VCU_TestProject/pipeline/results/
 Resources/VCU_TestProject/pipeline/rh850-toolchain/
 

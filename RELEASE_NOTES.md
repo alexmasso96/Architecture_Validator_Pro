@@ -1,3 +1,17 @@
+# Unreleased
+
+## 🔌 New: parameter port tests
+- **Test ports that are a parameter, not a function.** Put `required` or
+  `provided` in a Variable Search column's title and bind a Test column to its
+  Match column. Required values must come into the function, as a parameter or a
+  read; provided values must go out, returned, written or through an output
+  pointer. Helpers the function calls count too.
+- **Separate match threshold** for parameters (70%), because generated names rarely
+  match exactly. In the CLI: `parameter_columns` and `min_parameter_score`.
+- **More accurate variable data in the Code Map.** It now records `++`/`--` and
+  plain global writes as writes, sees `return g_value;`, and no longer cuts off
+  long lists in big functions. Rebuild the Code Map to get this.
+
 # v3.1.0 — Pipeline CLI, Import Profiles, object-file enrichment, parser & stability fixes
 
 ## ⚙️ New: Pipeline CLI

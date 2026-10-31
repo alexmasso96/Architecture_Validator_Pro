@@ -82,12 +82,12 @@ export function isTestStale(cell: Cell | undefined, currentBuiltAt: string | und
   return ran !== currentBuiltAt;
 }
 
-// Match columns a Test column may bind to: the one right after a Port/Function
-// Search column (variables are not "called").
-export function functionMatchColumns(cols: { name: string; type: string }[]): string[] {
+// Match columns a Test column may bind to: the one right after a Port, Function
+// or Variable Search column.
+export function testMatchColumns(cols: { name: string; type: string }[]): string[] {
   const out: string[] = [];
   cols.forEach((c, i) => {
-    if ((c.type === "Port Search" || c.type === "Function Search") && i + 1 < cols.length) {
+    if (SEARCH_KEYS.includes(c.type) && i + 1 < cols.length) {
       out.push(cols[i + 1].name);
     }
   });

@@ -215,7 +215,7 @@ def test_reconcile_strict_toggle_on_existing_column():
     ({}, [1], "needs a release"),
     ({"T1": {**BINDING, "release_id": 9}}, [1], "no longer exists"),
     ({"T1": {**BINDING, "match_col": "Nope"}}, [1], "not in the layout"),
-    ({"T1": {**BINDING, "match_col": "Mapped Parameter (Match)"}}, [1],
+    ({"T1": {**BINDING, "match_col": "Port State"}}, [1],
      "cannot be tested"),
 ])
 def test_reconcile_rejects_bad_bindings(incoming, releases, msg):
@@ -365,7 +365,7 @@ def test_override_gated_and_survives_rerun(client):
 
 def test_invalid_bindings_rejected(client):
     rid, _ = _setup(client)
-    assert _add_test_column(client, rid, match="Mapped Parameter (Match)").status_code == 409
+    assert _add_test_column(client, rid, match="Port State").status_code == 409
     assert _add_test_column(client, 9999).status_code == 409
     cols = client.get("/api/columns", headers=AUTH).json()["columns"]
     cols.append({"name": "Bare", "type": ct.TEST_COLUMN_TYPE, "visible": True, "width": 100})

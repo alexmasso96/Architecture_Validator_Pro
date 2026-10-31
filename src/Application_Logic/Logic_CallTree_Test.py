@@ -31,6 +31,14 @@ only from assembly — e.g. a bootloader's low-level init invoked from startup
 code — is a real caller when the startup .o is imported. A caller is "verified"
 when the .o dataset contains that edge. Strict mode counts verified callers only.
 
+A Test column bound to a Variable Search column's Match column checks a
+parameter port instead of a call. The search column's title says the direction:
+"required" (the value comes in: a parameter of the function, or read by it) or
+"provided" (the value goes out: returned, written, or stored through an output
+pointer). The function is the row's nearest Function Search match to the left,
+and helpers it calls count too. A row with no parameter in that column has
+nothing to test, so it reports No Result.
+
 Results are RECORDED (not recomputed on view) so an ASPICE verdict is stable;
 each cell carries its evidence, the run time and the code-map build time (for
 the stale marker). A tester may override a verdict while the release is active
@@ -66,6 +74,13 @@ MANUAL_OPTIONS = (PASSED, FAILED, ENTRY_POINT)
 # Search column types whose Match column holds a FUNCTION (a "call" test is
 # meaningless for variables — variable support is a separate follow-up).
 _FUNCTION_SEARCH_TYPES = ("Port Search", "Function Search")
+
+# Variable names are often generated, so they match less exactly than functions.
+DEFAULT_VARIABLE_SCORE = 70
+REQUIRED = "required"
+PROVIDED = "provided"
+_DIRECTION_RES = {key: re.compile(rf"(?<![a-z]){key}(?![a-z])") for key in (REQUIRED, PROVIDED)}
+MAX_ACCESS_NODES = 5000     # functions visited per row when following helpers
 
 MAX_EVIDENCE_CALLERS = 25
 MAX_SUGGEST_DEPTH = 10      # caller levels walked up from a port for suggestions
@@ -105,6 +120,38 @@ def function_match_columns(layout) -> List[str]:
         if col[1] in _FUNCTION_SEARCH_TYPES and i + 1 < len(layout):
             out.append(layout[i + 1][0])
     return out
+
+
+def column_direction(col_name: str) -> Optional[str]:
+    """"required" or "provided" from a column title; None when the title has
+    neither, or both."""
+    title = (col_name or "").lower()
+    found = [key for key, rx in _DIRECTION_RES.items() if rx.search(title)]
+    return found[0] if len(found) == 1 else None
+
+
+def variable_test_spec(layout, match_col: str) -> Optional[dict]:
+    """How to test a variable Match column, or None for a function one:
+    {function_col, direction}. Read from the layout, so renames just work."""
+    names = [c[0] for c in layout]
+    if match_col not in names:
+        return None
+    i = names.index(match_col)
+    if i == 0 or layout[i - 1][1] != "Variable Search":
+        return None
+    left = list(enumerate(layout[:i - 1]))[::-1]
+    source = (next((j for j, c in left if c[1] == "Function Search"), None)
+              if left else None)
+    if source is None:
+        source = next((j for j, c in left if c[1] == "Port Search"), None)
+    return {"function_col": names[source + 1] if source is not None else None,
+            "direction": column_direction(names[i - 1])}
+
+
+def test_match_columns(layout) -> List[str]:
+    """Every Match column a Test column may bind to: functions and variables."""
+    return function_match_columns(layout) + [
+        c[0] for c in layout if variable_test_spec(layout, c[0]) is not None]
 
 
 def default_column_name(release_name: str, match_col: str) -> str:
@@ -187,7 +234,7 @@ def reconcile_bindings(old: Dict[str, dict], new_layout, renames: Dict[str, str]
     """
     valid_releases = set(release_ids)
     names = [c[0] for c in new_layout]
-    match_cols = set(function_match_columns(new_layout))
+    match_cols = set(test_match_columns(new_layout))
 
     carried: Dict[str, dict] = {}
     for old_name, b in old.items():
@@ -226,8 +273,8 @@ def reconcile_bindings(old: Dict[str, dict], new_layout, renames: Dict[str, str]
                              f"'{b['match_col']}', which is not in the layout — "
                              "delete the Test column first.")
         if b["match_col"] not in match_cols:
-            raise ValueError(f"'{b['match_col']}' is not a function/port Match "
-                             "column, so it cannot be tested for calls.")
+            raise ValueError(f"'{b['match_col']}' is not a port, function or "
+                             "variable Match column, so it cannot be tested.")
         pair = (b["release_id"], b["match_col"])
         if pair in seen_pairs:
             raise ValueError(f"'{b['match_col']}' already has a Test column for "
@@ -424,6 +471,154 @@ def evaluate_from_mains(name: str, index: CallIndex, reach: Reach,
     return {"verdict": FAILED, "reason": reason, **evidence}
 
 
+def _access(names: Optional[Iterable[str]], variable: str) -> Optional[str]:
+    """The access in ``names`` that reaches ``variable``, field paths included."""
+    for name in names or ():
+        if (name == variable or name.startswith((variable + ".", variable + "->", variable + "["))
+                or name.endswith(("." + variable, "->" + variable))):
+            return name
+    return None
+
+
+def _is_output_pointer(param: dict) -> bool:
+    ptype = str(param.get("type") or "")
+    return "*" in ptype and "const" not in ptype.split("*")[0].split()
+
+
+def _reachable(start: str, index: CallIndex) -> List[Tuple[str, List[str]]]:
+    """[(function, chain from start)], closest first."""
+    chains = {start: [start]}
+    order = [start]
+    for fname in order:
+        for callee in sorted(index.callees.get(fname, ())):
+            if callee not in chains and len(order) < MAX_ACCESS_NODES:
+                chains[callee] = chains[fname] + [callee]
+                order.append(callee)
+    return [(fname, chains[fname]) for fname in order]
+
+
+def evaluate_variable(variable: str, function: str, direction: str, index: CallIndex,
+                      functions: Dict[str, dict], globals_: Set[str]) -> dict:
+    """Is ``variable`` used by ``function``, or a helper it calls, the way the
+    port's direction says?"""
+    key = index.resolve(function)
+    if key is None:
+        return {"verdict": NOT_MATCHED,
+                "reason": f"'{function}' is not in this release's call tree."}
+    params = (functions.get(key) or {}).get("parameters") or []
+    param = next((p for p in params if p.get("name") == variable), None)
+    if param is not None:
+        goes_out = _is_output_pointer(param)
+        if (direction == PROVIDED) == goes_out:
+            how = "an output pointer" if goes_out else "a parameter"
+            return {"verdict": PASSED, "access": "parameter",
+                    "reason": f"{variable} is {how} of {key}.", "access_path": [key]}
+        if direction == REQUIRED:
+            return {"verdict": FAILED,
+                    "reason": f"Wrong direction: {variable} is an output pointer of "
+                              f"{key}, but the port requires it."}
+        # A provided input parameter may still be returned: keep looking.
+
+    root = re.split(r"\.|->|\[", variable, maxsplit=1)[0]
+    chain = _reachable(key, index)
+
+    def seen_as_variable() -> bool:
+        # Reads also catch macros and enum values, so only a written name or a
+        # struct field proves it's a variable when the ELF doesn't list it.
+        for fname, _path in chain:
+            fdata = functions.get(fname) or {}
+            if _access(fdata.get("writes_vars"), variable):
+                return True
+            hit = _access(fdata.get("reads_vars"), variable)
+            if hit and hit != variable:
+                return True
+        return False
+
+    if globals_ and root not in globals_ and param is None and not seen_as_variable():
+        return {"verdict": NOT_MATCHED,
+                "reason": f"{variable} is not a variable in this release."}
+
+    def find(field: str):
+        for fname, path in chain:
+            hit = _access((functions.get(fname) or {}).get(field), variable)
+            if hit:
+                return hit, fname, path
+        return None
+
+    def passed(hit, what: str) -> dict:
+        name, fname, path = hit
+        route = f" (through {' → '.join(path)})" if len(path) > 1 else ""
+        return {"verdict": PASSED, "access": what, "access_path": path,
+                "reason": f"{fname} {what} {name}{route}."}
+
+    if (functions.get(key) or {}).get("returns_vars") is None:
+        return {"verdict": NO_DATA,
+                "reason": f"No source data for {key}: import the release's source "
+                          "and rebuild its Code Map."}
+    reads, writes, returns = find("reads_vars"), find("writes_vars"), find("returns_vars")
+    if direction == REQUIRED:
+        if reads:
+            return passed(reads, "reads")
+        if writes:
+            return {"verdict": FAILED,
+                    "reason": f"Wrong direction: {writes[1]} only writes {variable}, "
+                              "but the port requires it."}
+    else:
+        if returns:
+            return passed(returns, "returns")
+        if writes:
+            return passed(writes, "writes")
+        if reads:
+            return {"verdict": FAILED,
+                    "reason": f"Wrong direction: {reads[1]} only reads {variable}, "
+                              "but the port provides it."}
+    return {"verdict": FAILED, "reason": f"{key} does not use {variable}."}
+
+
+def _evaluate_variable_row(row: dict, variable_test: dict, index: Optional[CallIndex],
+                           functions: Dict[str, dict], binding: dict,
+                           min_match_score: Optional[int]) -> dict:
+    """The verdict for one row of a variable Test column, and the names used."""
+    match_text = cell_text(row.get(binding["match_col"]))
+    variable = parse_match(match_text)
+    source = cell_text(row.get(variable_test.get("search_col")))
+    function_text = cell_text(row.get(variable_test.get("function_col")))
+    function = parse_match(function_text)
+    names = {"function": function, "variable": variable,
+             "direction": variable_test.get("direction") or ""}
+    match_cell = row.get(binding["match_col"])
+    picked = isinstance(match_cell, dict) and match_cell.get("user_changed")
+    score = match_score(match_text)
+    minimum = variable_test.get("min_score", DEFAULT_VARIABLE_SCORE)
+    function_score = match_score(function_text)
+    if not source and not variable:
+        res = {"verdict": NO_RESULT, "reason": "This port has no parameter in this column."}
+    elif not variable:
+        res = {"verdict": NOT_MATCHED, "reason": f"'{source}' has no match."}
+    elif score is not None and not picked and score < minimum:
+        res = {"verdict": NOT_MATCHED,
+               "reason": f"Best match {variable} scored {score}%, below the "
+                         f"{minimum}% threshold."}
+    elif not function:
+        res = {"verdict": NOT_MATCHED, "reason": "This row has no matched function."}
+    elif (min_match_score is not None and function_score is not None
+          and function_score < min_match_score):
+        res = {"verdict": NOT_MATCHED,
+               "reason": f"Best function match {function} scored {function_score}%, "
+                         f"below the {min_match_score}% threshold."}
+    elif not variable_test.get("direction"):
+        res = {"verdict": NO_DATA,
+               "reason": f"Add \"required\" or \"provided\" to the title of "
+                         f"'{variable_test.get('search_col')}' to set the direction."}
+    elif index is None:
+        res = {"verdict": NO_DATA,
+               "reason": "No code map for this release — build it first."}
+    else:
+        res = evaluate_variable(variable, function, variable_test["direction"], index,
+                                functions, variable_test.get("globals") or set())
+    return {**res, **names}
+
+
 def suggest_mains(index: CallIndex, functions: Iterable[str],
                   limit: int = 5) -> List[dict]:
     """Likely main functions for a model: the functions that reach the most
@@ -464,20 +659,24 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
                 object_pairs: Optional[Iterable[Tuple[str, str]]],
                 *, port_state_col: Optional[str], tested_at: str,
                 mains: Optional[Iterable[str]] = None,
-                min_match_score: Optional[int] = None) -> Dict[str, int]:
+                min_match_score: Optional[int] = None,
+                variable_test: Optional[dict] = None) -> Dict[str, int]:
     """Evaluate every row in place. Manual overrides keep their verdict; the
     tool verdict and evidence are refreshed. Returns a verdict histogram.
 
     ``mains`` = the model's main functions: when given, a row passes only if
     one of them reaches its function (see ``evaluate_from_mains``).
     ``min_match_score`` = a scored match below it counts as Not Matched; a Match
-    cell the user picked by hand always counts."""
+    cell the user picked by hand always counts.
+    ``variable_test`` = a variable column's ``variable_test_spec`` plus its
+    search_col, min_score and the release's globals."""
     index = CallIndex(code_map, object_pairs) if code_map else None
     built_at = (code_map or {}).get("built_at", "")
     strict = bool(binding.get("strict"))
     main_list = clean_mains(mains) if mains is not None else None
     reach = Reach(index, main_list, strict) if index is not None and main_list else None
     counts: Dict[str, int] = {}
+    functions = (code_map or {}).get("functions") or {}
 
     for row in rows:
         state = cell_text(row.get(port_state_col)) if port_state_col else ""
@@ -488,6 +687,10 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
         picked = isinstance(match_cell, dict) and match_cell.get("user_changed")
         if state in ("Retired", "Deleted"):
             res = {"verdict": NO_RESULT, "reason": f"Port is {state}."}
+        elif variable_test is not None:
+            res = _evaluate_variable_row(row, variable_test, index, functions, binding,
+                                         min_match_score)
+            name = res["function"]
         elif not name:
             res = {"verdict": NOT_MATCHED,
                    "reason": f"'{binding['match_col']}' is empty."}
@@ -526,6 +729,10 @@ def run_on_rows(rows: List[dict], col_name: str, binding: dict,
         if main_list is not None:
             cell["mains"] = main_list
             cell["main_path"] = res.get("main_path", [])
+        if variable_test is not None:
+            for key in ("variable", "direction", "access", "access_path"):
+                if res.get(key):
+                    cell[key] = res[key]
         if prev.get("user_changed") and prev.get("text") in MANUAL_OPTIONS:
             cell["text"] = prev["text"]
             cell["user_changed"] = True

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { ReleasesResponse, TestColumnMeta } from "../api/types";
-import { functionMatchColumns, TEST_COLUMN_TYPE } from "../columns";
+import { testMatchColumns, TEST_COLUMN_TYPE } from "../columns";
 
 const SEARCH_TYPES = ["Port Search", "Function Search", "Variable Search"];
 const DEP_SUFFIXES = [" (Match)", " (Init)", " (Cyclic)"];
@@ -286,7 +286,7 @@ export function ColumnCustomizer({
     setNewName("");
   }
 
-  const matchOptions = functionMatchColumns(cols);
+  const matchOptions = testMatchColumns(cols);
 
   function addTestColumn() {
     if (testRelease === null || !testMatch) return;
@@ -575,9 +575,9 @@ export function ColumnCustomizer({
             <select
               value={testMatch}
               onChange={(e) => setTestMatch(e.target.value)}
-              title="Match column whose function is looked up in the call tree"
+              title="Match column to test. For a variable column, put required or provided in its title to set the direction."
             >
-              {matchOptions.length === 0 && <option value="">No function Match columns</option>}
+              {matchOptions.length === 0 && <option value="">No Match columns</option>}
               {matchOptions.map((m) => (
                 <option key={m} value={m}>
                   {m}

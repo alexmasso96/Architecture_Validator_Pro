@@ -142,6 +142,8 @@ jobs:
           python Resources/VCU_TestProject/pipeline/make_workbook.py
           python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
           python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-rh850.cfg
+          python Resources/VCU_TestProject/pipeline/verify_faults.py Resources/VCU_TestProject/pipeline/validation-arm.cfg python src/cli/main.py
+          python Resources/VCU_TestProject/pipeline/verify_faults.py Resources/VCU_TestProject/pipeline/validation-rh850.cfg python src/cli/main.py
 
       # A failed run is when the report matters most.
       - name: Upload validation results
@@ -250,6 +252,8 @@ jobs:
           python Resources/VCU_TestProject/pipeline/make_workbook.py
           dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
           dist/arch-validator/arch-validator run --config Resources/VCU_TestProject/pipeline/validation-rh850.cfg
+          python Resources/VCU_TestProject/pipeline/verify_faults.py Resources/VCU_TestProject/pipeline/validation-arm.cfg dist/arch-validator/arch-validator
+          python Resources/VCU_TestProject/pipeline/verify_faults.py Resources/VCU_TestProject/pipeline/validation-rh850.cfg dist/arch-validator/arch-validator
           python -c "import platform, shutil; shutil.make_archive(f'architecture-validator-cli-{platform.system().lower()}-{platform.machine().lower()}', 'zip', 'dist', 'arch-validator')"
 
       - name: Upload CLI artifact

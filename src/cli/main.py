@@ -96,7 +96,7 @@ def _create_models(cfg, workbook, state) -> dict:
     from Application_Logic.Logic_Pipeline import PipelineError, build_layout
 
     db, mgr = state.db, state.arch_manager
-    layout = build_layout(workbook.columns)
+    layout = build_layout(workbook.columns, cfg.parameter_columns)
     try:
         validate_layout(layout)
     except ValueError as e:
@@ -114,26 +114,35 @@ def _create_models(cfg, workbook, state) -> dict:
     return ids
 
 
-def _add_test_column(cfg, state, release_id: int) -> str:
+def _add_test_columns(cfg, workbook, state, release_id: int) -> list:
+    """A Test column for the functions and one per parameter column:
+    [(column name, report path)]."""
     from Application_Logic import Logic_CallTree_Test as ct
-    from Application_Logic.Logic_Pipeline import TEST_MATCH_COLUMN
+    from Application_Logic.Logic_Pipeline import (
+        TEST_MATCH_COLUMN, match_column, report_suffix,
+    )
 
     db = state.db
-    name = ct.default_column_name(cfg.release, TEST_MATCH_COLUMN)
-    db.save_column_layout(db.load_column_layout() + [(name, ct.TEST_COLUMN_TYPE, True, 110)])
+    report = os.path.join(cfg.output_folder, f"{cfg.name}.html")
+    targets = [(TEST_MATCH_COLUMN, report)]
+    for title in cfg.parameter_columns:
+        if title in workbook.columns:
+            targets.append((match_column(title), os.path.join(
+                cfg.output_folder, f"{cfg.name}-{report_suffix(title)}.html")))
+    columns = [(ct.default_column_name(cfg.release, match), path) for match, path in targets]
+    db.save_column_layout(db.load_column_layout()
+                          + [(name, ct.TEST_COLUMN_TYPE, True, 110) for name, _ in columns])
     db.set_meta(ct.BINDINGS_KEY, ct.dump_bindings(
-        {name: {"release_id": release_id, "match_col": TEST_MATCH_COLUMN,
-                "strict": cfg.strict}}))
+        {name: {"release_id": release_id, "match_col": match, "strict": cfg.strict}
+         for (name, _), (match, _) in zip(columns, targets)}))
     db.commit()
-    return name
+    return columns
 
 
-def _print_results(models: list, gate: dict) -> None:
+def _print_results(models: list) -> None:
     for model in models:
         counts = ", ".join(f"{n} {v}" for v, n in sorted(model["counts"].items()))
         _say(f"    {model['model']}: {counts or 'no ports'}")
-    for reason in gate["reasons"]:
-        _say(f"    {reason}")
 
 
 def run_pipeline(cfg, verbose: bool = False) -> int:
@@ -147,7 +156,6 @@ def run_pipeline(cfg, verbose: bool = False) -> int:
     without_mains = [m for m in workbook.models if not workbook.mains.get(m)]
     os.makedirs(cfg.output_folder, exist_ok=True)
     arch_path = os.path.join(cfg.output_folder, f"{cfg.name}.arch")
-    report_path = os.path.join(cfg.output_folder, f"{cfg.name}.html")
     _replace_output(arch_path)
 
     state = AppState(EventBus())
@@ -163,24 +171,33 @@ def run_pipeline(cfg, verbose: bool = False) -> int:
         _say(f"Loading {len(workbook.models)} models")
         ids = _create_models(cfg, workbook, state)
         jobs.run("fuzzy_rematch", model_ids=list(ids.values()))
-        col_name = _add_test_column(cfg, state, release.id)
+        columns = _add_test_columns(cfg, workbook, state, release.id)
 
         for model in without_mains:
             _say(f"    {model} has no main function: its ports report No Data")
-        _say(f"Testing (minimum match score {cfg.min_match_score}%)")
-        result = jobs.run("run_calltree_tests", col_name=col_name,
-                          model_ids=list(ids.values()), allow_missing_mains=True,
-                          min_match_score=cfg.min_match_score)
-        gate = evaluate_gate({m["model"]: m["counts"] for m in result["models"]},
-                             cfg.max_unmatched)
-        _print_results(result["models"], gate)
-
-        write_calltree_report(state, col_name, report_path)
+        all_counts: dict = {}
+        for col_name, report_path in columns:
+            _say(f"Testing {col_name} (minimum match score {cfg.min_match_score}%, "
+                 f"parameters {cfg.min_parameter_score}%)")
+            result = jobs.run("run_calltree_tests", col_name=col_name,
+                              model_ids=list(ids.values()), allow_missing_mains=True,
+                              min_match_score=cfg.min_match_score,
+                              min_variable_score=cfg.min_parameter_score)
+            _print_results(result["models"])
+            for model in result["models"]:
+                counts = all_counts.setdefault(model["model"], {})
+                for verdict, n in model["counts"].items():
+                    counts[verdict] = counts.get(verdict, 0) + n
+            write_calltree_report(state, col_name, report_path)
+        gate = evaluate_gate(all_counts, cfg.max_unmatched)
+        for reason in gate["reasons"]:
+            _say(f"    {reason}")
         state.save_project()
     finally:
         state.close_project()
 
-    _say(f"Report: {report_path}")
+    for _col_name, report_path in columns:
+        _say(f"Report: {report_path}")
     _say(f"Project: {arch_path}")
     _say("RESULT: PASSED" if gate["passed"] else "RESULT: FAILED")
     return EXIT_PASSED if gate["passed"] else EXIT_FAILED

@@ -10,11 +10,12 @@ A complete, working example of the [Pipeline CLI](../../../docs/guide/12-pipelin
 | `build_rh850_toolchain.sh` | Builds the free GCC compiler for RH850, needed only for the `rh850` target |
 | `make_workbook.py` | Stands in for your architecture export: writes the workbook the CLI reads |
 | `validation-arm.cfg`, `validation-rh850.cfg` | The CLI's settings for each target |
+| `verify_faults.py` | Checks that deliberately wrong parameter ports fail for the right reasons |
 | `requirements.txt` | Tools for the two stand-in scripts (the CLI doesn't need them) |
 | `example-gitlab-ci.yml` | A GitLab job to copy from |
 | `example-github-workflow.yml` | A GitHub Actions workflow to copy from |
 
-The demo's tools write `build/`, `rh850-toolchain/`, `interfaces.xlsx` and `results/` here. None of those are kept in git.
+The demo's tools write `build/`, `rh850-toolchain/`, `interfaces.xlsx`, `faults.xlsx` and `results/` here. None of those are kept in git.
 
 ## Run it
 
@@ -38,7 +39,13 @@ Then run the validation:
 arch-validator run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
 ```
 
-The last line says `RESULT: PASSED`, the exit code is `0`, and `results/` holds `vcu-arm.html` and `vcu-arm.arch`.
+The last line says `RESULT: PASSED`, the exit code is `0`, and `results/` holds `vcu-arm.arch`, the main `vcu-arm.html`, and one report per parameter column.
+
+To see it catch mistakes, run the fault check, which plants one wrong port per kind of failure:
+
+```bash
+python Resources/VCU_TestProject/pipeline/verify_faults.py Resources/VCU_TestProject/pipeline/validation-arm.cfg arch-validator
+```
 
 `arch-validator` is the packaged CLI from the release page. To run from source instead, use `python src/cli/main.py`. Running from source needs `pip install -r requirements.txt` and the native parser for the object files; the packaged CLI already includes both.
 

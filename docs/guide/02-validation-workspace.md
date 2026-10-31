@@ -55,7 +55,7 @@ A few rules keep things consistent: `TC. ID` always stays first, and once a row 
 
 A **Call-tree Test** column checks, for every port, whether the function in a chosen Match column is really used by the model's module in a release's firmware: it follows that release's [Code Map](09-code-map.md) call tree down from the model's **main function** and records a verdict.
 
-**Adding one.** In **Columns**, click **＋ Test column…**, pick the **Match column** to test (only port/function Match columns are offered: a variable isn't "called") and the **release**, then **Add** and **Apply**. You can add one per release and Match column, so with several Match columns you choose which one each test checks. Tick **verified calls only** to count only calls confirmed by the release's imported `.o` files.
+**Adding one.** In **Columns**, click **＋ Test column…**, pick the **Match column** to test and the **release**, then **Add** and **Apply**. You can add one per release and Match column, so with several Match columns you choose which one each test checks. Tick **verified calls only** to count only calls confirmed by the release's imported `.o` files.
 
 **Running it.** Tests run only when you start them: click **▶** in the column header (shown while the column's release is active). Build the release's Code Map first (one map serves every model of the release); without one the rows report *No Data*.
 
@@ -70,6 +70,15 @@ A **Call-tree Test** column checks, for every port, whether the function in a ch
 | **Not Run** | The test hasn't been run yet. |
 
 Calls made from **assembly** (for example a bootloader's start-up code calling a low-level init) are not visible in the C source. Import the release's `.o` files, including the assembled start-up objects, in the Code Map's **Objects** badge and those calls count as real callers.
+
+**Parameter ports.** Some ports are a parameter rather than a function. To test one, add a **Variable Search** column with `required` or `provided` in its title, such as *Required Parameter*, to the right of the function column, then bind a Test column to its Match column. The title sets the direction:
+
+| Title has | The value... | Passed when the row's function, or a function it calls, ... |
+|---|---|---|
+| `required` | comes in | has it as a parameter, or reads it |
+| `provided` | goes out | returns it, writes it, or stores it through an output pointer |
+
+No main function is needed, because the test starts from the row's function. Build the Code Map from source first. Using the variable the wrong way round gives **Failed** with "Wrong direction". A name that isn't a variable in the release, or whose match scores below 70%, gives **Not Matched**. Generated names rarely match exactly, which is why that limit is lower than for functions. A title with neither word gives **No Data**, and a row with nothing in that column gives **No Result**, so one port can use a required and a provided column without the other counting against it.
 
 **Recorded, not live.** A verdict is stored with its evidence and the time it was run, so it doesn't change silently. If the Code Map is rebuilt afterwards, the cell shows **⟳** (stale) until you run the test again.
 

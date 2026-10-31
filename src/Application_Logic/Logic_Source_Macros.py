@@ -102,9 +102,26 @@ def release_call_targets(db, release_id) -> List[str]:
     return sorted(n for n in names if n and not n.startswith("0x"))
 
 
+def release_variable_names(db, release_id) -> List[str]:
+    """Variable names only the release's Code Map shows: function parameters,
+    written variables and struct-field paths. Plain read names are left out,
+    because reads also pick up macros and enum values."""
+    if db is None or release_id is None:
+        return []
+    cm = db.get_release_code_map(release_id) or {}
+    names: Set[str] = set()
+    for fdata in (cm.get("functions") or {}).values():
+        fdata = fdata or {}
+        names.update(p.get("name") or "" for p in fdata.get("parameters") or [])
+        names.update(fdata.get("writes_vars") or [])
+        names.update(n for n in fdata.get("reads_vars") or [] if "." in n or "->" in n)
+    return sorted(n for n in names if n)
+
+
 def release_match_extras(db, release_id) -> Dict[str, List[str]]:
-    """Source-side match candidates of a release: its #define macros plus the
-    names in its Code Map's call tree."""
+    """Source-side match candidates of a release: its #define macros, the names
+    in its Code Map's call tree, and the variables only the Code Map shows."""
     out = release_macros(db, release_id)
     out["call_targets"] = release_call_targets(db, release_id)
+    out["variables"] = release_variable_names(db, release_id)
     return out

@@ -223,7 +223,8 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
                  models: Iterable[Tuple[str, List[dict], Optional[dict]]],
                  object_pairs: Optional[Iterable[Tuple[str, str]]] = None,
                  port_state_col: Optional[str] = None,
-                 components: Optional[List[str]] = None) -> dict:
+                 components: Optional[List[str]] = None,
+                 variable_test: bool = False) -> dict:
     """The report as plain data. ``models`` = [(model name, rows, code map
     [, main functions])].
 
@@ -282,6 +283,9 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
                 "mains_changed": mains_changed,
                 "main_path": [str(x) for x in cell.get("main_path") or []],
                 "mains": cell_mains,
+                "variable": cell.get("variable") or "",
+                "direction": cell.get("direction") or "",
+                "access_path": [str(x) for x in cell.get("access_path") or []],
                 "component": (((code_map or {}).get("functions") or {})
                               .get(function) or {}).get("component", ""),
                 "snapshot": call_tree_snapshot(index, function),
@@ -289,6 +293,7 @@ def build_report(*, project: str, release: str, col_name: str, binding: dict,
             counts[verdict] = counts.get(verdict, 0) + 1
             totals[verdict] = totals.get(verdict, 0) + 1
         chapters.append({"model": model_name, "entries": entries, "counts": counts,
+                         "variable_test": variable_test,
                          "score": score(counts), "skipped": skipped, "mains": mains,
                          "tree": main_tree(entries, index),
                          "unreached": [e["id"] for e in entries if not e["main_path"]], "has_code_map": bool(code_map),
@@ -436,6 +441,8 @@ def _count_ports(node: dict) -> int:
 def _main_tree_html(chapter: dict) -> str:
     """The chapter's call tree from its main function(s) — an Eclipse-style
     call hierarchy, collapsible, with each port's verdict on its function."""
+    if chapter.get("variable_test"):
+        return ""       # parameter ports start from their function, not a main
     by_id = {e["id"]: e for e in chapter["entries"]}
     mains = chapter["mains"]
 
@@ -540,6 +547,9 @@ def _detail_html(entry: dict, chapter: dict, data: dict) -> str:
         ("Matched function", f'<code>{_e(entry["function"]) or "—"}</code>'),
         ("Verdict", _badge(entry["verdict"])),
     ]
+    if entry["variable"]:
+        rows[3:3] = [("Matched variable", f'<code>{_e(entry["variable"])}</code>'),
+                     ("Direction", _e(entry["direction"].capitalize()) or "—")]
     if entry["mains"]:
         rows.append(("Main function", ", ".join(f"<code>{_e(m)}()</code>"
                                                 for m in entry["mains"])))

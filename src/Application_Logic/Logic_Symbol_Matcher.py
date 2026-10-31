@@ -71,6 +71,13 @@ class SymbolMatcher:
 
         self.search_pool: List[str] = self.all_function_names + self.all_variable_names
 
+        # Parameters and struct fields are only candidates for Variable Search
+        # columns: in the Port Search pool a short name like `v` would be noise.
+        if macros:
+            known_vars = set(self.all_variable_names)
+            self.all_variable_names = self.all_variable_names + [
+                n for n in macros.get("variables", []) if n not in known_vars]
+
     def find_best_match(self, target_name: str,
                         threshold: int = 70) -> Tuple[Optional[str], int]:
         if not target_name or not self.search_pool:

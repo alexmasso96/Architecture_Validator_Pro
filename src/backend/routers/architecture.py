@@ -845,7 +845,9 @@ def get_main_functions(model_id: int, col_name: str,
         return {"model_id": model_id, "functions": mains, "found": found,
                 "missing": [m for m in mains if m not in found],
                 "has_code_map": index is not None,
-                "needs_input": index is not None and not found,
+                # A variable column starts from each row's function instead.
+                "needs_input": (index is not None and not found and ct.variable_test_spec(
+                    db.load_column_layout(), binding["match_col"]) is None),
                 "release_name": getattr(rel, "name", ""),
                 "suggestions": suggestions}
     return _guard(go)
@@ -916,6 +918,7 @@ def write_calltree_report(state: AppState, col_name: str,
     import datetime as _dt
     import os
     from Application_Logic import Logic_CallTree_Report as rep
+    from Application_Logic import Logic_CallTree_Test as ct
     from Application_Logic.Logic_File_Locking import FileLockManager
 
     db = state.require_open()
@@ -955,6 +958,7 @@ def write_calltree_report(state: AppState, col_name: str,
         logo=read_pref(rep.LOGO_PREF_KEY),
         created_at=now.strftime("%Y-%m-%d %H:%M %Z").strip(),
         layout=layout, models=models, object_pairs=object_pairs,
+        variable_test=ct.variable_test_spec(layout, binding["match_col"]) is not None,
         port_state_col=port_state_col,
         components=[f["component"] for f in files] if len(files) > 1 else None)
     doc = rep.render_html(data)

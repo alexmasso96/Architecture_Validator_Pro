@@ -80,4 +80,6 @@ cli_validation:
     - python Resources/VCU_TestProject/pipeline/make_workbook.py
     - python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-arm.cfg
     - python src/cli/main.py run --config Resources/VCU_TestProject/pipeline/validation-rh850.cfg
+    - python Resources/VCU_TestProject/pipeline/verify_faults.py Resources/VCU_TestProject/pipeline/validation-arm.cfg python src/cli/main.py
+    - python Resources/VCU_TestProject/pipeline/verify_faults.py Resources/VCU_TestProject/pipeline/validation-rh850.cfg python src/cli/main.py
   <<: [*cli_rules, *cli_artifacts]

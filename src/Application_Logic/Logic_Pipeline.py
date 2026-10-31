@@ -8,7 +8,8 @@ its first row; one reserved sheet maps models to main functions: first column
 the model name, second column a main function, a repeated model adds another.
 
 Pass/fail rule:
-  * Passed and Entry point are OK, No Result (retired/deleted port) is ignored.
+  * Passed and Entry point are OK, No Result (a retired or deleted port, or a
+    port with no parameter in that column) is ignored.
   * Not Matched fails the run once there are more than ``max_unmatched`` of
     them; ``max_unmatched = -1`` never fails on them.
   * Anything else (Failed, No Data) always fails the run, as does a run where
@@ -23,7 +24,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Tuple
 
 from Application_Logic import Logic_CallTree_Test as ct
 from Application_Logic.Logic_Crypto import is_blacklisted
@@ -50,8 +51,8 @@ _KNOWN_KEYS = {
     "project": {"name", "release"},
     "inputs": {"workbook", "main_sheet", "symbols", "source", "source_exclude",
                "objects", "object_pattern"},
-    "columns": {"function_column", "port_column", "variable_column"},
-    "test": {"min_match_score", "max_unmatched", "strict"},
+    "columns": {"function_column", "port_column", "variable_column", "parameter_columns"},
+    "test": {"min_match_score", "min_parameter_score", "max_unmatched", "strict"},
     "security": {"encryption", "password", "password_env"},
     "output": {"folder"},
 }
@@ -77,7 +78,9 @@ class PipelineConfig:
     function_column: str = FUNCTION_TARGET
     port_column: str = PORT_TARGET
     variable_column: str = VARIABLE_TARGET
+    parameter_columns: List[str] = field(default_factory=list)
     min_match_score: int = DEFAULT_MIN_MATCH_SCORE
+    min_parameter_score: int = ct.DEFAULT_VARIABLE_SCORE
     max_unmatched: int = 0
     strict: bool = False
     password: Optional[str] = None
@@ -130,6 +133,17 @@ def _parse_symbols(values: List[str], resolve) -> List[Tuple[str, str]]:
                                 "listed twice.")
         out.append((component, resolve(path.strip())))
     return out
+
+
+def _parameter_columns(titles: List[str]) -> List[str]:
+    """Workbook columns holding parameter ports; each title gives its direction."""
+    unclear = [t for t in titles if ct.column_direction(t) is None]
+    if unclear:
+        raise PipelineError("[columns] parameter_columns need \"required\" or "
+                            f"\"provided\" in the title: {', '.join(unclear)}.")
+    if len(set(titles)) != len(titles):
+        raise PipelineError("[columns] parameter_columns lists a column twice.")
+    return titles
 
 
 def _password(section: Mapping[str, str], environ: Mapping[str, str]) -> Optional[str]:
@@ -212,8 +226,12 @@ def load_config(path: str, environ: Optional[Mapping[str, str]] = None) -> Pipel
         function_column=get("columns", "function_column").strip() or FUNCTION_TARGET,
         port_column=get("columns", "port_column").strip() or PORT_TARGET,
         variable_column=get("columns", "variable_column").strip() or VARIABLE_TARGET,
+        parameter_columns=_parameter_columns(_lines(get("columns", "parameter_columns"))),
         min_match_score=_int(get("test", "min_match_score", str(DEFAULT_MIN_MATCH_SCORE)),
                              "test.min_match_score", 0, 100),
+        min_parameter_score=_int(get("test", "min_parameter_score",
+                                     str(ct.DEFAULT_VARIABLE_SCORE)),
+                                 "test.min_parameter_score", 0, 100),
         max_unmatched=_int(get("test", "max_unmatched", "0"), "test.max_unmatched",
                            NO_UNMATCHED_LIMIT),
         password=_password(parser["security"] if parser.has_section("security") else {},
@@ -249,6 +267,9 @@ def _sheet_rows(sheet: str, columns: List[str], rows: List[dict],
         raise PipelineError(f"Sheet {sheet!r} has no {cfg.function_column!r} column.")
     titles = _title_map(cfg)
     targets = [titles.get(c, c) for c in columns]
+    if any(t in titles for t in cfg.parameter_columns):
+        raise PipelineError("[columns] parameter_columns can't also be the function, "
+                            "port or variable column.")
     for title, target in zip(columns, targets):
         if target in _DEFAULT_NAMES and target not in _FILLABLE:
             raise PipelineError(f"Sheet {sheet!r}: column {title!r} is reserved "
@@ -318,12 +339,30 @@ def read_workbook(cfg: PipelineConfig) -> ArchitectureWorkbook:
     return ArchitectureWorkbook(models, columns, _read_mains(sheets[cfg.main_sheet], models))
 
 
-def build_layout(columns: List[str]) -> list:
+def build_layout(columns: List[str], parameter_columns: Iterable[str] = ()) -> list:
     """The default table layout plus the workbook's own columns, as static text
-    in front of the review columns."""
-    extras = [(c, "Static Text", True, 140) for c in columns if c not in _DEFAULT_NAMES]
-    at = next(i for i, c in enumerate(DEFAULT_COLUMN_LAYOUT) if c[0] == "Review Status")
-    return DEFAULT_COLUMN_LAYOUT[:at] + extras + DEFAULT_COLUMN_LAYOUT[at:]
+    in front of the review columns. Parameter columns become Variable Search
+    columns, to the right of the function column they're tested against."""
+    parameters = [c for c in parameter_columns if c in columns]
+    extras = [(c, "Static Text", True, 140) for c in columns
+              if c not in _DEFAULT_NAMES and c not in parameters]
+    search = [column for title in parameters
+              for column in ((title, "Variable Search", True, 160),
+                             (match_column(title), "Static Text", True, 160))]
+    names = [c[0] for c in DEFAULT_COLUMN_LAYOUT]
+    review = names.index("Review Status")
+    variable = names.index(VARIABLE_TARGET)
+    return (DEFAULT_COLUMN_LAYOUT[:variable] + search
+            + DEFAULT_COLUMN_LAYOUT[variable:review] + extras + DEFAULT_COLUMN_LAYOUT[review:])
+
+
+def match_column(title: str) -> str:
+    return f"{title} (Match)"
+
+
+def report_suffix(title: str) -> str:
+    """A file-name-safe part for a parameter column's report."""
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
 
 
 # ---------------------------------------------------------------------------
