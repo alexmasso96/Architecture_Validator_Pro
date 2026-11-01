@@ -1,3 +1,35 @@
+# v3.2.2 — Test Injection fixes, search, new guides
+
+## 🪝 Hooks land where you put them
+- **Fixed: a hook could land in the wrong place and still show exact.** A line such as `{` or `}` appears all over a file, so a hook could end up after the first one. Hooks now remember 3 lines of code on each side, and blank lines, comments and indentation don't count.
+- **Hooks you already have keep working.** One that can't be told apart from another place now shows **fuzzy** instead of **exact**, so check those in the preview.
+- **The source view is read-only in Edit mode.** Typing there was never saved, and it could shift the place of the next hook.
+- **Hook at cursor asks you to click a line first,** so a hook can't land on line 1 by accident.
+
+## 🔍 Find your code
+- **Search the source by function or file name.** Picking a function opens its file at that line.
+- **Folders start closed.**
+
+## 📁 Your own test files
+- **The app asks where they go in the source tree,** shows the path each file will get, and warns you if a file would replace a source file.
+- **Remove a test file** with the ✕ that appears when you hover over it.
+- **A test file that replaces a hooked source file is now reported as a conflict.** Before, those hooks were lost without a word.
+
+## 🔨 Building
+- **`make 0` runs from your make script's folder.** Before, with no working directory set, it ran from the app's install folder and `make` wasn't found. Your existing make script setting keeps working.
+- **Preferences → Paths is now Build folder and Build command.** You no longer have to pick a script, and you can enter a folder or a script path.
+- **Settings reach the Build Console straight away,** and new test builds start from them.
+- **Press Enter in the command box to build,** or click **Terminal** to open an empty terminal in the build folder.
+- **Command Prompt is the default terminal on Windows** for new projects, and commands with quoted paths now work there.
+- **Fixed: the Build Console slid under the source view** after collapsing and expanding it.
+
+## 📖 Guides
+- **New guide pages for Test Builds and Shared Projects & Sync,** and a rewritten Test Injection page.
+- **New in-app tutorials** for Test Builds and shared projects, under **Preferences → Tutorials**, and an updated Test Injection tutorial.
+
+## ⚠️ Known issue
+- **The update pill can stay yellow** when GitHub's limit on update checks is used up. Hover over it to see why. It doesn't affect the app, and it's planned for a later release.
+
 # v3.2.1 — Sync Worker fixes for Windows, clearer progress, update check
 
 ## 🪟 Sync Worker window
