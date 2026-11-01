@@ -1,89 +1,81 @@
 # 11. Test Injection
 
-[← Change Log](10-change-log.md) · **Test Injection** · [Guide home](README.md)
+[← Change Log](10-change-log.md) · **Test Injection** · [Next: Test Builds →](12-test-builds.md)
 
 ---
 
 ![Test Injection](../../Media/images/test_injection.png)
 
-The **Test Injection** view lets you splice extra C code — instrumentation, stubs, a test harness — into your firmware **without ever editing the real source files**. Your edits are saved as *hooks* in the project and applied only to generated copies, so your originals stay clean.
+The **Test Injection** view lets you add extra C code — instrumentation, stubs, a test harness — to your firmware **without ever editing the real source files**. Your code is saved in the project as *hooks* and only applied to generated copies, so your originals stay clean.
 
 > 💡 **Preferences → Tutorials → Test Injection workflow** runs through the whole flow on a simulated screen.
 
 ## How it works
 
-A **hook** is a snippet of C anchored to a location in a production source file. Crucially, hooks anchor to the **text of the surrounding lines, not line numbers** — so a hook re-finds its spot even if the upstream source shifts later. Nothing is written to the real file; the hook lives in the project and is applied only when you export.
+A **hook** is a snippet of C tied to a place in a source file. It remembers the **lines of code around that place, not a line number**, so it finds its spot again when the source shifts in a later release. Nothing is written to the real file.
+
+Each hook shows how sure the app is about its place:
+
+| Badge | Meaning |
+|---|---|
+| **exact** | The code on both sides matches at one place in the file. |
+| **fuzzy** | Only one side matches, or several places match equally well. Check it in the preview. |
+| **conflict** | The code around the hook is gone. Click **Reposition** to choose a new place. |
+
+### What belongs to what
+
+- **Hooks and test files belong to a test project.** They're stored inside your `.arch`, so they stay with the project and travel with it.
+- One `.arch` can hold several test projects, such as a coverage build and a unit harness. They don't affect each other.
+- A test project isn't tied to a release. You can use it on any release, and its hooks find their places there.
 
 ## The layout
 
 - **Sidebar (left):**
-  - **Test Projects** — a container for one set of hooks, helper files, and build settings. Keep several (e.g. a coverage build vs. a unit harness); select one to make it active.
-  - **Production Source** — your firmware's real source for the active release (read-only). This is what you inject *into*.
-  - **Test Files** — helper `.c/.h` files you import to ride along with the export.
-- **Centre:** the source editor with an **Inject / Edit** mode switch, and a **Build Console** with **Build** and **Export**.
-- **Right:** the snippet editor for the selected hook.
+  - **Test Projects** — one set of hooks and test files. Select one to make it active.
+  - **Production Source** — the source imported into the active release (read-only). Folders start closed. Search by function or file name; picking a function opens its file at that line.
+  - **Test Files** — your own `.c/.h` files that go along with the hooks.
+- **Centre:** the source view with an **Inject / Edit** switch, and the **Build Console**.
+- **Right:** the hooks of the open file, and the snippet editor for the selected hook.
 
 ## The workflow
 
-1. **Create a test project** with **＋** next to *Test Projects*, and select it.
-2. **Open a production source file** from the *Production Source* list — it opens in the centre editor in **Inject** mode (a safe preview).
-3. **Switch to Edit**, place your cursor where the code should go, and click **＋ Hook at cursor**.
-4. **Write the snippet** in the right-hand editor and **Save** — it appears inline in the preview (highlighted green) at the anchor point, while the real file on disk stays untouched.
-5. *(Optional)* **Import helper files** (`.c/.h`) under *Test Files* if your injected code calls mocks or a harness. They're kept separate from production code.
-6. **Export** and choose how:
-   - **Modified** — writes only the files that have hooks.
-   - **Reconstruct** — writes the whole source tree with hooks applied.
+1. **Import the source.** Use **Import Source** in the Release Manager. This view reads that stored copy, not a folder on disk, so import again when the code changes.
+2. **Create a test project** with **＋** next to *Test Projects*, and select it.
+3. **Open a source file** from *Production Source*, or search for a function. It opens in **Inject** mode, a preview that shows your hooks in place.
+4. **Add a hook.** Switch to **Edit**, click the line where the code should go, and click **＋ Hook at cursor**. The file stays read-only: your code goes in the hook.
+5. **Write the snippet** in the panel on the right and click **Save snippet**. It appears in the preview, highlighted green.
+6. *(Optional)* **Import test files** with **⤓** under *Test Files* (see below).
+7. **Export** to an output folder. You get the files that have hooks, plus your test files.
 
-   Point it at an output folder and you get build-ready code — your originals stay clean.
+You can change or remove a hook at any time and export again.
 
-Because hooks live in the project (not the files), you can tweak or remove them any time and re-export.
+## Adding your own test files
+
+For anything bigger than a snippet, such as mocks or a test harness, keep the code in `.c/.h` files and import them:
+
+1. Click **⤓** under *Test Files* and choose the folder that holds them.
+2. Choose where they go in the source tree. Type a folder or pick an existing one. The app shows the path each file will get, and warns you in red if a file would replace a source file.
+3. Click **Import**.
+
+A few things to know:
+
+- **They're copies.** Change the file on disk and import it again to update it. Importing a file to the same path replaces it.
+- **To move a file**, hover over it, click **✕**, and import it to the new folder.
+- **Your build still has to compile them.** A makefile that finds all `.c` files picks them up by itself. With a fixed file list, add them to the makefile, or use `#include "harness.c"` in a hook.
+- **Replacing a source file drops its hooks**, because the whole file is swapped. The app reports those hooks as conflicts.
+
+## Building
+
+Set the build up once in **Preferences → Paths**:
+
+- **Build folder** — your make script, or the folder it's in. Builds run from that folder, the same as opening a terminal there.
+- **Terminal** — the terminal you use, such as **Command Prompt**.
+- **Build command** — what you'd type in that terminal, such as `make 0`.
+
+These settings appear in the **Build Console**. Press **Enter** in the command box or click **Build** to run the command, and the output appears below. **Terminal** opens an empty terminal in the build folder, so you can type there yourself.
+
+> ⚠️ **Build** runs your command on the folder as it is. It doesn't apply your hooks. To build with hooks applied, use [Test Builds](12-test-builds.md), or **Export** and build from that folder.
 
 ---
 
-[← Change Log](10-change-log.md) · [Guide home](README.md)
-
-## Test Builds
-
-**Test Builds**, at the top of the Test Injection tab, prepares named builds for testing on a real ECU, such as `Watchdog build`, builds them one after another overnight, and swaps them into the folder your debugger points at. You keep one mapped folder instead of several copies of a release.
-
-Test builds aren't compared with Main or analysed. They can hold code that a normal pipeline would fail, such as a `while(1)` for a watchdog test or an MPU violation, so a build is judged only on whether its build command succeeded. They never change the release's symbols, Code Map, call graph or test results.
-
-### Set up a build
-
-1. Select the release in the table. Builds always belong to one release, so R2 needs its own builds even if it uses the same test project.
-2. Under **Builds for the selected release**, add a build with a name and a test project.
-3. Click **Edit** and set the build command, clean command, terminal, working directory, source folder and build output folder. The clean command matters: without it, objects from the previous build can end up in this one.
-4. Under **Tracked files**, choose what to keep: files or folders, with a role of **Flash**, **Symbols**, **Source** or **Objects**. Folders accept patterns such as `**/*.hex`. The project-wide list applies unless a build has its own. If you don't track any Source files, the files your hooks change and your helper files are kept.
-
-Track your `.o` files with the **Objects** role. They're kept for Main only, so you can import them later from clean output.
-
-### Clean release data first
-
-Architecture testing needs the release's clean source and `.o` files, so they should be imported before injected code exists. If either is missing, a run or **Export** tells you which one and offers **Continue anyway**, which is recorded under your name. You might choose this because the release hasn't been built yet. Importing later is never blocked: use **Import from Main capture** so that no test code gets in. A release with no source can still build Main, but builds with hooks are skipped.
-
-### Run overnight
-
-Tick the builds and click **Check and run…**. The app lists anything that would fail, and you can drop those builds and start the rest. The run then:
-
-- builds **Main** first if the release has no complete Main capture yet. If Main fails, that release's test builds are skipped, because there'd be nothing clean to switch back to
-- for each build, applies its hooks, runs the clean and build commands, saves the log and captures the tracked files
-- puts your source folder back after each build, so one build's hooks can't reach the next
-- carries on if a build fails, and marks a build **Incomplete** if a tracked file is missing
-
-The run holds the edit lock and keeps the machine awake. If the app or machine stops, the next start offers **Resume**, which restores the source folder and continues from the first unfinished build.
-
-### Switch the mapped release
-
-Under **Mapped release**, choose the folder your debugger points at. It's saved for you on this PC, because paths differ between PCs. Pick a build and click **Switch**, and the app tells you when it's finished. Then flash from your debugger as usual.
-
-- Only files that differ are transferred, and files the app didn't place there are left alone.
-- If a file was changed outside the app, such as by a manual rebuild, you're asked before it's overwritten.
-- If the debugger has a file open, the app names it. Close the debugger and switch again.
-- If the NAS drops during the download, the mapped folder doesn't change.
-- If a switch is interrupted while files are being replaced, the next start offers to finish it or go back.
-
-Switching back to **Main** is the same action, and it doesn't need the edit lock. If you change the release in the table, that release's builds are listed instead, and the mapped folder stays as it is. The app warns you if it holds a build from another release.
-
-### Where binaries are kept
-
-Binaries are stored next to the project in `Project.arch.binaries/`, not inside it and not on each PC. Each file is stored once, so a file that's the same in Main and in a test build takes no extra space. **To copy a project elsewhere, copy this folder too.** Deleting a build keeps its files until you click **Clean up** under **Binary store**.
+[← Change Log](10-change-log.md) · [Guide home](README.md) · [Next: Test Builds →](12-test-builds.md)

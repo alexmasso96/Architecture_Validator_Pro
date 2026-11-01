@@ -6,6 +6,8 @@ import { ChangeLogDemo } from "./tutorial/ChangeLogDemo";
 import { TestDesignDemo } from "./tutorial/TestDesignDemo";
 import { AIGenerationDemo } from "./tutorial/AIGenerationDemo";
 import { AIChatDemo } from "./tutorial/AIChatDemo";
+import { TestBuildsDemo } from "./tutorial/TestBuildsDemo";
+import { SyncDemo } from "./tutorial/SyncDemo";
 
 // "Tutorials" preferences section: a list of interactive guides. Each card
 // launches a self-contained, click-through demo (no real data is touched).
@@ -70,9 +72,25 @@ const TUTORIALS: Tutorial[] = [
     key: "test-injection",
     title: "Test Injection workflow",
     blurb:
-      "Create a test project, hook test code into a source file, and export build-ready output — step by step, on a simulated screen.",
+      "Find a function, hook test code into it, add your own test files, and export build-ready output — step by step, on a simulated screen.",
     icon: "💉",
     render: (onClose) => <TestInjectionDemo onClose={onClose} />,
+  },
+  {
+    key: "test-builds",
+    title: "Test Builds",
+    blurb:
+      "Set up builds for a real ECU, run them overnight, and switch any of them into the folder your debugger points at.",
+    icon: "🔨",
+    render: (onClose) => <TestBuildsDemo onClose={onClose} />,
+  },
+  {
+    key: "sync",
+    title: "Shared projects & sync",
+    blurb:
+      "Share a project on a NAS and see how the Sync Worker keeps everyone's copy in step, even when something goes wrong.",
+    icon: "🔄",
+    render: (onClose) => <SyncDemo onClose={onClose} />,
   },
 ];
 

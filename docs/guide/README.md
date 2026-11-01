@@ -22,8 +22,10 @@ If you're new, read it top to bottom. If you're looking for one thing, jump stra
 | 8 | [AI Chat](08-advanced-ai-chat.md) | Source mind maps and agentic, source-grounded chat |
 | 9 | [Code Map](09-code-map.md) | The visual call-graph + read-only IDE joining the ELF to your C source |
 | 10 | [Change Log](10-change-log.md) | Side-by-side release diffs and the AI change-log summary |
-| 11 | [Test Injection](11-test-injection.md) | Splicing test code into production source without editing the originals |
-| 12 | [Pipeline CLI](12-pipeline-cli.md) | Running the full validation in a GitLab or GitHub build pipeline |
+| 11 | [Test Injection](11-test-injection.md) | Adding test code to production source without editing the originals |
+| 12 | [Test Builds](12-test-builds.md) | Building test code overnight and switching it into the folder your debugger uses |
+| 13 | [Shared Projects & Sync](13-shared-projects-and-sync.md) | Sharing a project on a NAS with the Sync Worker |
+| 14 | [Pipeline CLI](14-pipeline-cli.md) | Running the full validation in a GitLab or GitHub build pipeline |
 
 ---
 

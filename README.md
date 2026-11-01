@@ -33,7 +33,9 @@ For a full, screenshot-by-screenshot walkthrough of every feature, see the **[Us
 - [Code Map](docs/guide/09-code-map.md)
 - [Change Log](docs/guide/10-change-log.md)
 - [Test Injection](docs/guide/11-test-injection.md)
-- [Pipeline CLI](docs/guide/12-pipeline-cli.md)
+- [Test Builds](docs/guide/12-test-builds.md)
+- [Shared Projects & Sync](docs/guide/13-shared-projects-and-sync.md)
+- [Pipeline CLI](docs/guide/14-pipeline-cli.md)
 
 > 💡 Every feature also has an **interactive in-app walkthrough** — open **Preferences → Tutorials** for a click-through demo of each view.
 
@@ -66,7 +68,13 @@ A **git-style side-by-side diff** between releases (file browser, old/new with s
 ![Change Log — side-by-side release diff](/Media/images/change_log.png "Change Log — git-style side-by-side diff between releases with synchronized scrolling and add/delete highlighting")
 
 ### 💉 Source-level test injection
-Splice extra C code — instrumentation, stubs, a test harness — into your firmware **without ever editing the real source files**. Edits are saved as *hooks* in the project (anchored to the surrounding lines, not brittle line numbers) and applied only to generated copies. Import helper `.c/.h` files alongside, then **export** build-ready code — *Modified files only* or a full *Reconstructed* tree — with your originals left untouched.
+Splice extra C code — instrumentation, stubs, a test harness — into your firmware **without ever editing the real source files**. Edits are saved as *hooks* in the project (anchored to the surrounding lines, not brittle line numbers) and applied only to generated copies. Search the source by function or file, import your own `.c/.h` files into any folder of the source tree, then **export** build-ready code with your originals left untouched. See the [Test Injection guide](docs/guide/11-test-injection.md).
+
+### 🔨 Test Builds
+Prepare named builds for testing on a real ECU, such as a watchdog build, and **build them one after another overnight**. Each build's hooks are applied and removed again, its files are captured, and a run picks up where it stopped. **Switch** swaps any build into the one folder your debugger points at, transferring only the files that differ, so you never keep several copies of a release. See the [Test Builds guide](docs/guide/12-test-builds.md).
+
+### 🔄 Shared projects & sync
+Keep a project on a NAS and let the **Sync Worker** keep everyone's local copy in step. You work from your own disk, only the changed parts travel, and changes arrive by themselves, even with the app closed. A tray applet shows what changed and by whom, frees locks left by a crash, and handles an unreachable share without losing work. See the [Shared Projects & Sync guide](docs/guide/13-shared-projects-and-sync.md).
 
 ### 📥 Flexible architecture import
 Bring your architecture in from **Excel or CSV**. Path-based interface exports are detected automatically and routed through a dedicated import flow, and the classic sheet-per-model spreadsheet format is supported too.
@@ -84,7 +92,7 @@ All your data lives in one editable table of ports × columns. A drag-and-drop c
 Cells filled by an import (such as test-case IDs) are **locked 🔒**: they can't be edited by hand, and later imports won't overwrite them — a differing value is flagged in the import diff instead. Unlocking is an explicit right-click action recorded in the history.
 
 ### ⚙️ Pipeline CLI
-Run the full validation in a GitLab or GitHub build pipeline with one command: `arch-validator run --config validation.cfg`. It reads a generated Excel workbook and the build's symbol, source and object files, tests every architecture model, writes the HTML report and `.arch` project, and returns a pass or fail exit code. Packaged for Windows, Linux and macOS, with a [working demo](Resources/VCU_TestProject/pipeline/README.md) to copy from. See the [Pipeline CLI guide](docs/guide/12-pipeline-cli.md).
+Run the full validation in a GitLab or GitHub build pipeline with one command: `arch-validator run --config validation.cfg`. It reads a generated Excel workbook and the build's symbol, source and object files, tests every architecture model, writes the HTML report and `.arch` project, and returns a pass or fail exit code. Packaged for Windows, Linux and macOS, with a [working demo](Resources/VCU_TestProject/pipeline/README.md) to copy from. See the [Pipeline CLI guide](docs/guide/14-pipeline-cli.md).
 
 ### 🔁 Release management, baselining & change detection
 Manage multiple **software releases** in a single project, each carrying its own ELF data. Creating a release **auto-baselines** the previous one; frozen baselines are read-only and **write-protected at the database layer**, and unfreezing requires the project master password. Compare against a baseline to surface changes — differences are colour-coded so you can **approve or reject** them release over release, and every freeze/unfreeze is recorded in history.

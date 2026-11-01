@@ -21,82 +21,95 @@ const STEPS: TutorialStep<Highlight>[] = [
     highlight: "stage",
     body: (
       <>
-        It lets you splice extra C code — instrumentation, stubs, a test harness —
-        into your firmware <strong>without ever editing the real source files</strong>.
-        Your edits are saved as <em>hooks</em> in the project and applied only to
+        It lets you add extra C code — instrumentation, stubs, a test harness — to
+        your firmware <strong>without ever editing the real source files</strong>.
+        Your code is saved as <em>hooks</em> in the project and applied only to
         generated copies. This walkthrough shows the full flow end to end.
       </>
     ),
   },
   {
-    title: "1 · Create a test project",
-    highlight: "projects",
-    body: (
-      <>
-        Click <strong>＋</strong> next to <strong>Test Projects</strong> to make a
-        container for one set of hooks, helper files and build settings. You can
-        keep several (e.g. a coverage build vs. a unit harness). Select one to make
-        it active — everything else on the screen follows it.
-      </>
-    ),
-  },
-  {
-    title: "2 · Open a production source file",
+    title: "1 · Import the source",
     highlight: "source",
     body: (
       <>
-        The <strong>Production Source</strong> list shows your firmware's real
-        source for the active release (read-only). Click a file — here{" "}
-        <code>adc.c</code> — to open it in the center editor. This is{" "}
-        <em>what you inject into</em>.
+        Use <strong>Import Source</strong> in the Release Manager. This view reads
+        that stored copy of the release's code, not a folder on disk, so import again
+        when the code changes.
       </>
     ),
   },
   {
-    title: "3 · Switch to Edit and add a hook",
+    title: "2 · Create a test project",
+    highlight: "projects",
+    body: (
+      <>
+        Click <strong>＋</strong> next to <strong>Test Projects</strong>. A test
+        project holds one set of hooks and test files, stored in your{" "}
+        <code>.arch</code>. You can keep several (e.g. a coverage build vs. a unit
+        harness), and use one on any release.
+      </>
+    ),
+  },
+  {
+    title: "3 · Find the code",
+    highlight: "source",
+    body: (
+      <>
+        Folders start closed. Open them, or search by <strong>function or file
+        name</strong>. Picking a function — here <code>Adc_ReadChannel</code> — opens
+        its file at that line, in <strong>Inject</strong> mode, a preview that shows
+        your hooks in place.
+      </>
+    ),
+  },
+  {
+    title: "4 · Switch to Edit and add a hook",
     highlight: "modeswitch",
     body: (
       <>
-        The editor opens in <strong>Inject</strong> mode (safe preview). Switch to{" "}
-        <strong>Edit</strong>, place your cursor where the code should go, and click{" "}
-        <strong>＋ Hook at cursor</strong>. A hook is anchored to the surrounding
-        lines, so it can re-find its spot even if the source shifts later.
+        Switch to <strong>Edit</strong>, click the line where the code should go, and
+        click <strong>＋ Hook at cursor</strong>. The file stays read-only. A hook
+        remembers the code around it, so it finds its spot again if the source shifts.
       </>
     ),
   },
   {
-    title: "4 · Write the injected snippet",
+    title: "5 · Write the snippet",
     highlight: "snippet",
     body: (
       <>
-        Edit the hook's snippet on the right and <strong>Save</strong>. It appears
-        inline in the preview (highlighted green) at the anchor point — but again,
-        the real <code>adc.c</code> on disk is untouched.
+        Write your code in the panel on the right and click{" "}
+        <strong>Save snippet</strong>. It appears in the preview (highlighted green),
+        but the real <code>adc.c</code> on disk is untouched. <strong>Exact</strong> on
+        a hook means the app is sure of its place; check any marked{" "}
+        <strong>fuzzy</strong>.
       </>
     ),
   },
   {
-    title: "5 · Import helper files (optional)",
+    title: "6 · Add your own test files (optional)",
     highlight: "testfiles",
     body: (
       <>
-        If your injected code calls mocks or a harness, import those{" "}
-        <code>.c/.h</code> files with <strong>⤓</strong> under{" "}
-        <strong>Test Files</strong>. They ride along into the export but are kept
-        separate from production code.
+        For mocks or a harness, click <strong>⤓</strong> under{" "}
+        <strong>Test Files</strong>, choose a folder, and say where the files go in
+        the source tree. They're copies, kept in the test project. Your build still
+        has to compile them, through your makefile or an <code>#include</code> in a
+        hook.
       </>
     ),
   },
   {
-    title: "6 · Export the test code",
+    title: "7 · Build and export",
     highlight: "export",
     body: (
       <>
-        Click <strong>Export</strong> and choose how:{" "}
-        <strong>Modified</strong> writes only the files that have hooks;{" "}
-        <strong>Reconstruct</strong> writes the whole source tree with hooks
-        applied. Point it at an output folder and you get build-ready code — your
-        originals stay clean.
+        Set your make script and <code>make 0</code> in{" "}
+        <strong>Preferences → Paths</strong>. <strong>Build</strong> runs that command
+        as is, and <strong>Terminal</strong> opens one in that folder. To use your
+        hooks, click <strong>Export</strong> to write the changed files to a folder, or
+        let <strong>Test Builds</strong> build them for you.
       </>
     ),
   },
@@ -105,10 +118,10 @@ const STEPS: TutorialStep<Highlight>[] = [
     highlight: null,
     body: (
       <>
-        That's the whole loop: <strong>create a project → open source → hook in
-        your code → export</strong>. Because hooks live in the project (not the
-        files), you can tweak or remove them any time and re-export. Replay this
-        any time from <strong>Preferences → Tutorials</strong>.
+        That's the whole loop: <strong>import source → find the code → hook it →
+        export or build</strong>. Because hooks live in the project (not the files),
+        you can change or remove them any time. Replay this from{" "}
+        <strong>Preferences → Tutorials</strong>.
       </>
     ),
   },
@@ -134,12 +147,13 @@ export function TestInjectionDemo({ onClose }: { onClose: () => void }) {
     >
       {({ step, isRecap, hl }) => {
         // Cumulative state derived from the step index.
-        const projectCreated = step >= 1;
-        const fileOpen = step >= 2;
-        const hookAdded = step >= 3;
-        const snippetWritten = step >= 4;
-        const helpersImported = step >= 5;
-        const showExport = step >= 6;
+        const sourceImported = step >= 1;
+        const projectCreated = step >= 2;
+        const fileOpen = step >= 3;
+        const hookAdded = step >= 4;
+        const snippetWritten = step >= 5;
+        const helpersImported = step >= 6;
+        const showExport = step >= 7;
 
         return (
           <>
@@ -172,17 +186,25 @@ export function TestInjectionDemo({ onClose }: { onClose: () => void }) {
                   <span>Production Source</span>
                 </div>
                 <div className="demo-pane-body">
-                  {["adc.c", "pwm.c", "main.c"].map((f) => (
-                    <div
-                      key={f}
-                      className={
-                        "demo-file" + (fileOpen && f === "adc.c" ? " sel" : "")
-                      }
-                    >
-                      <span className="demo-file-ico src" />
-                      {f}
+                  {!sourceImported && <div className="demo-muted">No source files.</div>}
+                  {sourceImported && (
+                    <div className="demo-search demo-ti-search">
+                      {step === 3 ? "Adc_Read" : "Search functions and files"}
                     </div>
-                  ))}
+                  )}
+                  {sourceImported && step === 3 && (
+                    <div className="demo-file sel">
+                      <span className="demo-file-ico src" />
+                      Adc_ReadChannel
+                    </div>
+                  )}
+                  {sourceImported &&
+                    step !== 3 &&
+                    ["drivers", "app"].map((f) => (
+                      <div key={f} className="demo-file">
+                        ▸ {f}
+                      </div>
+                    ))}
                 </div>
               </div>
 
@@ -196,7 +218,7 @@ export function TestInjectionDemo({ onClose }: { onClose: () => void }) {
                   {helpersImported ? (
                     <div className="demo-file">
                       <span className="demo-file-ico test" />
-                      test_helpers.c
+                      tests/test_helpers.c
                     </div>
                   ) : (
                     <div className="demo-muted">No helper files imported.</div>
@@ -280,26 +302,34 @@ export function TestInjectionDemo({ onClose }: { onClose: () => void }) {
               <div className={"demo-buildbar" + hl("export")} data-demo="export">
                 <span className="demo-build-label">Build Console</span>
                 <div className="demo-spacer" />
+                <code className="demo-mono">make 0</code>
                 <span className="demo-btn">Build</span>
+                <span className="demo-btn">Terminal</span>
                 <span className="demo-btn primary">Export</span>
               </div>
             </div>
 
-            {/* Export sheet overlay */}
+            {step === 6 && (
+              <div className="demo-modalcard">
+                <div className="demo-modalcard-head">Where should the test files go?</div>
+                <div className="demo-field">
+                  Folder in the source tree: <code>tests</code>
+                </div>
+                <div className="demo-field">
+                  <code>tests/test_helpers.c</code>
+                </div>
+                <div className="demo-export-ok">✓ Import 1 file(s)</div>
+              </div>
+            )}
+
             {showExport && !isRecap && (
               <div className="demo-modalcard">
                 <div className="demo-modalcard-head">Export test code</div>
-                <label className="demo-radio">
-                  <span className="demo-radio-dot on" /> Modified files only
-                </label>
-                <label className="demo-radio">
-                  <span className="demo-radio-dot" /> Reconstruct full tree
-                </label>
                 <div className="demo-field">
                   Output folder: <code>~/build/instrumented</code>
                 </div>
                 <div className="demo-export-ok">
-                  ✓ Exported 1 file (adc.c) — originals untouched
+                  ✓ Exported 2 files (adc.c, tests/test_helpers.c) — originals untouched
                 </div>
               </div>
             )}

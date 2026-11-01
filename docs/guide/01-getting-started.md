@@ -37,7 +37,7 @@ Opening an encrypted project prompts once for its **master password**. The split
 
 ## Projects are a single file
 
-A project is one portable `.arch` file (a SQLite database under the hood). It holds everything: your architecture models, every software release and its ELF data, baselines, imported source, AI mind maps, test-case templates, test-injection projects, and the change history. Copy it, back it up, or hand it to a colleague as a single file.
+A project is one portable `.arch` file (a SQLite database under the hood). It holds everything: your architecture models, every software release and its ELF data, baselines, imported source, AI mind maps, test-case templates, test-injection projects, and the change history. Copy it, back it up, or hand it to a colleague as a single file. The one exception is [Test Builds](12-test-builds.md) binaries, which sit in a folder next to it.
 
 ## Finding your way around
 

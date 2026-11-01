@@ -121,7 +121,7 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 
 ### Pipeline CLI — `src/cli/`
 
-`main.py` is the headless `arch-validator run --config x.cfg` command for build pipelines. It runs the same job handlers as the desktop app, in its own process and one after another, with no web server or window: it gives `register_handlers` a small synchronous stand-in for `JobManager`. `Logic_Pipeline.py` holds its pure parts (see below). Exit code 0 = passed, 1 = architecture test failed, 2 = setup or tool error. See the [Pipeline CLI guide](guide/12-pipeline-cli.md).
+`main.py` is the headless `arch-validator run --config x.cfg` command for build pipelines. It runs the same job handlers as the desktop app, in its own process and one after another, with no web server or window: it gives `register_handlers` a small synchronous stand-in for `JobManager`. `Logic_Pipeline.py` holds its pure parts (see below). Exit code 0 = passed, 1 = architecture test failed, 2 = setup or tool error. See the [Pipeline CLI guide](guide/14-pipeline-cli.md).
 
 ### Backend worker — `src/backend/`
 

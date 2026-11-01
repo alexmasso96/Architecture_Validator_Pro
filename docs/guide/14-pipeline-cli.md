@@ -1,4 +1,8 @@
-# Pipeline CLI
+# 14. Pipeline CLI
+
+[← Shared Projects & Sync](13-shared-projects-and-sync.md) · **Pipeline CLI** · [Guide home](README.md)
+
+---
 
 Run the architecture validation automatically, for example after a nightly firmware build, with no window and no manual steps. One command creates a fresh project, imports the build's outputs, tests every architecture model, and returns a pass or fail result to the pipeline.
 
@@ -256,3 +260,7 @@ Scheduled runs on GitHub always use the default branch's latest commit.
 ## Report details
 
 The report's operator details and logo come from the app's preferences. To set them in a pipeline, point the `ARCH_PREFS_FILE` environment variable at a saved preferences file.
+
+---
+
+[← Shared Projects & Sync](13-shared-projects-and-sync.md) · [Guide home](README.md)

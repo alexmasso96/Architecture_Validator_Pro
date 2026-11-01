@@ -1,6 +1,6 @@
 # Pipeline demo
 
-A complete, working example of the [Pipeline CLI](../../../docs/guide/12-pipeline-cli.md): everything a CI team needs to see how it fits into a build pipeline. It uses the synthetic VCU firmware, built for both ARM and Renesas RH850, so it's safe to share and run anywhere. The app's own GitLab and GitHub pipelines run these same steps.
+A complete, working example of the [Pipeline CLI](../../../docs/guide/14-pipeline-cli.md): everything a CI team needs to see how it fits into a build pipeline. It uses the synthetic VCU firmware, built for both ARM and Renesas RH850, so it's safe to share and run anywhere. The app's own GitLab and GitHub pipelines run these same steps.
 
 ## What's here
 
