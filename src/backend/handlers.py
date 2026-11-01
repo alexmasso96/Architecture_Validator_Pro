@@ -39,6 +39,7 @@ def register_handlers(jobs: JobManager, state: AppState) -> None:
     jobs.register("run_calltree_tests", _make_run_calltree_tests(state))
     jobs.register("test_build_run", _make_test_build_run(state))
     jobs.register("mapped_switch", _make_mapped_switch(state))
+    jobs.register("share_project", _make_share_project(state))
 
 
 # ----------------------------------------------------------------------
@@ -797,6 +798,30 @@ def _start_build_run(state: AppState, wdb, store, params: dict) -> int:
             wdb.add_clean_lock_override(lock["release_id"], lock["missing"],
                                         params.get("continue_reason", ""), user)
     return tb.start_run(wdb, user, tb.plan_run(wdb, build_ids))
+
+
+# ----------------------------------------------------------------------
+# share_project — #16: move the open project to a shared location, keeping the
+# session open throughout, and show each step.
+# ----------------------------------------------------------------------
+def _make_share_project(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        from Application_Logic import Logic_Sync_Engine as engine
+
+        remote = params.get("remote")
+        if not remote:
+            raise ProjectError("Choose a shared folder.")
+
+        def report(message: str, percent=None) -> None:
+            shown = f"{message}…" if percent is None else f"{message}… {percent}%"
+            progress(shown, percent)
+
+        try:
+            state.share_project(remote, report)
+        except engine.SyncError as e:
+            raise ProjectError(str(e)) from e
+        return {"path": remote}
+    return handler
 
 
 # ----------------------------------------------------------------------

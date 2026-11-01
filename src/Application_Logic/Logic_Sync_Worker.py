@@ -30,6 +30,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -55,6 +56,8 @@ HOLD_WAIT_SECONDS = 5
 STATE_SYNCED = "synced"
 STATE_PULLING = "pulling"
 STATE_PUSHING = "pushing"
+STATE_COPYING = "copying"
+BUSY_STATES = (STATE_PULLING, STATE_PUSHING, STATE_COPYING)
 STATE_OFFLINE = "offline"
 STATE_CONFLICT = "conflict"
 STATE_BLOCKED = "blocked"
@@ -112,7 +115,7 @@ class SyncStore:
     def control(self, entry: dict, name: str) -> str:
         return os.path.join(self.project_dir(entry["project_uuid"]), name)
 
-    def add(self, remote: str, username: str) -> dict:
+    def add(self, remote: str, username: str, progress=None) -> dict:
         """Tracks a shared database, preparing it if it was copied there by hand."""
         existing = self.find(remote)
         if existing:
@@ -120,7 +123,7 @@ class SyncStore:
         if not os.path.isfile(remote):
             raise engine.SyncError(f"No such file: {remote}")
         if engine.read_manifest(remote) is None:
-            engine.adopt_remote(remote, username)
+            engine.adopt_remote(remote, username, progress)
         project_uuid = engine.project_uuid_of(remote)
         if not project_uuid:
             raise engine.SyncBlocked("This file isn't a project database.")
@@ -161,6 +164,20 @@ class SyncWorker:
         self.hold_wait = hold_wait
         self._next_poll: dict = {}
         self._blocked: set = set()
+        self._active = 0
+
+    @property
+    def active(self) -> bool:
+        """Whether data is moving right now. The tray animates while it is."""
+        return self._active > 0
+
+    @contextmanager
+    def _working(self):
+        self._active += 1
+        try:
+            yield
+        finally:
+            self._active -= 1
 
     def tick(self, force: bool = False) -> None:
         """One pass over every tracked project. Problems stay with their project."""
@@ -236,7 +253,7 @@ class SyncWorker:
             manifest = engine.read_manifest(entry["remote"])
         if not os.path.exists(entry["local"]):
             # Nobody has to open a project for it to stay current.
-            engine.clone(entry["remote"], entry["local"], only_if_missing=True)
+            self._first_copy(entry)
         state = engine.local_state(entry["local"])
         session = self.store.session(entry)
         editing = bool(session) and session.get("mode") == "exclusive"
@@ -249,7 +266,21 @@ class SyncWorker:
             return
         self._set_status(entry, STATE_SYNCED, revision=state["base"])
 
+    def _first_copy(self, entry: dict) -> None:
+        def progress(percent: int) -> None:
+            self._set_status(entry, STATE_COPYING, "Making your local copy",
+                             percent=percent)
+
+        with self._working():
+            progress(0)
+            engine.clone(entry["remote"], entry["local"], only_if_missing=True,
+                         progress=progress)
+
     def _pull(self, entry: dict, manifest: dict) -> None:
+        with self._working():
+            self._apply_pull(entry, manifest)
+
+    def _apply_pull(self, entry: dict, manifest: dict) -> None:
         by = manifest.get("username", "")
         self._set_status(entry, STATE_PULLING, f"Syncing changes from {by}", by=by)
         session = self.store.session(entry)
@@ -269,6 +300,10 @@ class SyncWorker:
         self._set_status(entry, STATE_SYNCED, revision=report["revision"])
 
     def _push(self, entry: dict, request: dict) -> None:
+        with self._working():
+            self._publish(entry, request)
+
+    def _publish(self, entry: dict, request: dict) -> None:
         token = request.get("token")
         remote = entry["remote"]
         request_path = self.store.control(entry, PUSH_REQUEST)
@@ -382,11 +417,16 @@ def read_change_log(local: str, limit: int = 500) -> list:
 def summarize(store: SyncStore) -> dict:
     """One line for the tray, and whether anything needs the user."""
     tracked = store.tracked()
-    states = [store.status(e).get("state") for e in tracked]
+    statuses = [store.status(e) for e in tracked]
+    states = [s.get("state") for s in statuses]
     trouble = sum(1 for s in states if s in (STATE_CONFLICT, STATE_BLOCKED))
     offline = sum(1 for s in states if s == STATE_OFFLINE)
+    busy = next((s for s in statuses if s.get("state") in BUSY_STATES), None)
     if not tracked:
         title = "No shared projects"
+    elif busy:
+        percent = busy.get("percent")
+        title = busy.get("message", "Syncing") + (f" {percent}%" if percent is not None else "")
     elif trouble:
         title = (f"{trouble} shared project needs attention" if trouble == 1
                  else f"{trouble} shared projects need attention")

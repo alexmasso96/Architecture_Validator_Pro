@@ -146,6 +146,6 @@ def trigger_statements() -> list:
 
 
 def install_triggers(conn) -> None:
-    for statement in trigger_statements():
-        conn.execute(statement)
-    conn.commit()
+    """Adds every trigger in one transaction. One each would be about a hundred
+    commits, and on a network share each of those is a journal file and a flush."""
+    conn.executescript("BEGIN;\n" + "\n".join(trigger_statements()) + "\nCOMMIT;")

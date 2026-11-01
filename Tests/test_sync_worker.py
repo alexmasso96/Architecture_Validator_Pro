@@ -250,6 +250,51 @@ def test_worker_keeps_a_project_current_that_nobody_opened(shared, tmp_path):
     assert [r["section"] for r in sw.read_change_log(entry["local"])] == ["Settings"]
 
 
+def test_first_copy_shows_progress_and_counts_as_activity(shared, tmp_path, monkeypatch):
+    store = sw.SyncStore(str(tmp_path / "quiet"))
+    entry = store.add(shared, "bo")
+    worker = sw.SyncWorker(store, "bo", poll_seconds=0)
+    seen = []
+    real = engine.clone
+
+    def spying(remote, local, only_if_missing=False, progress=None):
+        seen.append((worker.active, store.status(entry)["state"]))
+        progress(50)
+        seen.append(store.status(entry)["percent"])
+        real(remote, local, only_if_missing, progress)
+    monkeypatch.setattr(engine, "clone", spying)
+    assert worker.active is False
+    worker.tick(force=True)
+    assert seen == [(True, sw.STATE_COPYING), 50]
+    assert worker.active is False
+    assert store.status(entry)["state"] == sw.STATE_SYNCED
+    assert "percent" not in store.status(entry)
+
+
+def test_push_and_pull_count_as_activity(shared, tmp_path, monkeypatch):
+    store, entry, worker = _user(tmp_path, "alex", shared)
+    seen = []
+    real = engine.push
+
+    def spying(*args):
+        seen.append(worker.active)
+        return real(*args)
+    monkeypatch.setattr(engine, "push", spying)
+    FileLockManager.acquire_lock(shared, "t")
+    _set_prompt(entry["local"], "x")
+    sw.write_json(store.control(entry, sw.PUSH_REQUEST), {"token": "t"})
+    worker.tick()
+    assert seen == [True]
+    assert worker.active is False
+
+
+def test_tray_title_shows_what_is_moving(shared, tmp_path):
+    store, entry, _worker = _user(tmp_path, "alex", shared)
+    sw.write_json(store.control(entry, sw.STATUS_FILE),
+                  {"state": sw.STATE_COPYING, "message": "Making your local copy", "percent": 40})
+    assert sw.summarize(store)["title"] == "Making your local copy 40%"
+
+
 def test_change_log_reads_from_the_local_copy_without_the_app(shared, tmp_path):
     store, entry, worker = _user(tmp_path, "alex", shared)
     FileLockManager.acquire_lock(shared, "t")
@@ -262,12 +307,12 @@ def test_change_log_reads_from_the_local_copy_without_the_app(shared, tmp_path):
 
 def test_clone_leaves_a_copy_that_appeared_meanwhile(shared, tmp_path, monkeypatch):
     local = str(tmp_path / "raced" / "Project.arch")
-    real = engine.shutil.copyfile
+    real = engine.copy_file
 
-    def app_got_there_first(source, target):
-        real(source, target)
+    def app_got_there_first(source, target, progress=None):
+        real(source, target, progress)
         open(local, "wb").write(b"the app's open copy")
-    monkeypatch.setattr(engine.shutil, "copyfile", app_got_there_first)
+    monkeypatch.setattr(engine, "copy_file", app_got_there_first)
     engine.clone(shared, local, only_if_missing=True)
     assert open(local, "rb").read() == b"the app's open copy"
     assert os.listdir(os.path.dirname(local)) == ["Project.arch"]
@@ -543,6 +588,77 @@ def test_untracked_shared_project_still_opens_directly(tmp_path, monkeypatch):
         assert app.state.appstate.db.db_path == path
 
 
+def _share(c, remote):
+    job = c.post("/api/jobs/share_project", json={"remote": remote}, headers=AUTH).json()
+    for _ in range(300):
+        snapshot = c.get(f"/api/jobs/{job['job_id']}", headers=AUTH).json()
+        if snapshot["status"] in ("done", "failed"):
+            return snapshot
+        time.sleep(0.02)
+    raise AssertionError("share job didn't finish")
+
+
+def test_sharing_never_shows_the_project_closed(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARCH_PREFS_FILE", str(tmp_path / "appdata" / "prefs.json"))
+    monkeypatch.setenv("ARCH_SYNC_WORKER", "off")
+    path = _origin(tmp_path, "mine.arch")
+    (tmp_path / "share").mkdir()
+    remote = str(tmp_path / "share" / "mine.arch")
+    app = create_app(token=TOKEN)
+    with TestClient(app) as c:
+        _open(c, path)
+        state = app.state.appstate
+        seen = []
+        real = state._close_locked
+
+        def watching_close():
+            real()
+            seen.append(state.is_open)
+        monkeypatch.setattr(state, "_close_locked", watching_close)
+        statuses = []
+        real_publish = engine.publish
+
+        def spying(*args, **kwargs):
+            statuses.append(c.get("/api/project/status", headers=AUTH).json()["open"])
+            return real_publish(*args, **kwargs)
+        monkeypatch.setattr(engine, "publish", spying)
+        job = _share(c, remote)
+        assert job["status"] == "done", job
+        assert statuses == [True]
+        status = c.get("/api/project/status", headers=AUTH).json()
+        assert status["open"] is True and status["tracked"] is True
+
+
+def test_failed_share_leaves_the_session_as_it_was(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARCH_PREFS_FILE", str(tmp_path / "appdata" / "prefs.json"))
+    monkeypatch.setenv("ARCH_SYNC_WORKER", "off")
+    path = _origin(tmp_path, "mine.arch")
+    (tmp_path / "share").mkdir()
+    remote = str(tmp_path / "share" / "mine.arch")
+    open(remote, "w").close()
+    app = create_app(token=TOKEN)
+    with TestClient(app) as c:
+        _open(c, path)
+        job = _share(c, remote)
+        assert job["status"] == "failed"
+        assert "already exists" in job["error"]
+        status = c.get("/api/project/status", headers=AUTH).json()
+        assert status["open"] is True and status["tracked"] is False
+        assert status["path"] == path
+
+
+def test_opening_a_shared_project_announces_the_first_copy(app_env, monkeypatch):
+    c, state, remote, _worker = app_env
+    events = []
+    real = state.bus.publish
+    monkeypatch.setattr(state.bus, "publish",
+                        lambda kind, data: (events.append((kind, data)), real(kind, data))[1])
+    _open(c, remote)
+    copying = [d for k, d in events if k == "sync" and d.get("state") == "copying"]
+    assert copying and copying[0]["message"] == "Making your local copy"
+    assert ("sync", {"state": "synced"}) in events
+
+
 def test_publish_moves_the_open_project_to_the_share(tmp_path, monkeypatch):
     monkeypatch.setenv("ARCH_PREFS_FILE", str(tmp_path / "appdata" / "prefs.json"))
     monkeypatch.setenv("ARCH_SYNC_WORKER", "off")
@@ -552,9 +668,7 @@ def test_publish_moves_the_open_project_to_the_share(tmp_path, monkeypatch):
     app = create_app(token=TOKEN)
     with TestClient(app) as c:
         _open(c, path)
-        r = c.post("/api/sync/publish", json={"remote": remote}, headers=AUTH)
-        assert r.status_code == 200, r.text
-        assert r.json()["tracked"] is True
+        assert _share(c, remote)["status"] == "done"
         assert os.path.exists(engine.manifest_path(remote))
 
 

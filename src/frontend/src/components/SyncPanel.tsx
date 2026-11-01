@@ -41,7 +41,10 @@ export function SyncPanel({
     setPicking(false);
     const name = (status.path ?? "project.arch").split(/[/\\]/).pop();
     const separator = folder.includes("\\") ? "\\" : "/";
-    await act(() => api.post("/sync/publish", { remote: `${folder}${separator}${name}` }));
+    await act(() =>
+      api.post("/jobs/share_project", { remote: `${folder}${separator}${name}` }),
+    );
+    onClose();
   }
 
   const current = overview?.current;

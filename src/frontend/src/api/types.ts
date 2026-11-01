@@ -473,6 +473,7 @@ export interface SyncStatus {
   last_synced?: string;
   revision?: number;
   by?: string;
+  percent?: number | null;
 }
 
 export interface SyncOverview {

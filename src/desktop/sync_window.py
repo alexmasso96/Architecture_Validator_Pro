@@ -8,33 +8,45 @@ local copies, so it works with the app closed.
 """
 from __future__ import annotations
 
+import logging
 import os
 import socket
-from typing import Optional
+import threading
+import time
+from typing import Callable, Optional
 
 from Application_Logic import Logic_Sync_Autostart as autostart
 from Application_Logic import Logic_Sync_Engine as engine
 from Application_Logic.Logic_File_Locking import FileLockManager
 from Application_Logic.Logic_Sync_Worker import (
-    SyncStore, lock_summary, read_change_log, read_json, request_sync_now, worker_running,
-    write_json,
+    SyncStore, lock_summary, read_change_log, read_json, remove_file, request_sync_now,
+    worker_running, write_json,
 )
 
+logger = logging.getLogger(__name__)
+
 WINDOW_PID = "window.pid"
+FOCUS_REQUEST = "window.focus"
+FOCUS_WAIT_SECONDS = 3
+FOCUS_POLL_SECONDS = 0.5
 
 
 class SyncWindowApi:
     """Called from the page. Keeps a project's problems as text for the page."""
 
-    def __init__(self, store: SyncStore, login_command: list) -> None:
+    def __init__(self, store: SyncStore, login_command: list,
+                 start_worker: Optional[Callable] = None) -> None:
         self._store = store
         self._login_command = login_command
+        self._start_worker = start_worker
         self._window = None
+        self._operation: Optional[dict] = None
 
     def overview(self) -> dict:
         return {
             "worker_running": worker_running(self._store),
             "start_at_login": autostart.is_enabled(),
+            "operation": self._operation,
             "projects": [{"project_uuid": e["project_uuid"], "name": e["name"],
                           "remote": e["remote"], "status": self._store.status(e),
                           "lock": lock_summary(self._store, e)}
@@ -47,19 +59,39 @@ class SyncWindowApi:
         return read_change_log(entry["local"], limit) if entry else []
 
     def add_path(self, path: str) -> Optional[str]:
-        """Returns the problem as text, or None if the project was added."""
-        try:
-            self._store.add(path, FileLockManager.get_username())
-            request_sync_now(self._store)
-            return None
-        except (engine.SyncError, OSError) as e:
-            return str(e)
+        """Adds a project, keeping the page told at each step. Returns the problem
+        as text, or None if it worked. Any failure has to reach the page: an
+        exception here would only be a rejected promise, with nothing on screen."""
+        name = os.path.basename(path)
 
-    def add_database(self) -> Optional[str]:
+        def preparing(percent: Optional[int]) -> None:
+            self._operation = {"message": f"Preparing {name} on the shared folder",
+                               "percent": percent, "error": ""}
+
+        preparing(None)
+        try:
+            self._store.add(path, FileLockManager.get_username(), preparing)
+            request_sync_now(self._store)
+            if self._start_worker is not None and not worker_running(self._store):
+                self._start_worker()
+            self._operation = None
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Could not add %s", path)
+            problem = f"{name} couldn't be added: {e}"
+            self._operation = {"message": "", "percent": None, "error": problem}
+            return problem
+
+    def add_database(self) -> None:
         import webview
         picked = self._window.create_file_dialog(
             webview.OPEN_DIALOG, file_types=("Project files (*.arch)",))
-        return self.add_path(picked[0]) if picked else None
+        if picked:
+            # On its own thread, so the page can show the steps of a slow share.
+            threading.Thread(target=self.add_path, args=(picked[0],), daemon=True).start()
+
+    def dismiss(self) -> None:
+        self._operation = None
 
     def stop_tracking(self, project_uuid: str) -> None:
         self._store.remove(project_uuid)
@@ -99,6 +131,13 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th{position:sticky;top:0;background:var(--bg);text-align:left;font-weight:500;color:var(--muted);padding:6px 14px;border-bottom:1px solid var(--line)}
 td{padding:5px 14px;border-bottom:1px solid var(--line)}
 .empty{padding:24px 14px;color:var(--muted)}
+#op{display:none;padding:8px 14px;border-bottom:1px solid var(--line);gap:8px;align-items:center}
+#op.show{display:flex}
+#op.bad{color:var(--warn)}
+.spin{width:12px;height:12px;flex:none;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:turn .8s linear infinite}
+@keyframes turn{to{transform:rotate(360deg)}}
+.bar{height:4px;background:var(--line);border-radius:2px;margin-top:4px;overflow:hidden}
+.bar>div{height:100%;background:var(--accent)}
 </style></head><body>
 <aside><header>Shared projects</header><div id="list"></div>
 <footer><button id="add">Add database…</button><span class="grow"></span>
@@ -106,12 +145,25 @@ td{padding:5px 14px;border-bottom:1px solid var(--line)}
 <main><header><span id="title" class="grow">Changes</span>
 <select id="filter" aria-label="Show changes from"><option value="">All sections</option></select>
 <button id="now">Sync now</button><button id="stop">Stop tracking</button></header>
+<div id="op" role="status"></div>
 <div id="scroll"></div></main>
 <script>
-let selected=null,rows=[];
+let selected=null,rows=[],timer;
 const api=()=>window.pywebview.api;
 const el=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e};
-const STATE={synced:"In sync",pulling:"Receiving changes",pushing:"Publishing",offline:"Offline",conflict:"Conflict",blocked:"Sync stopped"};
+const STATE={synced:"In sync",pulling:"Receiving changes",pushing:"Publishing",copying:"Copying",offline:"Offline",conflict:"Conflict",blocked:"Sync stopped"};
+const BUSY=["pulling","pushing","copying"];
+function showOperation(op){
+  const box=document.getElementById("op");box.textContent="";
+  box.className=op?(op.error?"show bad":"show"):"";
+  if(!op)return;
+  if(op.error){
+    box.append(el("span","grow",op.error));
+    const b=el("button",null,"Dismiss");b.onclick=async()=>{await api().dismiss();refresh()};box.append(b);
+  }else{
+    box.append(el("span","spin"),el("span","grow",op.message+(op.percent!=null?"… "+op.percent+"%":"…")));
+  }
+}
 function where(r){return r.release_name?"Release "+r.release_name:r.model_id!=null?"Model "+r.model_id:"Project"}
 function renderRows(){
   const box=document.getElementById("scroll");box.textContent="";
@@ -132,6 +184,7 @@ async function loadChanges(){
 async function refresh(){
   const o=await api().overview();
   document.getElementById("login").checked=o.start_at_login;
+  showOperation(o.operation);
   const list=document.getElementById("list");list.textContent="";
   if(selected&&!o.projects.some(p=>p.project_uuid===selected))selected=null;
   if(!selected&&o.projects.length)selected=o.projects[0].project_uuid;
@@ -141,7 +194,8 @@ async function refresh(){
     d.append(el("div","name",p.name),el("div","small",p.remote));
     const st=p.status||{},bad=["offline","conflict","blocked"].includes(st.state);
     d.append(el("div","small"+(bad?" warn":""),(STATE[st.state]||"Waiting for the worker")+(st.last_synced?" · "+st.last_synced:"")));
-    if(st.message)d.append(el("div","small"+(bad?" warn":""),st.message));
+    if(st.message)d.append(el("div","small"+(bad?" warn":""),st.message+(st.percent!=null?"… "+st.percent+"%":"")));
+    if(st.percent!=null){const b=el("div","bar"),f=el("div");f.style.width=st.percent+"%";b.append(f);d.append(b)}
     if(p.lock){const m=Math.floor(p.lock.silent_seconds/60);d.append(el("div","small","Edited by "+p.lock.user+(m>=10?", silent for "+m+" min":"")))}
     d.onclick=()=>{selected=p.project_uuid;refresh()};
     list.append(d);
@@ -151,32 +205,74 @@ async function refresh(){
   document.getElementById("stop").disabled=!cur;
   document.getElementById("now").disabled=!cur;
   await loadChanges();
+  const moving=(o.operation&&!o.operation.error)||o.projects.some(p=>BUSY.includes((p.status||{}).state));
+  clearTimeout(timer);timer=setTimeout(refresh,moving?500:5000);
 }
 function start(){
-  document.getElementById("add").onclick=async()=>{const e=await api().add_database();if(e)alert(e);refresh()};
+  document.getElementById("add").onclick=async()=>{await api().add_database();refresh()};
   document.getElementById("now").onclick=async()=>{await api().sync_now();setTimeout(refresh,3000)};
   document.getElementById("stop").onclick=async()=>{await api().stop_tracking(selected);selected=null;refresh()};
   document.getElementById("login").onchange=async e=>{e.target.checked=await api().set_start_at_login(e.target.checked)};
   document.getElementById("filter").onchange=renderRows;
-  refresh();setInterval(refresh,5000);
+  refresh();
 }
 if(window.pywebview)start();else window.addEventListener("pywebviewready",start);
 </script></body></html>"""
 
 
-def main() -> None:
+def _hand_over_to_open_window(store: SyncStore) -> bool:
+    """Asks a window that's already open to come forward. Returns False if nothing
+    answers, such as a window that crashed or a process id now used by something
+    else, so a stale file can never stop the window from opening."""
+    running = read_json(os.path.join(store.root, WINDOW_PID))
+    if not running or running == os.getpid() or not FileLockManager.is_process_alive(
+            running, socket.gethostname()):
+        return False
+    request = os.path.join(store.root, FOCUS_REQUEST)
+    write_json(request, True)
+    deadline = time.monotonic() + FOCUS_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if not os.path.exists(request):
+            return True
+        time.sleep(FOCUS_POLL_SECONDS / 5)
+    remove_file(request)
+    return False
+
+
+def _answer_focus_requests(window, store: SyncStore) -> None:
+    request = os.path.join(store.root, FOCUS_REQUEST)
+    while True:
+        time.sleep(FOCUS_POLL_SECONDS)
+        if os.path.exists(request):
+            remove_file(request)
+            try:
+                window.restore()
+                window.show()
+            except Exception:  # noqa: BLE001 — being on top is only a convenience
+                logger.warning("Could not bring the window forward", exc_info=True)
+
+
+def main(storage_path: Optional[str] = None) -> None:
     import webview
 
-    from desktop.sync_worker import command, sync_store
+    from desktop.sync_worker import command, setup_logging, start_detached, sync_store
 
     store = sync_store()
-    pid_path = os.path.join(store.root, WINDOW_PID)
-    running = read_json(pid_path)
-    if running and running != os.getpid() and FileLockManager.is_process_alive(
-            running, socket.gethostname()):
+    setup_logging(store, "sync-window")
+    if _hand_over_to_open_window(store):
         return
+    pid_path = os.path.join(store.root, WINDOW_PID)
     write_json(pid_path, os.getpid())
-    api = SyncWindowApi(store, command())
-    api._window = webview.create_window("Sync Worker", html=PAGE, js_api=api,
-                                        width=900, height=560)
-    webview.start()
+    try:
+        api = SyncWindowApi(store, command(), start_detached)
+        api._window = webview.create_window("Sync Worker", html=PAGE, js_api=api,
+                                            width=900, height=560)
+        options = {"private_mode": False, "storage_path": storage_path} if storage_path else {}
+        webview.start(_answer_focus_requests, (api._window, store), **options)
+    except Exception:
+        logger.exception("The Sync Worker window failed")
+        raise
+    finally:
+        remove_file(pid_path)
+    # A background thread must not keep a closed window's process around.
+    os._exit(0)

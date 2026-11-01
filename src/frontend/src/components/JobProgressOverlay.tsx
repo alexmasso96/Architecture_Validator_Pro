@@ -6,7 +6,12 @@ const JOB_NAMES: Record<string, string> = {
   fuzzy_rematch: "Fuzzy Re-match",
   import_symbols: "Importing Symbols",
   import_source: "Importing Source",
+  share_project: "Sharing Project",
+  sync: "Shared Project",
 };
+
+// Stopping these halfway would leave a share half set up, so they run to the end.
+const NOT_CANCELLABLE = new Set(["share_project", "sync"]);
 
 function jobTitle(kind: string): string {
   if (JOB_NAMES[kind]) return JOB_NAMES[kind];
@@ -32,7 +37,9 @@ export function JobProgressOverlay({
       {jobs.map((job) => {
         const indeterminate = job.progress == null;
         const failed = job.status === "failed";
-        const cancellable = job.status === "running" || job.status === "queued";
+        const cancellable =
+          !NOT_CANCELLABLE.has(job.kind) &&
+          (job.status === "running" || job.status === "queued");
         const pct = Math.max(0, Math.min(100, job.progress ?? 0));
         return (
           <div className="job-card" key={job.job_id}>

@@ -10,9 +10,10 @@ sys.path.insert(0, os.path.abspath("src"))
 
 from Application_Logic import Logic_Sync_Autostart as autostart
 from Application_Logic import Logic_Sync_Engine as engine
+from Application_Logic import Logic_Sync_Worker as sw
 from Application_Logic.Logic_Sync_Worker import SyncStore, SyncWorker
 from desktop.sync_window import PAGE, SyncWindowApi
-from desktop import sync_worker
+from desktop import sync_window, sync_worker
 from Tests.test_helpers import make_project_db
 
 ARGV = ["/Applications/Architecture Validator/app", "--sync-worker"]
@@ -93,8 +94,6 @@ def test_stopped_worker_no_longer_looks_alive(tmp_path, monkeypatch):
     import signal
     import subprocess
     import time
-    from Application_Logic import Logic_Sync_Worker as sw
-
     store = SyncStore(str(tmp_path / "w"))
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     sw.write_json(os.path.join(store.root, sw.PID_FILE), child.pid)
@@ -148,9 +147,79 @@ def test_window_lists_projects_and_their_changes_without_the_app(tmp_path):
     assert os.path.exists(remote) and os.path.exists(entry["local"])
 
 
+def test_any_failure_adding_a_project_reaches_the_page(tmp_path, monkeypatch):
+    """An exception would only be a rejected promise, with nothing on screen."""
+    store = SyncStore(str(tmp_path / "worker"))
+    api = SyncWindowApi(store, ARGV)
+
+    def fails(*_a, **_k):
+        raise sqlite3.OperationalError("unable to open database file")
+    monkeypatch.setattr(store, "add", fails)
+    problem = api.add_path(str(tmp_path / "Project.arch"))
+    assert "unable to open database file" in problem
+    assert api.overview()["operation"]["error"] == problem
+    api.dismiss()
+    assert api.overview()["operation"] is None
+
+
+def test_adding_a_project_shows_steps_and_starts_the_worker(tmp_path):
+    origin = str(tmp_path / "hand.arch")
+    make_project_db(origin, layout=[("TC. ID", "Static Text", True)], models=[],
+                    releases=[]).close()
+    store = SyncStore(str(tmp_path / "worker"))
+    started = []
+    api = SyncWindowApi(store, ARGV, start_worker=lambda: started.append(True))
+    seen = []
+    real = store.add
+
+    def spying(*args):
+        seen.append(api.overview()["operation"]["message"])
+        return real(*args)
+    store.add = spying
+    assert api.add_path(origin) is None
+    assert seen == ["Preparing hand.arch on the shared folder"]
+    assert api.overview()["operation"] is None
+    assert started == [True]
+    assert os.path.exists(os.path.join(store.root, sw.SYNC_NOW))
+
+
+def test_second_window_brings_the_first_forward(tmp_path, monkeypatch):
+    import threading
+    store = SyncStore(str(tmp_path / "worker"))
+    sw.write_json(os.path.join(store.root, sync_window.WINDOW_PID), os.getppid())
+    request = os.path.join(store.root, sync_window.FOCUS_REQUEST)
+
+    def open_window_answers():
+        while not os.path.exists(request):
+            pass
+        os.remove(request)
+    threading.Thread(target=open_window_answers, daemon=True).start()
+    assert sync_window._hand_over_to_open_window(store) is True
+
+
+def test_stale_window_record_cant_stop_the_window_opening(tmp_path, monkeypatch):
+    """The process id may belong to a crashed window, or to something else by now."""
+    monkeypatch.setattr(sync_window, "FOCUS_WAIT_SECONDS", 0.05)
+    store = SyncStore(str(tmp_path / "worker"))
+    pid_path = os.path.join(store.root, sync_window.WINDOW_PID)
+    assert sync_window._hand_over_to_open_window(store) is False
+    sw.write_json(pid_path, 999999)
+    assert sync_window._hand_over_to_open_window(store) is False
+    sw.write_json(pid_path, os.getppid())
+    assert sync_window._hand_over_to_open_window(store) is False
+    assert not os.path.exists(os.path.join(store.root, sync_window.FOCUS_REQUEST))
+
+
+def test_spinning_icon_has_distinct_frames():
+    from desktop import sync_tray
+    frames = sync_tray.spin_frames(sync_tray.icon_image(False))
+    assert len(frames) == sync_tray.SPIN_FRAMES
+    assert len({f.tobytes() for f in frames}) == sync_tray.SPIN_FRAMES
+
+
 def test_page_calls_only_methods_the_api_has():
     import re
     called = set(re.findall(r"api\(\)\.(\w+)\(", PAGE))
     assert called == {"overview", "changes", "add_database", "sync_now", "stop_tracking",
-                      "set_start_at_login"}
+                      "set_start_at_login", "dismiss"}
     assert all(callable(getattr(SyncWindowApi, name)) for name in called)

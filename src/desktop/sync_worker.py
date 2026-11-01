@@ -10,6 +10,7 @@ and its window is ``--sync-window``.
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
 import subprocess
 import sys
@@ -34,12 +35,23 @@ def sync_store():
     return SyncStore(str(app_data_dir() / "sync"))
 
 
+def setup_logging(store, name: str) -> None:
+    """A log file, because a windowed build has no console to show a failure on."""
+    os.makedirs(store.root, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.handlers.RotatingFileHandler(
+            os.path.join(store.root, f"{name}.log"), maxBytes=1_000_000, backupCount=1,
+            encoding="utf-8")])
+
+
 def main() -> None:
     from Application_Logic.Logic_File_Locking import FileLockManager
     from Application_Logic.Logic_Sync_Worker import SyncWorker, claim_worker, run_until
 
-    logging.basicConfig(level=logging.INFO)
     store = sync_store()
+    setup_logging(store, "sync-worker")
     if not claim_worker(store):
         return
     stop = threading.Event()
@@ -49,7 +61,7 @@ def main() -> None:
     thread.start()
     try:
         from desktop import sync_tray
-        sync_tray.run(store, stop)
+        sync_tray.run(store, stop, worker)
     except Exception:  # noqa: BLE001 — no tray is no reason to stop syncing
         logger.warning("No tray icon on this desktop; syncing without one", exc_info=True)
     if thread.is_alive() and not stop.is_set():

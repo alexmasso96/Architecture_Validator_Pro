@@ -158,12 +158,12 @@ def test_pull_throws_away_a_read_that_overlapped_a_write(team, monkeypatch):
 
 
 def test_clone_throws_away_a_copy_that_overlapped_a_write(team, monkeypatch):
-    real = engine.shutil.copyfile
+    real = engine.copy_file
 
-    def someone_publishes_meanwhile(source, target):
-        real(source, target)
+    def someone_publishes_meanwhile(source, target, progress=None):
+        real(source, target, progress)
         engine._begin_write(team.remote, engine.read_manifest(team.remote), "alex")
-    monkeypatch.setattr(engine.shutil, "copyfile", someone_publishes_meanwhile)
+    monkeypatch.setattr(engine, "copy_file", someone_publishes_meanwhile)
     local = str(team.tmp / "new" / "Project.arch")
     with pytest.raises(engine.SyncError, match="changed during the read"):
         engine.clone(team.remote, local)
@@ -178,6 +178,38 @@ def test_interrupted_write_is_rolled_back_and_cleared(team, monkeypatch):
     assert "writing" not in engine.read_manifest(team.remote)
     assert engine.pull(team.b, team.remote)["revision"] == 2
     assert team.code_map(team.b, team.r1) == "safe"
+
+
+def test_triggers_are_added_in_one_transaction(team, tmp_path, monkeypatch):
+    """One commit per trigger is minutes of journal files on a slow share."""
+    path = str(tmp_path / "plain.arch")
+    make_project_db(path, layout=[("TC. ID", "Static Text", True)], models=[],
+                    releases=[]).close()
+    conn = sqlite3.connect(path, isolation_level=None)
+    seen = []
+    conn.set_trace_callback(seen.append)
+    sections.install_triggers(conn)
+    conn.close()
+    assert seen[0].strip().startswith("BEGIN") and seen[-1].strip().startswith("COMMIT")
+    assert sum(s.strip().startswith("COMMIT") for s in seen) == 1
+    assert sum(s.strip().startswith("CREATE TRIGGER") for s in seen) > 90
+
+
+def test_copy_reports_each_percent_once(tmp_path):
+    source = tmp_path / "big"
+    source.write_bytes(b"x" * (engine.COPY_CHUNK * 3 + 5))
+    seen = []
+    engine.copy_file(str(source), str(tmp_path / "copy"), seen.append)
+    assert (tmp_path / "copy").read_bytes() == source.read_bytes()
+    assert seen == sorted(set(seen)) and seen[-1] == 100
+
+
+def test_empty_file_copies_without_dividing_by_its_size(tmp_path):
+    source = tmp_path / "empty"
+    source.write_bytes(b"")
+    seen = []
+    engine.copy_file(str(source), str(tmp_path / "copy"), seen.append)
+    assert seen == []
 
 
 def test_every_project_table_belongs_to_a_section(team):

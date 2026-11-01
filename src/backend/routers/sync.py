@@ -4,9 +4,6 @@ live in the Sync Worker's own window, so the app stays clean.
 """
 from __future__ import annotations
 
-import os
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -40,31 +37,6 @@ def status(state: AppState = Depends(get_state)) -> dict:
             "current": store.status(entry) if entry else None,
             "hold_by": state.sync_hold,
         }
-    return _guard(go)
-
-
-class PublishBody(BaseModel):
-    remote: str
-    password: Optional[str] = None
-
-
-@router.post("/publish")
-def publish(body: PublishBody, state: AppState = Depends(get_state)) -> dict:
-    """Saves the open project to a shared location. It's tracked from then on, and
-    the session continues on the local copy."""
-    def go():
-        state.require_edit()
-        if state.sync_entry is not None:
-            raise ProjectError("This project is already shared.")
-        if not os.path.isdir(os.path.dirname(body.remote) or "."):
-            raise ProjectError(f"No such folder: {os.path.dirname(body.remote)}")
-        state.save_project()
-        source = state.project_path
-        password = state._password
-        state.close_project()
-        engine.publish(source, body.remote, FileLockManager.get_username())
-        state.sync_store().add(body.remote, FileLockManager.get_username())
-        return state.open_project(body.remote, "exclusive", password)
     return _guard(go)
 
 

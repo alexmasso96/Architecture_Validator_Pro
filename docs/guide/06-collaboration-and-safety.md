@@ -21,9 +21,9 @@ View-only isn't just a disabled toolbar: it's enforced **server-side** (the work
 
 A team can keep a project on a network share. The **Sync Worker**, a small separate applet with a tray icon (a menu bar icon on macOS), keeps your local copy and the shared copy in step. You work from your own disk, and only the changed parts travel.
 
-The Sync Worker doesn't need the app. Turn on **Start at login** in its menu, and it quietly keeps your shared projects current in the background from the moment you sign in. The icon changes colour only when a project needs you.
+The Sync Worker doesn't need the app. Turn on **Start at login** in its menu, and it quietly keeps your shared projects current in the background from the moment you sign in. The icon turns while data is moving, and changes colour only when a project needs you.
 
-- **To share a project**, click the sync entry in the status bar and choose **Save to a shared folder…**. A project created on a network path is shared straight away. For a database someone copied there by hand, use **Add database…** in the Sync Worker, or simply open it.
+- **To share a project**, click the sync entry in the status bar and choose **Save to a shared folder…**. A progress card shows each step, and you stay in the project throughout. A project created on a network path is shared straight away. For a database someone copied there by hand, use **Add database…** in the Sync Worker, or simply open it.
 - **Edit:** opening for editing locks the shared project under your name and brings your copy up to date first. Other users can still view it.
 - **Publish:** **Save** sends your changes. Teammates then never receive half-finished work. A finished overnight build run publishes by itself.
 - **Receive:** changes from others arrive by themselves within about 30 seconds, whether or not the app is open. If the project is open, the app shows **Syncing changes from** and the user's name while they're applied.

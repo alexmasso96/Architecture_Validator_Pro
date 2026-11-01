@@ -1,13 +1,21 @@
 """The Sync Worker's tray icon (#16). Stays quiet unless a project needs the user."""
 from __future__ import annotations
 
+import logging
 import sys
 import threading
+import time
 
 from Application_Logic import Logic_Sync_Autostart as autostart
 from Application_Logic.Logic_Sync_Worker import SyncStore, request_sync_now, summarize
 
+logger = logging.getLogger(__name__)
+
 REFRESH_SECONDS = 5
+FRAME_SECONDS = 0.2
+SPIN_FRAMES = 8
+# A push can take a moment, so the icon keeps turning long enough to be noticed.
+MIN_SPIN_SECONDS = 2
 ICON_SIZE = 64
 COLOR_OK = (74, 144, 226, 255)
 COLOR_ATTENTION = (230, 150, 30, 255)
@@ -28,6 +36,11 @@ def icon_image(attention: bool):
     return image
 
 
+def spin_frames(image) -> list:
+    """The icon at evenly spaced angles, for turning while data moves."""
+    return [image.rotate(-360 * i / SPIN_FRAMES) for i in range(SPIN_FRAMES)]
+
+
 def on_main_thread(fn, *args) -> None:
     """macOS kills a process that changes its menu bar from another thread."""
     if sys.platform == "darwin":
@@ -37,14 +50,18 @@ def on_main_thread(fn, *args) -> None:
         fn(*args)
 
 
-def run(store: SyncStore, stop: threading.Event) -> None:
+def run(store: SyncStore, stop: threading.Event, worker) -> None:
     """Runs the icon until the user quits. Blocks, so it needs the main thread."""
     import pystray
 
     from desktop.sync_worker import WINDOW_FLAG, command, start_detached
 
-    def open_window(*_args) -> None:
-        start_detached(WINDOW_FLAG)
+    def open_window(tray, *_args) -> None:
+        try:
+            start_detached(WINDOW_FLAG)
+        except OSError as e:
+            logger.exception("Could not open the Sync Worker window")
+            tray.notify(f"The window couldn't open: {e}", "Sync Worker")
 
     def sync_now(*_args) -> None:
         request_sync_now(store)
@@ -76,20 +93,41 @@ def run(store: SyncStore, stop: threading.Event) -> None:
     def show(icon) -> None:
         icon.visible = True
 
-    def update(icon, current: dict, image) -> None:
+    def set_icon(icon, image) -> None:
+        icon.icon = image
+
+    def update(icon, current: dict) -> None:
         icon.title = current["title"]
-        if image is not None:
-            icon.icon = image
         icon.update_menu()
 
     def refresh(icon) -> None:
         on_main_thread(show, icon)
         attention = summary["attention"]
-        while not stop.wait(REFRESH_SECONDS):
-            current = summarize(store)
-            changed = current["attention"] != attention
-            attention = current["attention"]
-            on_main_thread(update, icon, current, icon_image(attention) if changed else None)
+        rest = icon_image(attention)
+        frames = spin_frames(rest)
+        frame = 0
+        spin_until = next_summary = 0.0
+        was_spinning = False
+        while not stop.wait(FRAME_SECONDS):
+            now = time.monotonic()
+            if worker.active:
+                spin_until = now + MIN_SPIN_SECONDS
+            spinning = now < spin_until
+            if now >= next_summary or worker.active != was_spinning:
+                next_summary = now + REFRESH_SECONDS
+                current = summarize(store)
+                if current["attention"] != attention:
+                    attention = current["attention"]
+                    rest = icon_image(attention)
+                    frames = spin_frames(rest)
+                    on_main_thread(set_icon, icon, rest)
+                on_main_thread(update, icon, current)
+            if spinning:
+                frame = (frame + 1) % SPIN_FRAMES
+                on_main_thread(set_icon, icon, frames[frame])
+            elif was_spinning:
+                on_main_thread(set_icon, icon, rest)
+            was_spinning = spinning
 
     if sys.platform == "darwin":
         # Menu bar only: no Dock icon for a background applet.

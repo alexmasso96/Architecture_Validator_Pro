@@ -417,6 +417,25 @@ class JsApi:
         return res if isinstance(res, str) else res[0]
 
 
+def _open_sync_window() -> None:
+    """Starts the Sync Worker's window in this process.
+
+    It needs the same Windows set-up as the app's own window, and a WebView2 profile
+    of its own: the app's is in use while the app is open, and this process inherits
+    WEBVIEW2_USER_DATA_FOLDER, which overrides what pywebview is told.
+    """
+    if not _windows_prereqs_ok():
+        raise SystemExit(2)
+    _unblock_bundled_assemblies()
+    _sanitize_host_python_env()
+    _configure_dotnet_runtime()
+    profile = _webview_profile_dir()
+    profile = profile.with_name(f"{profile.name}-sync")
+    if sys.platform == "win32":
+        os.environ["WEBVIEW2_USER_DATA_FOLDER"] = str(profile)
+    sync_window.main(storage_path=str(profile))
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -544,7 +563,7 @@ if __name__ == "__main__":
         sync_worker.main()
         sys.exit(0)
     if sync_worker.WINDOW_FLAG in sys.argv:
-        sync_window.main()
+        _open_sync_window()
         sys.exit(0)
 
     # Arm crash logging before anything else can fail. A windowed build has no

@@ -6607,3 +6607,5 @@ button.update-pill:hover {
   padding: 3px 6px;
 }
 .tb-root input:disabled, .tb-root select:disabled { opacity: 0.5; }
+.sync-turning { display: inline-block; animation: sync-turn 1s linear infinite; }
+@keyframes sync-turn { to { transform: rotate(360deg); } }

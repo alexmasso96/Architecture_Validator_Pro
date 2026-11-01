@@ -65,9 +65,25 @@ export default function App() {
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
 
+  // Long sync steps look the same as any other job, wherever they're running.
+  const syncJobs: JobPayload[] =
+    sync?.state === "copying" || sync?.state === "pushing"
+      ? [
+          {
+            job_id: "sync",
+            kind: "sync",
+            status: "running",
+            progress: sync.percent ?? null,
+            message:
+              (sync.message ?? "Syncing") +
+              (sync.percent != null ? `… ${sync.percent}%` : "…"),
+          },
+        ]
+      : [];
+
   useEffect(() => {
     if (!status?.tracked) {
-      setSync(null);
+      setSync((current) => (current?.state === "copying" ? current : null));
       return;
     }
     api
@@ -100,6 +116,14 @@ export default function App() {
         } else if (e.event === "job") {
           const job = e.data as unknown as JobPayload;
           if (!job.job_id) return;
+          if (job.kind === "share_project") {
+            if (job.status === "done") {
+              reloadStatus();
+              toast("The project is now shared.");
+            } else if (job.status === "failed") {
+              toast(`The project wasn't shared: ${job.error}`);
+            }
+          }
           setActiveJobs((prev) => ({ ...prev, [job.job_id]: job }));
           // Keep terminal jobs on screen briefly so the user sees the final
           // state, then drop them. Replace any pending timer (a late update may
@@ -125,7 +149,8 @@ export default function App() {
       },
       [reloadStatus, toast],
     ),
-    Boolean(status?.open),
+    // Also on the start screen: opening a shared project can take a while.
+    true,
   );
 
   // Clear any outstanding job-removal timers on unmount.
@@ -221,6 +246,7 @@ export default function App() {
           onShowChangelog={showChangelog}
           onNotice={toast}
         />
+        <JobProgressOverlay jobs={syncJobs} onCancel={() => undefined} />
         {prefsOpen && (
           <Preferences
             onClose={() => setPrefsOpen(false)}
@@ -351,7 +377,10 @@ export default function App() {
 
       <JobProgressOverlay
         // A build run lasts all night and shows its progress on its own page.
-        jobs={Object.values(activeJobs).filter((j) => j.kind !== "test_build_run")}
+        jobs={[
+          ...Object.values(activeJobs).filter((j) => j.kind !== "test_build_run"),
+          ...syncJobs,
+        ]}
         onCancel={(id) => {
           api
             .post(`/jobs/${id}/cancel`)

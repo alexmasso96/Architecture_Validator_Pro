@@ -294,14 +294,15 @@ class AppState:
             db, _cipher, _encrypted = self._create_project_db(local, password)
             db.close()
             user = FileLockManager.get_username()
-            engine.publish(local, path, user)
+            engine.publish(local, path, user, lambda percent: self._announce_sync(
+                "Copying the project to the shared folder", percent))
             store.add(path, user)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
         return self.open_project(path, MODE_EXCLUSIVE, password)
 
     def open_project(self, path: str, mode: str = MODE_EXCLUSIVE,
-                     password: Optional[str] = None) -> dict:
+                     password: Optional[str] = None, progress=None) -> dict:
         """Open an existing .arch. ``mode`` is 'exclusive' or 'view'.
 
         Plaintext (legacy/dev) projects open directly. Encrypted projects need
@@ -316,7 +317,7 @@ class AppState:
             if not os.path.exists(path) and self.sync_store().find(path) is None:
                 raise ProjectError(f"No such file: {path}")
 
-            local = self._sync_open(path, mode)
+            local = self._sync_open(path, mode, progress or self._announce_sync)
             if local is not None:
                 path = local
 
@@ -632,7 +633,33 @@ class AppState:
     # ------------------------------------------------------------------
     # Sync (#16) (call with self._lock held unless noted)
     # ------------------------------------------------------------------
-    def _sync_open(self, path: str, mode: str) -> Optional[str]:
+    def _announce_sync(self, message: str, percent: Optional[int] = None) -> None:
+        """Shows the user a long sync step, on any screen."""
+        self.bus.publish("sync", {"state": "copying", "message": message,
+                                  "percent": percent})
+
+    def share_project(self, remote: str, progress) -> dict:
+        """Moves the open project to a shared location and carries on from there.
+        Nothing about the session changes until the shared copy exists, so a
+        failure leaves the user where they were, and the swap to the local copy
+        holds the session lock, so the app never sees the project closed."""
+        from Application_Logic import Logic_Sync_Engine as engine
+
+        self.require_edit()
+        if self.sync_entry is not None:
+            raise ProjectError("This project is already shared.")
+        if not os.path.isdir(os.path.dirname(remote) or "."):
+            raise ProjectError(f"No such folder: {os.path.dirname(remote)}")
+        progress("Saving the project", None)
+        self.save_project()
+        user = FileLockManager.get_username()
+        engine.publish(self.project_path, remote, user, lambda percent: progress(
+            "Copying the project to the shared folder", percent))
+        with self._lock:
+            self.sync_store().add(remote, user)
+            return self.open_project(remote, MODE_EXCLUSIVE, self._password, progress)
+
+    def _sync_open(self, path: str, mode: str, progress) -> Optional[str]:
         """Prepares a tracked project and returns its local copy, or None for a
         project that isn't shared. A project with a manifest beside it is tracked
         here too, so nobody edits the shared copy behind the others' backs. If the
@@ -666,7 +693,10 @@ class AppState:
                 if not reachable:
                     raise ProjectError("The shared copy can't be reached, and there's "
                                        "no local copy yet.")
-                engine.clone(entry["remote"], entry["local"])
+                progress("Making your local copy", 0)
+                engine.clone(entry["remote"], entry["local"], progress=lambda percent:
+                             progress("Making your local copy", percent))
+                self.bus.publish("sync", {"state": "synced"})
             elif reachable:
                 local = engine.local_state(entry["local"])
                 manifest = engine.read_manifest(entry["remote"])

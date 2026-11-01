@@ -61,7 +61,10 @@ function UpdatePill({
   }
   if (update.status === "error") {
     return (
-      <div className="update-pill warn" title="Offline or update check failed">
+      <div
+        className="update-pill warn"
+        title={`Update check failed: ${update.errorMsg ?? "unknown reason"}`}
+      >
         <span className="update-pill-dot" />
         Update check failed
       </div>

@@ -17,8 +17,13 @@ import { api, ApiError } from "./api/client";
 // package.json / RELEASE_NOTES.md on every release.
 export const APP_VERSION = "3.2.0";
 
-export const GITHUB_REPO = "alexmasso96/Embeded-Software-Architecture-Validation";
+export const GITHUB_REPO = "alexmasso96/Architecture_Validator_Pro";
 export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+
+// The worker gives up on GitHub after 10 s, so this only fires if it can't answer.
+const RELAY_TIMEOUT_MS = 15_000;
+// A network that isn't up yet at launch shouldn't leave the pill failed all session.
+const RETRY_DELAY_MS = 30_000;
 
 export type UpdateStatus =
   | "idle"
@@ -36,7 +41,7 @@ export interface UpdateInfo {
 
 // GitHub → compare URL between the running version and the latest release.
 export function compareUrl(latestVersion: string): string {
-  return `https://github.com/${GITHUB_REPO}/compare/v${APP_VERSION}...v${latestVersion}`;
+  return `https://github.com/${GITHUB_REPO}/compare/V${APP_VERSION}...V${latestVersion}`;
 }
 
 // "v2.1.1" / "2.1.1-rc1" → [2, 1, 1] (pre-release suffix dropped for ordering).
@@ -57,9 +62,12 @@ export function isNewer(latest: string, current: string): boolean {
 
 async function fetchLatestRelease(): Promise<{ tag: string; body: string }> {
   try {
-    const j = await api.get<{ tag_name: string; body: string }>(
-      "/update/latest",
-    );
+    const j = await Promise.race([
+      api.get<{ tag_name: string; body: string }>("/update/latest"),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new ApiError(504, "Timed out waiting for GitHub.")), RELAY_TIMEOUT_MS),
+      ),
+    ]);
     return { tag: String(j.tag_name ?? ""), body: String(j.body ?? "") };
   } catch (e) {
     if (e instanceof ApiError) {
@@ -100,7 +108,7 @@ async function fetchLatestRelease(): Promise<{ tag: string; body: string }> {
 
 // Owns the update-check lifecycle. App mounts this once and threads the result
 // down to the launcher card + Preferences. `check` re-runs it (manual button).
-export function useUpdateCheck(): { update: UpdateInfo; check: () => void } {
+export function useUpdateCheck(): { update: UpdateInfo; check: () => Promise<boolean> } {
   const [update, setUpdate] = useState<UpdateInfo>({ status: "idle" });
 
   const check = useCallback(async () => {
@@ -109,7 +117,7 @@ export function useUpdateCheck(): { update: UpdateInfo; check: () => void } {
       const { tag, body } = await fetchLatestRelease();
       if (!tag) {
         setUpdate({ status: "error", errorMsg: "Release has no version tag." });
-        return;
+        return false;
       }
       const latestVersion = tag.replace(/^v/i, "");
       setUpdate({
@@ -117,14 +125,20 @@ export function useUpdateCheck(): { update: UpdateInfo; check: () => void } {
         latestVersion,
         body,
       });
+      return true;
     } catch (e) {
       setUpdate({ status: "error", errorMsg: (e as Error).message });
+      return false;
     }
   }, []);
 
-  // Silent background check on first mount.
+  // Silent background check on first mount, with one retry if it fails.
   useEffect(() => {
-    check();
+    let timer: number | undefined;
+    check().then((ok) => {
+      if (!ok) timer = window.setTimeout(check, RETRY_DELAY_MS);
+    });
+    return () => window.clearTimeout(timer);
   }, [check]);
 
   return { update, check };

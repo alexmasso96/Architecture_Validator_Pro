@@ -22,7 +22,7 @@ from ..security import require_token
 router = APIRouter(prefix="/api/update", tags=["update"],
                    dependencies=[Depends(require_token)])
 
-GITHUB_REPO = "alexmasso96/Embeded-Software-Architecture-Validation"
+GITHUB_REPO = "alexmasso96/Architecture_Validator_Pro"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 

@@ -42,6 +42,7 @@ MANIFEST_SUFFIX = ".sync"
 BUSY_TIMEOUT_MS = 30000
 NO_LOCK_VFS = "win32-none" if sys.platform == "win32" else "unix-none"
 LOCAL_VFS = "win32" if sys.platform == "win32" else "unix"
+COPY_CHUNK = 1024 * 1024
 WAL_FORMAT = 2    # byte 18 of a SQLite file's header
 
 META_BASE = "sync_base_revision"
@@ -264,7 +265,23 @@ def _backup(source: str, target: str) -> None:
             dst.close()
 
 
-def _copy_to_share(local: str, target: str, prepare=None) -> None:
+def copy_file(source: str, target: str, progress: Optional[Callable] = None) -> None:
+    """Copies a file, reporting each new whole percent, so a large project on a
+    slow share never looks like it has hung."""
+    total = os.path.getsize(source)
+    done = reported = 0
+    with open(source, "rb") as src, open(target, "wb") as dst:
+        for chunk in iter(lambda: src.read(COPY_CHUNK), b""):
+            dst.write(chunk)
+            done += len(chunk)
+            percent = done * 100 // total if total else 100
+            if progress is not None and percent != reported:
+                reported = percent
+                progress(percent)
+
+
+def _copy_to_share(local: str, target: str, prepare=None,
+                   progress: Optional[Callable] = None) -> None:
     """Writes a local project to the share as one plain file, ending in a rename.
     The journal mode is set here, because WAL can't work on a share."""
     staged = f"{local}.{uuid.uuid4().hex}.stage"
@@ -278,7 +295,7 @@ def _copy_to_share(local: str, target: str, prepare=None) -> None:
                 prepare(conn)
         finally:
             conn.close()
-        shutil.copyfile(staged, uploading)
+        copy_file(staged, uploading, progress)
         retry_while_busy(os.replace, uploading, target)
     finally:
         for path in (staged, uploading):
@@ -286,7 +303,8 @@ def _copy_to_share(local: str, target: str, prepare=None) -> None:
                 os.remove(path)
 
 
-def publish(local: str, remote: str, username: str) -> dict:
+def publish(local: str, remote: str, username: str,
+            progress: Optional[Callable] = None) -> dict:
     """Puts a project on the share for the first time."""
     if os.path.exists(remote):
         raise SyncBlocked(f"A file already exists at {remote}.")
@@ -298,12 +316,12 @@ def publish(local: str, remote: str, username: str) -> dict:
         conn.execute("DELETE FROM sync_sections")
         made.update(_manifest_for(conn, 1, username))
 
-    _copy_to_share(local, remote, prepare)
+    _copy_to_share(local, remote, prepare, progress)
     _write_manifest(remote, made)
     return made
 
 
-def _leave_wal_mode(remote: str) -> None:
+def _leave_wal_mode(remote: str, progress: Optional[Callable] = None) -> None:
     """A copied project can still be in WAL mode, which a share can't use. The
     change happens on a local copy, because SQLite can't make it on the share."""
     with open(remote, "rb") as f:
@@ -312,7 +330,7 @@ def _leave_wal_mode(remote: str) -> None:
         return
     with tempfile.TemporaryDirectory() as folder:
         local = os.path.join(folder, os.path.basename(remote))
-        shutil.copyfile(remote, local)
+        copy_file(remote, local, (lambda p: progress(p // 2)) if progress else None)
         conn = _connect(local)
         try:
             conn.execute("PRAGMA journal_mode=DELETE")
@@ -320,17 +338,17 @@ def _leave_wal_mode(remote: str) -> None:
             conn.close()
         uploading = f"{remote}.{uuid.uuid4().hex}.tmp"
         try:
-            shutil.copyfile(local, uploading)
+            copy_file(local, uploading, (lambda p: progress(50 + p // 2)) if progress else None)
             retry_while_busy(os.replace, uploading, remote)
         finally:
             if os.path.exists(uploading):
                 os.remove(uploading)
 
 
-def adopt_remote(remote: str, username: str) -> dict:
+def adopt_remote(remote: str, username: str, progress: Optional[Callable] = None) -> dict:
     """Prepares a database that was put on the share by hand. Nothing in it moves,
     so it stays a normal ``.arch``."""
-    _leave_wal_mode(remote)
+    _leave_wal_mode(remote, progress)
     conn = _connect(remote, shared=True)
     try:
         sections.install_triggers(conn)
@@ -343,7 +361,8 @@ def adopt_remote(remote: str, username: str) -> dict:
     return manifest
 
 
-def clone(remote: str, local: str, only_if_missing: bool = False) -> None:
+def clone(remote: str, local: str, only_if_missing: bool = False,
+          progress: Optional[Callable] = None) -> None:
     """The first download: a full copy to a temp file, then an atomic swap. With
     ``only_if_missing``, a copy that appeared meanwhile is left alone, because the
     app may already have it open."""
@@ -355,7 +374,7 @@ def clone(remote: str, local: str, only_if_missing: bool = False) -> None:
     if before.get("writing"):
         raise SyncError(f"{before['writing']} is publishing. Trying again shortly.")
     try:
-        shutil.copyfile(remote, temp)
+        copy_file(remote, temp, progress)
         _stable(remote, before)
         conn = _connect(temp)
         try:
