@@ -11,12 +11,15 @@ import { api, ApiError } from "../api/client";
 import { useSSE } from "../api/useSSE";
 import type {
   BuildSettings,
+  HelperImportPreview,
   InjectionHook,
   SourceFileInfo,
+  SourceFunction,
   TerminalKind,
   TestProject,
   TestProjectFile,
 } from "../api/types";
+import { BUILD_SETTINGS_EVENT } from "../settings";
 import { useConfirm } from "../components/ConfirmDialog";
 import { FolderPicker } from "../components/FolderPicker";
 import { FileIcon, FolderIcon } from "../components/Icons";
@@ -66,17 +69,19 @@ function FileTree({
   kind,
   activeTab,
   onOpen,
+  onDelete,
 }: {
   files: string[];
   kind: TabKind;
   activeTab: string | null;
   onOpen: (kind: TabKind, relPath: string) => void;
+  onDelete?: (relPath: string) => void;
 }) {
   const tree = useMemo(() => buildFileTree(files), [files]);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const toggle = (path: string) =>
-    setCollapsed((prev) => {
+    setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -87,7 +92,7 @@ function FileTree({
     nodes.map((node) => {
       const indent = 8 + depth * 12;
       if (node.isDir) {
-        const isCollapsed = collapsed.has(node.path);
+        const isCollapsed = !expanded.has(node.path);
         return (
           <Fragment key={`d:${node.path}`}>
             <button
@@ -105,16 +110,26 @@ function FileTree({
       }
       const key = `${kind}:${node.path}`;
       return (
-        <button
-          key={`f:${node.path}`}
-          className={"tci-tree-row file" + (activeTab === key ? " sel" : "")}
-          style={{ paddingLeft: indent + 14 }}
-          title={node.path}
-          onClick={() => onOpen(kind, node.path)}
-        >
-          <FileIcon size={13} />
-          <span className="tci-tree-name">{node.name}</span>
-        </button>
+        <div key={`f:${node.path}`} className="tci-tree-filerow">
+          <button
+            className={"tci-tree-row file" + (activeTab === key ? " sel" : "")}
+            style={{ paddingLeft: indent + 14 }}
+            title={node.path}
+            onClick={() => onOpen(kind, node.path)}
+          >
+            <FileIcon size={13} />
+            <span className="tci-tree-name">{node.name}</span>
+          </button>
+          {onDelete && (
+            <button
+              className="tci-icon-btn danger tci-tree-del"
+              title="Remove from this test project"
+              onClick={() => onDelete(node.path)}
+            >
+              ✕
+            </button>
+          )}
+        </div>
       );
     });
 
@@ -154,6 +169,10 @@ const TERMINALS: { value: TerminalKind; label: string }[] = [
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+const SEARCH_LIMIT = 200;
+// Bus reasons after which the Production Source list can be out of date.
+const SOURCE_CHANGES = ["source-imported", "source-dropped", "release-activated"];
 
 type TabKind = "src" | "test";
 interface OpenTab {
@@ -228,6 +247,26 @@ function buildPreview(content: string, hooks: InjectionHook[]): Preview {
   return { value: out.join("\n"), blocks };
 }
 
+// The preview holds snippets the source doesn't, so its line numbers run ahead.
+function sourceLineToPreview(line: number, blocks: PreviewBlock[]): number {
+  let at = line;
+  for (const b of [...blocks].sort((x, y) => x.start - y.start)) {
+    if (b.start <= at) at += b.end - b.start + 1;
+  }
+  return at;
+}
+
+// 0-based source index for a click on a preview line. A click inside a snippet
+// means the place that snippet sits at.
+function previewLineToSourceIndex(line: number, blocks: PreviewBlock[]): number {
+  let above = 0;
+  for (const b of blocks) {
+    if (b.end < line) above += b.end - b.start + 1;
+    else if (b.start <= line) above += line - b.start;
+  }
+  return line - 1 - above;
+}
+
 function confidenceBadge(c: number): { text: string; cls: string } {
   if (c >= 4) return { text: "exact", cls: "ok" };
   if (c >= 3) return { text: "fuzzy", cls: "warn" };
@@ -249,6 +288,8 @@ export function TestCodeInjection({
   const [activeProject, setActiveProject] = useState<number | null>(null);
   const [sourceFiles, setSourceFiles] = useState<SourceFileInfo[]>([]);
   const [sourceErr, setSourceErr] = useState<string | null>(null);
+  const [functions, setFunctions] = useState<SourceFunction[]>([]);
+  const [query, setQuery] = useState("");
   const [testFiles, setTestFiles] = useState<TestProjectFile[]>([]);
   const [hooks, setHooks] = useState<InjectionHook[]>([]);
 
@@ -256,6 +297,8 @@ export function TestCodeInjection({
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [docContent, setDocContent] = useState<string>("");
+  const [docKey, setDocKey] = useState<string | null>(null); // tab docContent is from
+  const [reveal, setReveal] = useState<{ key: string; line: number } | null>(null);
   const [mode, setMode] = useState<"inject" | "edit">("inject");
   const [selectedHook, setSelectedHook] = useState<number | null>(null);
   const [snippetDraft, setSnippetDraft] = useState<string>("");
@@ -273,10 +316,15 @@ export function TestCodeInjection({
     wsl_distro: "",
     build_command: "",
     build_cwd: "",
-    make_script: "",
     source_path: "",
   });
   const [importOpen, setImportOpen] = useState(false);
+  const [importing, setImporting] = useState<{
+    folder: string;
+    dest: string;
+    files: HelperImportPreview[];
+    error: string | null;
+  } | null>(null);
 
   // -- sidebar panes -------------------------------------------------------
   // The three sidebar sections (Test Projects / Production Source / Test Files)
@@ -324,6 +372,9 @@ export function TestCodeInjection({
   const symbolsRef = useRef<Set<string>>(new Set());
   const logRef = useRef<HTMLDivElement>(null);
   const completionRegistered = useRef(false);
+  // The editor puts its cursor on line 1 whenever its text changes, so a position
+  // only counts once the user has chosen it.
+  const cursorChosen = useRef(false);
 
   const activeTabObj = tabs.find((t) => t.key === activeTab) ?? null;
   const isSrcTab = activeTabObj?.kind === "src";
@@ -352,8 +403,14 @@ export function TestCodeInjection({
       );
       setSourceFiles(r.files);
       setSourceErr(null);
+      // Reading every file can take a moment, so the tree doesn't wait for it.
+      api
+        .get<{ functions: SourceFunction[] }>("/injection/source/functions")
+        .then((f) => setFunctions(f.functions))
+        .catch(() => setFunctions([]));
     } catch (e) {
       setSourceFiles([]);
+      setFunctions([]);
       setSourceErr(
         e instanceof ApiError ? e.detail : (e as Error).message,
       );
@@ -388,6 +445,12 @@ export function TestCodeInjection({
     loadSettings();
   }, [loadProjects, loadSource, loadSettings]);
 
+  // Preferences → Paths edits these while this view stays mounted behind it.
+  useEffect(() => {
+    window.addEventListener(BUILD_SETTINGS_EVENT, loadSettings);
+    return () => window.removeEventListener(BUILD_SETTINGS_EVENT, loadSettings);
+  }, [loadSettings]);
+
   useEffect(() => {
     if (activeProject == null) {
       setTestFiles([]);
@@ -399,6 +462,29 @@ export function TestCodeInjection({
   }, [activeProject, loadProjectFiles, loadHooks]);
 
   // Hooks for the file currently open in the editor.
+  const sourceFolders = useMemo(() => {
+    const folders = new Set<string>();
+    for (const f of sourceFiles) {
+      const parts = f.rel_path.split("/").slice(0, -1);
+      parts.forEach((_, i) => folders.add(parts.slice(0, i + 1).join("/")));
+    }
+    return [...folders].sort();
+  }, [sourceFiles]);
+
+  // Search: functions first, because that's what a hook is placed in.
+  const search = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return null;
+    return {
+      functions: functions
+        .filter((f) => f.name.toLowerCase().includes(q))
+        .slice(0, SEARCH_LIMIT),
+      files: sourceFiles
+        .filter((f) => f.rel_path.toLowerCase().includes(q))
+        .slice(0, SEARCH_LIMIT),
+    };
+  }, [query, functions, sourceFiles]);
+
   const fileHooks = useMemo(
     () =>
       activeTabObj && isSrcTab
@@ -422,6 +508,7 @@ export function TestCodeInjection({
   useEffect(() => {
     if (!activeTabObj) {
       setDocContent("");
+      setDocKey(null);
       return;
     }
     let cancelled = false;
@@ -434,12 +521,14 @@ export function TestCodeInjection({
         const r = await api.get<{ content: string }>(url);
         if (!cancelled) {
           setDocContent(r.content);
+          setDocKey(activeTabObj.key);
           // Feed the autocomplete provider with identifiers from this file.
           harvestSymbols(r.content);
         }
       } catch (e) {
         if (!cancelled) {
           setDocContent(`/* Failed to load: ${(e as Error).message} */`);
+          setDocKey(activeTabObj.key);
         }
       }
     })();
@@ -506,11 +595,31 @@ export function TestCodeInjection({
     decoRef.current.set(decos);
   }, [preview, mode, isSrcTab, placing, editorValue, editorReady]);
 
+  useEffect(() => {
+    cursorChosen.current = false;
+  }, [mode, activeTab]);
+
+  // Jump to a searched function once its file is in the editor.
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (!reveal || reveal.key !== docKey || !ed?.getModel()) return;
+    const line =
+      mode === "inject" ? sourceLineToPreview(reveal.line, preview.blocks) : reveal.line;
+    ed.setPosition({ lineNumber: line, column: 1 });
+    ed.revealLineInCenter(line);
+    ed.focus();
+    setReveal(null);
+  }, [reveal, docKey, mode, preview, editorValue, editorReady]);
+
   // -- SSE: build logs -----------------------------------------------------
   useSSE(
     useCallback((e) => {
-      if (e.event !== "build") return;
       const d = e.data as Record<string, unknown>;
+      if (e.event === "db-changed") {
+        if (SOURCE_CHANGES.includes(d.reason as string)) loadSource();
+        return;
+      }
+      if (e.event !== "build") return;
       const kind = d.event as string;
       if (kind === "start") {
         setBuilding(true);
@@ -522,7 +631,7 @@ export function TestCodeInjection({
         setBuilding(false);
         setBuildLogs((p) => [...p, `— build exited (code ${d.returncode}) —`]);
       }
-    }, []),
+    }, [loadSource]),
     true,
   );
 
@@ -540,6 +649,10 @@ export function TestCodeInjection({
     decoRef.current = editor.createDecorationsCollection();
     requestAnimationFrame(() => editor.layout());
     setTimeout(() => editor.layout(), 100);
+
+    editor.onDidChangeCursorPosition((e) => {
+      if (e.source === "mouse" || e.source === "keyboard") cursorChosen.current = true;
+    });
 
     // Repositioning a conflicted hook: clicking a line sets the candidate anchor.
     editor.onMouseDown((e) => {
@@ -601,19 +714,52 @@ export function TestCodeInjection({
     }
   }
 
-  async function importHelpers(folder: string) {
+  // What the chosen folder would become at this destination. Nothing is stored.
+  async function previewImport(folder: string, dest: string) {
     if (activeProject == null) return;
-    setImportOpen(false);
+    setImporting({ folder, dest, files: importing?.files ?? [], error: null });
+    try {
+      const r = await api.post<{ files: HelperImportPreview[] }>(
+        `/injection/projects/${activeProject}/import`,
+        { folder, dest, preview: true },
+      );
+      setImporting({ folder, dest, files: r.files, error: null });
+    } catch (e) {
+      const error = e instanceof ApiError ? e.detail : (e as Error).message;
+      setImporting({ folder, dest, files: [], error });
+    }
+  }
+
+  async function importHelpers() {
+    if (activeProject == null || !importing) return;
+    const { folder, dest } = importing;
+    setImporting(null);
     try {
       const r = await api.post<{ imported: number }>(
         `/injection/projects/${activeProject}/import`,
-        { folder },
+        { folder, dest },
       );
       toast(`Imported ${r.imported} helper file(s)`);
       await loadProjectFiles(activeProject);
       await loadProjects();
     } catch (e) {
       toast(`Import failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function removeHelper(relPath: string) {
+    if (activeProject == null) return;
+    try {
+      await api.del(
+        `/injection/projects/${activeProject}/files?rel_path=${encodeURIComponent(relPath)}`,
+      );
+      const key = `test:${relPath}`;
+      setTabs((prev) => prev.filter((t) => t.key !== key));
+      if (activeTab === key) setActiveTab(null);
+      await loadProjectFiles(activeProject);
+      await loadProjects();
+    } catch (e) {
+      toast(`Remove failed: ${(e as Error).message}`);
     }
   }
 
@@ -624,18 +770,17 @@ export function TestCodeInjection({
     const ed = editorRef.current;
     const pos = ed?.getPosition();
     if (!pos) return;
-    const lines = docContent.split("\n");
-    const idx = pos.lineNumber - 1; // splice before this line
-    const above = lines[idx - 1] ?? "";
-    const below = lines[idx] ?? "";
+    if (!cursorChosen.current) {
+      toast("Click the line where the code should go first.");
+      return;
+    }
     try {
       const r = await api.post<{ injection_id: number }>(
         `/injection/projects/${activeProject}/injections`,
         {
           src_file_path: activeTabObj.relPath,
           function_name: "",
-          line_above_code: above,
-          line_below_code: below,
+          at_index: pos.lineNumber - 1, // splice before this line
           injected_code: "/* test code */",
         },
       );
@@ -696,16 +841,16 @@ export function TestCodeInjection({
     if (!placing || activeProject == null) return;
     const h = hooks.find((x) => x.id === placing.hookId);
     if (!h) return;
-    const lines = preview.value.split("\n");
-    const above = lines[placing.line - 2] ?? "";
-    const below = lines[placing.line - 1] ?? "";
+    const atIndex =
+      mode === "inject"
+        ? previewLineToSourceIndex(placing.line, preview.blocks)
+        : placing.line - 1;
     try {
       await api.post(`/injection/projects/${activeProject}/injections`, {
         injection_id: h.id,
         src_file_path: h.src_file_path,
         function_name: h.function_name,
-        line_above_code: above,
-        line_below_code: below,
+        at_index: atIndex,
         injected_code: h.injected_code,
         offset_lines: h.offset_lines,
       });
@@ -730,10 +875,30 @@ export function TestCodeInjection({
   async function runBuild() {
     if (activeProject == null) return;
     try {
-      await api.post(`/injection/projects/${activeProject}/build`, {});
+      // Sent as shown: a save from the last keystroke may still be on its way.
+      await api.post(`/injection/projects/${activeProject}/build`, {
+        command: settings.build_command,
+        cwd: settings.build_cwd,
+        terminal: settings.terminal,
+      });
     } catch (e) {
       toast(
         e instanceof ApiError ? e.detail : `Build failed: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  async function openTerminal() {
+    try {
+      await api.post("/injection/terminal", {
+        cwd: settings.build_cwd,
+        terminal: settings.terminal,
+      });
+    } catch (e) {
+      toast(
+        e instanceof ApiError
+          ? e.detail
+          : `Couldn't open a terminal: ${(e as Error).message}`,
       );
     }
   }
@@ -847,17 +1012,61 @@ export function TestCodeInjection({
           <div className="tci-sect-head">
             <span>Production Source</span>
           </div>
+          {sourceFiles.length > 0 && (
+            <input
+              className="tci-search"
+              type="search"
+              placeholder="Search functions and files"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          )}
           <div className="tci-pane-body">
             {sourceErr && <div className="tci-empty err">{sourceErr}</div>}
             {!sourceErr && sourceFiles.length === 0 && (
               <div className="tci-empty">No source files.</div>
             )}
-            <FileTree
-              files={sourceFiles.map((f) => f.rel_path)}
-              kind="src"
-              activeTab={activeTab}
-              onOpen={openFile}
-            />
+            {search ? (
+              <>
+                {search.functions.map((f) => (
+                  <button
+                    key={`${f.rel_path}:${f.line}:${f.name}`}
+                    className="tci-tree-row tci-result"
+                    title={`${f.rel_path}:${f.line}`}
+                    onClick={() => {
+                      setReveal({ key: `src:${f.rel_path}`, line: f.line });
+                      openFile("src", f.rel_path);
+                    }}
+                  >
+                    <span className="tci-tree-name">{f.name}</span>
+                    <span className="tci-result-file">
+                      {f.rel_path.split("/").pop()}:{f.line}
+                    </span>
+                  </button>
+                ))}
+                {search.files.map((f) => (
+                  <button
+                    key={f.rel_path}
+                    className="tci-tree-row tci-result"
+                    title={f.rel_path}
+                    onClick={() => openFile("src", f.rel_path)}
+                  >
+                    <FileIcon size={13} />
+                    <span className="tci-tree-name">{f.rel_path}</span>
+                  </button>
+                ))}
+                {search.functions.length + search.files.length === 0 && (
+                  <div className="tci-empty">Nothing found.</div>
+                )}
+              </>
+            ) : (
+              <FileTree
+                files={sourceFiles.map((f) => f.rel_path)}
+                kind="src"
+                activeTab={activeTab}
+                onOpen={openFile}
+              />
+            )}
           </div>
         </div>
 
@@ -892,6 +1101,7 @@ export function TestCodeInjection({
               kind="test"
               activeTab={activeTab}
               onOpen={openFile}
+              onDelete={canEdit ? removeHelper : undefined}
             />
           </div>
         </div>
@@ -954,8 +1164,10 @@ export function TestCodeInjection({
                 value={editorValue}
                 onMount={onEditorMount}
                 options={{
-                  readOnly: !(mode === "edit" && canEdit),
-                  domReadOnly: !(mode === "edit" && canEdit),
+                  // Edit only picks a place: code goes in a hook's snippet, and
+                  // typing here would move the lines under the cursor.
+                  readOnly: true,
+                  domReadOnly: true,
                   minimap: { enabled: false },
                   fontSize: 12,
                   lineNumbers: "on",
@@ -1154,14 +1366,17 @@ export function TestCodeInjection({
             )}
             <input
               className="tci-input grow"
-              placeholder="build command (e.g. make all)"
+              placeholder="build command (e.g. make 0)"
               value={settings.build_command}
               disabled={!canEdit}
               onChange={(e) => saveSettings({ build_command: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !building && activeProject != null) runBuild();
+              }}
             />
             <input
               className="tci-input"
-              placeholder="working dir"
+              placeholder="build folder"
               value={settings.build_cwd}
               disabled={!canEdit}
               onChange={(e) => saveSettings({ build_cwd: e.target.value })}
@@ -1172,6 +1387,13 @@ export function TestCodeInjection({
               onClick={runBuild}
             >
               {building ? "Building…" : "Build"}
+            </button>
+            <button
+              className="tci-mini-btn"
+              title="Open an empty terminal in the build folder"
+              onClick={openTerminal}
+            >
+              Terminal
             </button>
             <button
               className="tci-mini-btn"
@@ -1214,8 +1436,56 @@ export function TestCodeInjection({
           title="Import test helpers — choose a folder of .c/.h files"
           hint="Navigate to the folder containing the test helper sources"
           onCancel={() => setImportOpen(false)}
-          onConfirm={(path) => importHelpers(path)}
+          onConfirm={(path) => {
+            setImportOpen(false);
+            previewImport(path, path.split(/[\\/]/).filter(Boolean).pop() ?? "");
+          }}
         />
+      )}
+      {importing && (
+        <div className="modal-overlay confirm-overlay">
+          <div className="modal confirm-modal">
+            <div className="modal-head">Where should the test files go?</div>
+            <div className="confirm-body">
+              <label className="tci-dest">
+                <span>Folder in the source tree (empty is the top folder)</span>
+                <input
+                  className="tci-input"
+                  list="tci-source-folders"
+                  value={importing.dest}
+                  onChange={(e) => previewImport(importing.folder, e.target.value)}
+                  autoFocus
+                />
+                <datalist id="tci-source-folders">
+                  {sourceFolders.map((f) => (
+                    <option key={f} value={f} />
+                  ))}
+                </datalist>
+              </label>
+              {importing.error && <div className="tci-empty err">{importing.error}</div>}
+              <div className="tci-dest-list">
+                {importing.files.map((f) => (
+                  <div key={f.rel_path} className={f.replaces_source ? "warn" : ""}>
+                    {f.rel_path}
+                    {f.replaces_source && " replaces the source file"}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="confirm-foot">
+              <button className="confirm-cancel" onClick={() => setImporting(null)}>
+                Cancel
+              </button>
+              <button
+                className="confirm-ok primary"
+                disabled={!!importing.error || importing.files.length === 0}
+                onClick={importHelpers}
+              >
+                Import {importing.files.length} file(s)
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {confirmNode}
     </div>

@@ -75,7 +75,7 @@ def _read_production_lines(state: AppState, rel_path: str) -> list[str]:
     text = _production_provider(state).read_file(rel_path)
     if text is None:
         raise ProjectError(f"No such source file in the active release: {rel_path}")
-    return text.splitlines()
+    return injection.source_lines(text)
 
 
 class _SingleFileProvider:
@@ -194,6 +194,17 @@ class ImportBody(BaseModel):
     # Either walk a folder for .c/.h files, or pass explicit file contents.
     folder: Optional[str] = None
     files: Optional[list[ImportFile]] = None
+    # Folder in the source tree the files go into. Empty is the source root.
+    dest: str = ""
+    # Only report what would be imported.
+    preview: bool = False
+
+
+def _clean_dest(dest: str) -> str:
+    parts = [p for p in dest.replace("\\", "/").split("/") if p not in ("", ".")]
+    if ".." in parts or ":" in dest:
+        raise ProjectError("The destination must be a folder inside the source tree.")
+    return "/".join(parts)
 
 
 @router.post("/projects/{test_project_id}/import")
@@ -216,6 +227,16 @@ def import_files(test_project_id: int, body: ImportBody,
                     pairs.append((f.rel_path, f.content))
         if not pairs:
             raise ProjectError("No .c/.h helper files found to import.")
+        dest = _clean_dest(body.dest)
+        if dest:
+            pairs = [(f"{dest}/{rel}", text) for rel, text in pairs]
+        if body.preview:
+            active = state.require_releases().get_active_release()
+            provider = release_source_provider(db, active.id if active else None)
+            production = ({sf.rel_path for sf in provider.list_files()}
+                          if provider else set())
+            return {"files": [{"rel_path": rel, "replaces_source": rel in production}
+                              for rel, _text in pairs]}
         count = db.import_test_project_files(test_project_id, pairs)
         bus.publish("db-changed", {"reason": "test-files-imported",
                                    "id": test_project_id, "count": count})
@@ -269,6 +290,33 @@ def source_files(state: AppState = Depends(get_state)) -> dict:
     return _guard(go)
 
 
+# Listing a release's functions reads every file, so it's kept until the source
+# changes. It isn't stored: the project's source can be encrypted.
+_functions_cache: dict = {"key": None, "functions": []}
+
+
+@router.get("/source/functions")
+def source_functions(state: AppState = Depends(get_state)) -> dict:
+    """Every function in the active release's source, for the search box."""
+    def go():
+        from Application_Logic.Logic_Code_Index import file_function_list
+        provider = _production_provider(state)
+        files = provider.list_files()
+        key = tuple((sf.rel_path, sf.content_hash) for sf in files)
+        if _functions_cache["key"] != key:
+            found = []
+            for sf in files:
+                text = provider.read_file(sf.rel_path)
+                if text is None:
+                    continue
+                found.extend({"name": f.name, "rel_path": sf.rel_path,
+                              "line": f.line_start}
+                             for f in file_function_list(text, sf.rel_path))
+            _functions_cache.update(key=key, functions=found)
+        return {"functions": _functions_cache["functions"]}
+    return _guard(go)
+
+
 @router.get("/source/content")
 def source_content(rel_path: str = Query(...),
                    state: AppState = Depends(get_state)) -> dict:
@@ -291,6 +339,8 @@ class InjectionBody(BaseModel):
     line_below_code: str = ""
     injected_code: str = ""
     offset_lines: int = 0
+    # Where to splice, as a line index in the source. Sets both anchors.
+    at_index: Optional[int] = None
 
 
 @router.get("/projects/{test_project_id}/injections")
@@ -321,21 +371,24 @@ def upsert_injection(test_project_id: int, body: InjectionBody,
     def go():
         db = state.require_edit()
         _require_test_project(state, test_project_id)
+        above, below = body.line_above_code, body.line_below_code
+        if body.at_index is not None:
+            above, below = injection.anchor_context(
+                _read_production_lines(state, body.src_file_path), body.at_index)
         if body.injection_id is not None:
             db.update_injection(
                 body.injection_id,
                 src_file_path=body.src_file_path,
                 function_name=body.function_name,
-                line_above_code=body.line_above_code,
-                line_below_code=body.line_below_code,
+                line_above_code=above,
+                line_below_code=below,
                 injected_code=body.injected_code,
                 offset_lines=body.offset_lines)
             iid = body.injection_id
         else:
             iid = db.add_injection(
                 test_project_id, body.src_file_path, body.function_name,
-                body.line_above_code, body.line_below_code,
-                body.injected_code, body.offset_lines)
+                above, below, body.injected_code, body.offset_lines)
         bus.publish("db-changed", {"reason": "injection-saved",
                                    "id": test_project_id, "injection_id": iid})
         return {"injection_id": iid}
@@ -387,7 +440,7 @@ def shift(injection_id: int, body: ShiftBody,
         text = _production_provider(state).read_file(inj["src_file_path"])
         if text is None:
             raise ProjectError(f"No such source file: {inj['src_file_path']}")
-        lines = text.splitlines()
+        lines = injection.source_lines(text)
         bounds = _function_bounds(inj["src_file_path"], text, inj["function_name"])
         result = injection.shift_injection(
             lines, injection_id, body.direction, db, func_bounds=bounds)
@@ -468,11 +521,10 @@ def get_settings(state: AppState = Depends(get_state)) -> dict:
     def go():
         db = state.require_open()
         return {
-            "terminal": db.get_meta("inject_terminal", "bash"),
+            "terminal": db.get_meta("inject_terminal", test_builds.default_terminal()),
             "wsl_distro": db.get_meta("inject_wsl_distro", ""),
             "build_command": db.get_meta("inject_build_command", ""),
-            "build_cwd": db.get_meta("inject_build_cwd", ""),
-            "make_script": db.get_meta("inject_make_script", ""),
+            "build_cwd": test_builds.stored_build_folder(db),
             "source_path": db.get_meta("inject_source_path", ""),
         }
     return _guard(go)
@@ -483,7 +535,6 @@ class SettingsBody(BaseModel):
     wsl_distro: Optional[str] = None
     build_command: Optional[str] = None
     build_cwd: Optional[str] = None
-    make_script: Optional[str] = None
     source_path: Optional[str] = None
 
 
@@ -501,8 +552,6 @@ def set_settings(body: SettingsBody, state: AppState = Depends(get_state)) -> di
             db.set_meta("inject_build_command", body.build_command)
         if body.build_cwd is not None:
             db.set_meta("inject_build_cwd", body.build_cwd)
-        if body.make_script is not None:
-            db.set_meta("inject_make_script", body.make_script)
         if body.source_path is not None:
             db.set_meta("inject_source_path", body.source_path)
         db.commit()
@@ -511,6 +560,17 @@ def set_settings(body: SettingsBody, state: AppState = Depends(get_state)) -> di
 
 
 _build_argv = test_builds.build_argv
+
+
+def _require_build_folder(cwd: str, terminal: str) -> None:
+    """A build started from no folder runs in the app's own install folder, where
+    a project's make can't be found."""
+    if not cwd.strip():
+        raise ProjectError(
+            "No build folder is set. Choose your make script or its folder.")
+    # WSL paths are inside the distro, so they can't be checked from here.
+    if terminal != "wsl" and not os.path.isdir(cwd):
+        raise ProjectError(f"The build folder can't be found: {cwd}")
 
 
 class BuildBody(BaseModel):
@@ -529,7 +589,7 @@ def _stream_build(build_id: str, argv: list[str], cwd: Optional[str],
     popen_cwd = None if (terminal == "wsl" or not cwd) else cwd
     try:
         proc = subprocess.Popen(
-            argv, cwd=popen_cwd, stdout=subprocess.PIPE,
+            test_builds.popen_args(argv), cwd=popen_cwd, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1,
             encoding="utf-8", errors="replace")
     except (OSError, ValueError) as e:
@@ -559,17 +619,19 @@ def build(test_project_id: int, body: BuildBody,
           bus: EventBus = Depends(get_bus)) -> dict:
     def go():
         db = state.require_open()
-        terminal = (body.terminal or db.get_meta("inject_terminal", "bash"))
+        terminal = (body.terminal
+                    or db.get_meta("inject_terminal", test_builds.default_terminal()))
         if terminal not in TERMINALS:
             raise ProjectError(f"Unknown terminal: {terminal}")
         distro = body.wsl_distro if body.wsl_distro is not None \
             else (db.get_meta("inject_wsl_distro", "") or "")
         command = body.command if body.command is not None \
             else (db.get_meta("inject_build_command", "") or "")
-        cwd = body.cwd if body.cwd is not None \
-            else (db.get_meta("inject_build_cwd", "") or "")
+        cwd = test_builds.build_folder(body.cwd) if body.cwd is not None \
+            else test_builds.stored_build_folder(db)
         if not command.strip():
             raise ProjectError("No build command configured.")
+        _require_build_folder(cwd, terminal)
         build_id = uuid.uuid4().hex
         argv = _build_argv(terminal, command, cwd, distro)
         threading.Thread(
@@ -577,6 +639,35 @@ def build(test_project_id: int, body: BuildBody,
             args=(build_id, argv, cwd, terminal, bus),
             name=f"build-{build_id[:8]}", daemon=True).start()
         return {"build_id": build_id, "terminal": terminal}
+    return _guard(go)
+
+
+class TerminalBody(BaseModel):
+    cwd: Optional[str] = None         # overrides the stored build_cwd
+    terminal: Optional[str] = None    # overrides the stored terminal
+
+
+@router.post("/terminal")
+def open_terminal(body: TerminalBody, state: AppState = Depends(get_state)) -> dict:
+    """Opens an empty terminal window in the build folder."""
+    def go():
+        db = state.require_open()
+        terminal = (body.terminal
+                    or db.get_meta("inject_terminal", test_builds.default_terminal()))
+        if terminal not in TERMINALS:
+            raise ProjectError(f"Unknown terminal: {terminal}")
+        cwd = test_builds.build_folder(body.cwd) if body.cwd is not None \
+            else test_builds.stored_build_folder(db)
+        _require_build_folder(cwd, terminal)
+        distro = db.get_meta("inject_wsl_distro", "") or ""
+        # A window of its own: this app has no console for it to share.
+        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        try:
+            subprocess.Popen(test_builds.terminal_window_argv(terminal, cwd, distro),
+                             cwd=None if terminal == "wsl" else cwd, creationflags=flags)
+        except (OSError, ValueError) as e:
+            raise ProjectError(f"Couldn't open a terminal: {e}") from e
+        return {"terminal": terminal, "cwd": cwd}
     return _guard(go)
 
 

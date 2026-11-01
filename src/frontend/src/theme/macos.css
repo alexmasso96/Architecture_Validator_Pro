@@ -4423,6 +4423,16 @@ button.update-pill:hover {
 }
 .tci-tree-row svg { flex: none; opacity: 0.85; }
 .tci-tree-name { overflow: hidden; text-overflow: ellipsis; }
+.tci-tree-filerow { position: relative; }
+.tci-tree-del { display: none; position: absolute; right: 4px; top: 50%; transform: translateY(-50%); }
+.tci-tree-filerow:hover .tci-tree-del { display: block; }
+.tci-search { flex: none; margin: 4px 8px; padding: 3px 7px; font-size: 11px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 5px; min-width: 0; }
+.tci-search:focus { outline: none; border-color: var(--accent); }
+.tci-result { padding-left: 12px; gap: 6px; }
+.tci-result-file { flex: none; margin-left: auto; font-size: 10px; color: var(--muted); }
+.tci-dest { display: flex; flex-direction: column; gap: 4px; }
+.tci-dest-list { margin-top: 8px; max-height: 180px; overflow-y: auto; font-family: var(--v-mono); font-size: 11px; line-height: 1.5; }
+.tci-dest-list .warn { color: var(--red); }
 .tci-empty { padding: 6px 12px; font-size: 11px; color: var(--muted); }
 .tci-empty.err { color: var(--red); }
 
@@ -4478,8 +4488,10 @@ button.update-pill:hover {
 .tci-mini-btn.danger:hover { border-color: var(--red); color: var(--red); }
 .tci-mini-btn:disabled { opacity: 0.4; cursor: default; }
 
-.tci-editor-wrap { display: grid; grid-template-columns: 1fr 300px; flex: 1 1 auto; min-height: 0; }
-.tci-editor { position: relative; min-width: 0; border-right: 1px solid var(--border); }
+/* A zero basis and a bounded row: Monaco sets a pixel height on itself, which an
+   auto basis would keep after the console needs the room back. */
+.tci-editor-wrap { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: minmax(0, 1fr); flex: 1 1 0; min-height: 0; }
+.tci-editor { position: relative; min-width: 0; min-height: 0; overflow: hidden; border-right: 1px solid var(--border); }
 .tci-hooks { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; background: var(--v-panel); }
 .tci-panel-head {
   padding: 6px 12px;
@@ -4515,7 +4527,7 @@ button.update-pill:hover {
   padding: 6px;
 }
 
-.tci-console { border-top: 1px solid var(--border); background: var(--v-panel); display: flex; flex-direction: column; }
+.tci-console { flex: none; border-top: 1px solid var(--border); background: var(--v-panel); display: flex; flex-direction: column; }
 .tci-console.open { height: 200px; }
 .tci-console-bar { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .tci-select, .tci-input {
@@ -6236,6 +6248,20 @@ button.update-pill:hover {
 
 /* Test Design guide */
 .demo-td-full, .demo-aig-full { grid-column: 1 / -1; }
+.demo-ti-search { margin: 2px 8px 4px; }
+.demo-tb, .demo-sy { display: flex; flex-direction: column; gap: 8px; padding: 10px; min-height: 0; }
+.demo-tb-card, .demo-sy-box, .demo-sy-worker { display: flex; flex-direction: column; gap: 3px; padding-bottom: 7px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); min-width: 0; overflow: hidden; }
+.demo-tb-card .demo-field, .demo-sy-box .demo-field, .demo-sy-box .demo-mono { padding: 0 10px; }
+.demo-tb-row { display: flex; align-items: center; gap: 8px; padding: 2px 10px; font-size: 11px; }
+.demo-tb-name { font-weight: 600; }
+.demo-tb-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.demo-tb-result { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 10px; font-size: 10.5px; }
+.demo-sy-top { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1fr 70px 1fr; gap: 8px; }
+.demo-sy-arrow { align-self: center; text-align: center; font-size: 11px; font-weight: 600; color: var(--accent); }
+.demo-sy-tray { display: flex; flex-direction: column; gap: 2px; margin: 4px 10px 0; padding: 5px 0; border: 1px solid var(--border); border-radius: 6px; }
+.demo-sy-change { display: grid; grid-template-columns: 56px 70px 1fr 1fr; gap: 8px; padding: 1px 10px; font-size: 10.5px; }
+.demo-sy-bar { flex: none; display: flex; }
+.demo-sy-status { padding: 2px 8px; font-size: 11px; border-radius: 5px; background: var(--surface); border: 1px solid var(--border); }
 .demo-td-split, .demo-aig-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
 .demo-td-editor { display: flex; flex-direction: column; padding: 8px; gap: 6px; border-right: 1px solid var(--border); min-height: 0; }
 .demo-td-field { display: flex; flex-direction: column; gap: 3px; }

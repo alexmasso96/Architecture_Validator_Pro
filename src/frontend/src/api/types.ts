@@ -385,8 +385,18 @@ export interface BuildSettings {
   wsl_distro: string;
   build_command: string;
   build_cwd: string;
-  make_script: string;
   source_path: string;
+}
+
+export interface SourceFunction {
+  name: string;
+  rel_path: string;
+  line: number;
+}
+
+export interface HelperImportPreview {
+  rel_path: string;
+  replaces_source: boolean;
 }
 
 // Test Builds (#15) — mirrors backend/routers/test_builds.py.

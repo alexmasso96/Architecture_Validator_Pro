@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError } from "../api/client";
 import type { BuildSettings, ProjectMode, TerminalKind } from "../api/types";
+import { BUILD_SETTINGS_EVENT } from "../settings";
 import { FolderPicker } from "./FolderPicker";
 import { TerminalIcon } from "./Icons";
 
@@ -13,21 +14,7 @@ const TERMINALS: { key: TerminalKind; label: string; tint: string }[] = [
   { key: "wsl", label: "WSL", tint: "#e95420" },
 ];
 
-// Derive a sensible build command from the make-script path + chosen terminal.
-function suggestBuildCommand(script: string, terminal: TerminalKind): string {
-  const p = script.trim();
-  if (!p) return "";
-  const q = `"${p}"`;
-  const lower = p.toLowerCase();
-  if (lower.endsWith("makefile") || lower.endsWith(".mk")) return `make -f ${q}`;
-  if (lower.endsWith(".ps1")) return `powershell -ExecutionPolicy Bypass -File ${q}`;
-  if (lower.endsWith(".bat") || lower.endsWith(".cmd")) return q;
-  if (lower.endsWith(".py")) return `python ${q}`;
-  if (lower.endsWith(".sh")) return terminal === "cmd" ? `bash ${q}` : `sh ${q}`;
-  return q;
-}
-
-type BrowseTarget = "make_script" | "source_path";
+type BrowseTarget = "build_cwd" | "source_path";
 
 // Preferences → Paths. Build-tooling paths are project-scoped (stored in the
 // open project's meta via /injection/settings), so this panel only works with a
@@ -59,6 +46,7 @@ export function PathsSettings() {
     setSettings((s) => (s ? { ...s, ...p } : s));
     try {
       await api.post("/injection/settings", p);
+      window.dispatchEvent(new Event(BUILD_SETTINGS_EVENT));
       setNote("Saved");
       window.setTimeout(() => setNote(null), 1400);
     } catch (e) {
@@ -96,21 +84,21 @@ export function PathsSettings() {
   return (
     <div className="prefs-body">
       <PathField
-        label="Make script"
-        hint="Build / make script to run for this project."
-        value={settings.make_script}
-        placeholder="/path/to/build.sh or Makefile"
-        onChange={(v) => patch({ make_script: v })}
-        onBrowse={() => setBrowse("make_script")}
-      />
-
-      <PathField
         label="Source code (on disk)"
-        hint="Folder containing the production source on disk."
+        hint="Starting source folder for new test builds. Test Injection shows the source imported into the release, not this folder."
         value={settings.source_path}
         placeholder="/path/to/src"
         onChange={(v) => patch({ source_path: v })}
         onBrowse={() => setBrowse("source_path")}
+      />
+
+      <PathField
+        label="Build folder"
+        hint="Your make script or the folder it's in. Builds run from that folder."
+        value={settings.build_cwd}
+        placeholder="/path/to/make.cmd"
+        onChange={(v) => patch({ build_cwd: v })}
+        onBrowse={() => setBrowse("build_cwd")}
       />
 
       <div className="prefs-field">
@@ -139,54 +127,25 @@ export function PathsSettings() {
       </div>
 
       <div className="prefs-field">
-        <div className="prefs-row">
-          <div className="prefs-label">Build command</div>
-          <button
-            className="prefs-prefill"
-            disabled={!settings.make_script.trim()}
-            title="Fill from the make script above"
-            onClick={() =>
-              patch({
-                build_command: suggestBuildCommand(settings.make_script, settings.terminal),
-                build_cwd: settings.build_cwd || settings.source_path,
-              })
-            }
-          >
-            Prefill
-          </button>
-        </div>
+        <div className="prefs-label">Build command</div>
         <input
           className="prefs-input"
-          placeholder="e.g. make all"
+          placeholder="e.g. make 0"
           value={settings.build_command}
           onChange={(e) => setSettings({ ...settings, build_command: e.target.value })}
           onBlur={(e) => patch({ build_command: e.target.value })}
         />
-        <input
-          className="prefs-input"
-          placeholder="Working directory (optional)"
-          value={settings.build_cwd}
-          onChange={(e) => setSettings({ ...settings, build_cwd: e.target.value })}
-          onBlur={(e) => patch({ build_cwd: e.target.value })}
-        />
+        <div className="prefs-hint">
+          What you'd type in that terminal. A script works too, such as ./build.sh.
+        </div>
       </div>
 
       {note && <div className="ai-prov-toast">{note}</div>}
 
-      {browse === "source_path" && (
+      {browse && (
         <FolderPicker
           mode="folder"
-          title="Choose source folder"
-          onCancel={() => setBrowse(null)}
-          onConfirm={onBrowsed}
-        />
-      )}
-      {browse === "make_script" && (
-        <FolderPicker
-          mode="import"
-          exts={[".sh", ".bat", ".cmd", ".ps1", ".mk", ".py", ".mak", ".make"]}
-          title="Choose make script"
-          hint="Select the build / make script for this project."
+          title={browse === "source_path" ? "Choose source folder" : "Choose build folder"}
           onCancel={() => setBrowse(null)}
           onConfirm={onBrowsed}
         />

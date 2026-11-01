@@ -267,14 +267,72 @@ def test_build_runner_streams_output():
     assert captured[-1][1]["returncode"] == 0
 
 
-def test_build_endpoint_starts(client):
+def test_build_endpoint_starts(client, tmp_path):
     pid = _new_project(client)
     client.post("/api/injection/settings",
                 json={"terminal": "bash"}, headers=AUTH)
     r = client.post(f"/api/injection/projects/{pid}/build",
-                    json={"command": "echo hi", "cwd": ""}, headers=AUTH)
+                    json={"command": "echo hi", "cwd": str(tmp_path)}, headers=AUTH)
     assert r.status_code == 200, r.text
     assert "build_id" in r.json()
+
+
+def test_make_script_path_means_its_folder(client, tmp_path):
+    script = tmp_path / "make.cmd"
+    script.write_text("echo hi")
+    client.post("/api/injection/settings", json={"build_cwd": str(script)}, headers=AUTH)
+    s = client.get("/api/injection/settings", headers=AUTH).json()
+    assert s["build_cwd"] == str(tmp_path)
+
+
+def test_old_make_script_setting_still_gives_the_folder():
+    from Application_Logic import Logic_Test_Builds as tb
+
+    class Meta:
+        def get_meta(self, key, default=None):
+            return {"inject_make_script": "/proj/make/make.cmd"}.get(key, default)
+
+    assert tb.stored_build_folder(Meta()) == "/proj/make"
+
+
+def test_build_without_a_folder_is_refused(client):
+    pid = _new_project(client)
+    r = client.post(f"/api/injection/projects/{pid}/build",
+                    json={"command": "make 0", "cwd": ""}, headers=AUTH)
+    assert r.status_code == 409 and "No build folder" in r.json()["detail"]
+
+
+def test_build_in_a_missing_folder_is_refused(client, tmp_path):
+    pid = _new_project(client)
+    r = client.post(f"/api/injection/projects/{pid}/build",
+                    json={"command": "make 0", "cwd": str(tmp_path / "gone")},
+                    headers=AUTH)
+    assert r.status_code == 409 and "can't be found" in r.json()["detail"]
+
+
+def test_terminal_opens_in_the_build_folder(client, tmp_path, monkeypatch):
+    from backend.routers import injection as inj
+    opened = []
+    monkeypatch.setattr(inj.subprocess, "Popen",
+                        lambda argv, **kw: opened.append((argv, kw["cwd"])))
+    r = client.post("/api/injection/terminal", json={"cwd": str(tmp_path)}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert opened[0][1] == str(tmp_path)
+
+
+def test_terminal_needs_a_build_folder(client):
+    r = client.post("/api/injection/terminal", json={"cwd": ""}, headers=AUTH)
+    assert r.status_code == 409
+
+
+def test_terminal_window_per_terminal_on_windows(monkeypatch):
+    from Application_Logic import Logic_Test_Builds as tb
+    monkeypatch.setattr(tb.sys, "platform", "win32")
+    assert tb.terminal_window_argv("cmd", "X:\\make", "") == ["cmd.exe"]
+    assert tb.terminal_window_argv("powershell", "X:\\make", "") == \
+        ["powershell.exe", "-NoExit"]
+    assert tb.terminal_window_argv("wsl", "/home/u", "Ubuntu") == \
+        ["wsl.exe", "-d", "Ubuntu", "--cd", "/home/u"]
 
 
 def test_build_no_command_rejected(client):
@@ -282,3 +340,157 @@ def test_build_no_command_rejected(client):
     r = client.post(f"/api/injection/projects/{pid}/build",
                     json={"command": "  "}, headers=AUTH)
     assert r.status_code == 409
+
+
+# -- hook placement ------------------------------------------------------
+from Application_Logic import Logic_Code_Injection as anchors
+
+TWO_FUNCS = [
+    "void a(void)",
+    "{",
+    "    step_a();",
+    "}",
+    "",
+    "void b(void)",
+    "{",
+    "    step_b();",
+    "    if (x)",
+    "    {",
+    "        step_c();",
+    "    }",
+    "",
+    "    done();",
+    "}",
+]
+
+
+def _resolved(lines, index):
+    return anchors.resolve_injection(lines, *anchors.anchor_context(lines, index))
+
+
+def test_every_cursor_position_resolves_to_itself():
+    for index in range(len(TWO_FUNCS) + 1):
+        r = _resolved(TWO_FUNCS, index)
+        assert r["index"] == index, index
+        assert r["confidence"] == 4, index
+
+
+def test_one_line_anchors_stay_on_their_own_pair():
+    # A hook saved before the anchors held several lines, with a common line above.
+    r = anchors.resolve_injection(TWO_FUNCS, "{", "    step_b();")
+    assert r == {"index": 7, "confidence": 4, "anchor": "both"}
+    # A lone "}" could be any of them, so it's reported as a guess.
+    assert anchors.resolve_injection(TWO_FUNCS, "    }", "")["confidence"] == 3
+
+
+def test_identical_places_are_not_called_exact():
+    lines = ["void a(void)", "{", "    go();", "}", "void b(void)", "{", "    go();", "}"]
+    r = anchors.resolve_injection(lines, "{", "    go();")
+    assert r["index"] == 2 and r["confidence"] == 3
+    # The function line in the context tells them apart.
+    r = anchors.resolve_injection(lines, "void b(void)\n{", "    go();")
+    assert r["index"] == 6 and r["confidence"] == 4
+
+
+def test_hook_survives_lines_added_above_it():
+    above, below = anchors.anchor_context(TWO_FUNCS, 8)
+    moved = ["#include <x.h>", "", "{", "    other();", "}", ""] + TWO_FUNCS
+    assert anchors.resolve_injection(moved, above, below)["index"] == 14
+
+
+def test_form_feed_doesnt_shift_lines():
+    assert anchors.source_lines("a\f\r\nb\nc") == ["a\f", "b", "c"]
+
+
+def test_at_index_sets_anchors_from_the_source(client):
+    pid = _new_project(client)
+    r = client.post(f"/api/injection/projects/{pid}/injections",
+                    json={"src_file_path": "src/main.c", "at_index": 2,
+                          "injected_code": "CHECK();"}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    hook = client.get(f"/api/injection/projects/{pid}/injections", headers=AUTH)\
+        .json()["injections"][0]
+    assert hook["resolved_index"] == 2 and hook["confidence"] == 4
+
+
+# -- helper destination --------------------------------------------------
+def test_import_puts_files_in_the_chosen_folder(client):
+    pid = _new_project(client)
+    body = {"files": [{"rel_path": "harness.c", "content": "void h(void){}"}],
+            "dest": "src/tests/"}
+    client.post(f"/api/injection/projects/{pid}/import", json=body, headers=AUTH)
+    files = client.get(f"/api/injection/projects/{pid}/files", headers=AUTH).json()
+    assert [f["rel_path"] for f in files["files"]] == ["src/tests/harness.c"]
+
+
+def test_import_preview_flags_a_production_file_and_stores_nothing(client):
+    pid = _new_project(client)
+    body = {"files": [{"rel_path": "main.c", "content": "x"},
+                      {"rel_path": "new.c", "content": "y"}],
+            "dest": "src", "preview": True}
+    r = client.post(f"/api/injection/projects/{pid}/import", json=body, headers=AUTH)
+    assert r.json()["files"] == [
+        {"rel_path": "src/main.c", "replaces_source": True},
+        {"rel_path": "src/new.c", "replaces_source": False},
+    ]
+    assert client.get(f"/api/injection/projects/{pid}/files", headers=AUTH)\
+        .json()["files"] == []
+
+
+def test_import_refuses_a_destination_outside_the_source(client):
+    pid = _new_project(client)
+    body = {"files": [{"rel_path": "a.c", "content": "x"}], "dest": "../up"}
+    r = client.post(f"/api/injection/projects/{pid}/import", json=body, headers=AUTH)
+    assert r.status_code == 409
+
+
+def test_helper_replacing_a_hooked_file_is_reported(client, tmp_path):
+    pid = _new_project(client)
+    iid = _add_hook(client, pid)
+    client.post(f"/api/injection/projects/{pid}/import",
+                json={"files": [{"rel_path": "src/main.c", "content": "stub"}]},
+                headers=AUTH)
+    r = client.post(f"/api/injection/projects/{pid}/export",
+                    json={"mode": "modified", "out_dir": str(tmp_path / "o"),
+                          "continue_anyway": True}, headers=AUTH)
+    assert {"src_file_path": "src/main.c", "injection_id": iid} in r.json()["conflicts"]
+
+
+# -- function search -----------------------------------------------------
+def test_source_functions_lists_name_file_and_line(client):
+    r = client.get("/api/injection/source/functions", headers=AUTH)
+    assert {"name": "main", "rel_path": "src/main.c", "line": 1} in r.json()["functions"]
+
+
+# -- build settings ------------------------------------------------------
+def test_cmd_gets_quoted_commands_verbatim_on_windows(monkeypatch):
+    from Application_Logic import Logic_Test_Builds as tb
+    argv = tb.build_argv("cmd", '"C:\\my proj\\make.bat" 0', "", "")
+    assert tb.popen_args(argv) is argv
+    monkeypatch.setattr(tb.sys, "platform", "win32")
+    assert tb.popen_args(argv) == 'cmd.exe /s /c ""C:\\my proj\\make.bat" 0"'
+    assert tb.popen_args(tb.build_argv("bash", "make", "", "")) == ["bash", "-lc", "make"]
+    assert tb.default_terminal() == "cmd"
+
+
+def test_build_runs_command_in_the_working_folder(client, tmp_path):
+    (tmp_path / "make").write_text("echo ran-$1-in-$(pwd)\n")
+    (tmp_path / "make").chmod(0o755)
+    from Application_Logic import Logic_Test_Builds as tb
+    lines = []
+    code = tb.run_command(tb.build_argv("bash", "./make 0", str(tmp_path), ""),
+                          str(tmp_path), "bash", lines.append, __import__("threading").Event())
+    assert code == 0 and lines[0].startswith("ran-0-in-")
+
+
+def test_new_test_build_starts_from_the_project_settings(client):
+    pid = _new_project(client)
+    client.post("/api/injection/settings",
+                json={"build_command": "make 0", "build_cwd": "/proj/make",
+                      "terminal": "cmd", "source_path": "/proj/src"}, headers=AUTH)
+    r = client.post("/api/test-builds", json={"name": "Wd", "test_project_id": pid},
+                    headers=AUTH)
+    assert r.status_code == 200, r.text
+    made = r.json()
+    assert (made["build_command"], made["build_cwd"], made["terminal"],
+            made["source_dir"]) == ("make 0", "/proj/make", "cmd", "/proj/src")

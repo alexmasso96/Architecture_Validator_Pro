@@ -8,11 +8,16 @@ and below the splice point. This module re-finds that splice point as the source
 shifts underneath, and shifts a hook up/down while keeping it inside the target
 function's braces.
 
+A hook's anchors hold up to ANCHOR_CONTEXT lines of code on each side, because a
+single line such as ``{`` or ``}`` appears all over a file. Hooks saved before
+that hold one line each and still resolve the same way.
+
 Confidence is reported out of 4:
-  * 4/4 — both anchors found, in order (exact splice point).
-  * 3/4 — only one anchor found (we infer the point from that single side).
-  * 0/4 — neither anchor found, or the anchors disagree → a *conflict*. The UI
-    renders a "+line" placeholder the user can reposition by hand.
+  * 4/4 — the lines on both sides match at one place in the file.
+  * 3/4 — only one side matches, or several places match equally well, so the
+    point is inferred. The UI shows this as fuzzy.
+  * 0/4 — neither side matches → a *conflict*. The UI renders a "+line"
+    placeholder the user can reposition by hand.
 
 The DB row (``test_code_injections``) and ``Logic_Database`` own persistence;
 this module is pure logic so it stays unit-testable without a project file.
@@ -25,11 +30,21 @@ from typing import List, Optional, Tuple
 # Confidence scores (out of CONFIDENCE_MAX). The UI treats anything below
 # CONFIDENCE_OK as a conflict.
 CONFIDENCE_MAX = 4
-CONFIDENCE_EXACT = 4   # both anchors, in order
-CONFIDENCE_SINGLE = 3  # one anchor only
+CONFIDENCE_EXACT = 4   # both sides, at one place only
+CONFIDENCE_SINGLE = 3  # one side only, or several equal places
 CONFIDENCE_NONE = 0    # conflict
 
+# Lines of code kept on each side of a hook. Blank and comment lines don't count.
+ANCHOR_CONTEXT = 3
+
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def source_lines(text: str) -> List[str]:
+    """Splits text the way the editor does, so its line numbers match ours.
+    ``str.splitlines`` also breaks on form feeds, which old C files can hold."""
+    return _LINE_BREAK.split(text)
 
 
 def clean_line(line: str) -> str:
@@ -48,15 +63,31 @@ def clean_line(line: str) -> str:
     return s.strip()
 
 
-def _find_clean(file_lines: List[str], target: str, start: int = 0) -> int:
-    """Index of the first line at/after ``start`` whose cleaned text equals
-    ``target`` (already cleaned). -1 if not found or ``target`` is empty."""
-    if not target:
-        return -1
-    for i in range(start, len(file_lines)):
-        if clean_line(file_lines[i]) == target:
-            return i
-    return -1
+def anchor_context(file_lines: List[str], index: int) -> Tuple[str, str]:
+    """The ``(line_above_code, line_below_code)`` for a splice at ``index``."""
+    def take(order) -> List[str]:
+        picked, code = [], 0
+        for i in order:
+            picked.append(file_lines[i])
+            code += 1 if clean_line(file_lines[i]) else 0
+            if code == ANCHOR_CONTEXT:
+                break
+        return picked
+
+    above = take(range(index - 1, -1, -1))
+    below = take(range(index, len(file_lines)))
+    return "\n".join(reversed(above)), "\n".join(below)
+
+
+def _anchor_side(anchor: str, reverse: bool) -> Tuple[List[str], int]:
+    """Cleaned code lines of an anchor, nearest the hook first, and how many blank
+    or comment lines sit between the nearest of them and the hook."""
+    cleaned = [clean_line(line) for line in source_lines(anchor or "")]
+    if reverse:
+        cleaned.reverse()
+    code = [line for line in cleaned if line]
+    gap = cleaned.index(code[0]) if code else 0
+    return code, gap
 
 
 def resolve_injection(file_lines: List[str], line_above: str,
@@ -67,31 +98,50 @@ def resolve_injection(file_lines: List[str], line_above: str,
     (the number of existing lines above it), or ``None`` on a conflict.
     ``confidence`` is out of :data:`CONFIDENCE_MAX`. ``anchor`` is one of
     ``"both" | "above" | "below" | "none"`` describing what matched.
+
+    Every gap between two lines of code is scored by how many anchor lines match
+    around it, so the two sides must meet at one place. Taking each side's first
+    match on its own puts a hook after the file's first ``{``.
     """
-    above = clean_line(line_above)
-    below = clean_line(line_below)
+    above, gap_above = _anchor_side(line_above, reverse=True)
+    below, gap_below = _anchor_side(line_below, reverse=False)
+    code = [(i, text) for i, text in enumerate(clean_line(l) for l in file_lines) if text]
 
-    above_idx = _find_clean(file_lines, above) if above else -1
-    # Prefer a below-anchor that comes after the above-anchor (keeps the pair in
-    # order even when the same text appears more than once).
-    below_idx = -1
-    if below:
-        search_from = above_idx + 1 if above_idx != -1 else 0
-        below_idx = _find_clean(file_lines, below, search_from)
-        if below_idx == -1 and above_idx != -1:
-            below_idx = _find_clean(file_lines, below)  # fall back to any match
+    def matched(start: int, step: int, wanted: List[str]) -> int:
+        count = 0
+        for text in wanted:
+            at = start + step * count
+            if not 0 <= at < len(code) or code[at][1] != text:
+                break
+            count += 1
+        return count
 
-    if above_idx != -1 and below_idx != -1 and above_idx < below_idx:
-        # Both anchors, in order — splice right after the above-anchor.
-        return {"index": above_idx + 1, "confidence": CONFIDENCE_EXACT,
-                "anchor": "both"}
-    if above_idx != -1:
-        return {"index": above_idx + 1, "confidence": CONFIDENCE_SINGLE,
-                "anchor": "above"}
-    if below_idx != -1:
-        return {"index": below_idx, "confidence": CONFIDENCE_SINGLE,
-                "anchor": "below"}
-    return {"index": None, "confidence": CONFIDENCE_NONE, "anchor": "none"}
+    best, ties, best_rank = None, 0, (0, False)
+    for gap in range(len(code) + 1):
+        up = matched(gap - 1, -1, above)
+        down = matched(gap, 1, below)
+        rank = (up + down, bool(up and down))
+        if rank > best_rank:
+            best, ties, best_rank = (gap, up, down), 1, rank
+        elif rank == best_rank and best is not None:
+            ties += 1
+    if best is None:
+        return {"index": None, "confidence": CONFIDENCE_NONE, "anchor": "none"}
+
+    gap, up, down = best
+    first = code[gap - 1][0] + 1 if gap > 0 else 0
+    last = code[gap][0] if gap < len(code) else len(file_lines)
+    if up:
+        index = min(first + gap_above, last)
+    else:
+        index = max(last - gap_below, first)
+    if up and down:
+        anchor = "both"
+    else:
+        anchor = "above" if up else "below"
+    exact = bool(up or not above) and bool(down or not below) and ties == 1
+    return {"index": index, "anchor": anchor,
+            "confidence": CONFIDENCE_EXACT if exact else CONFIDENCE_SINGLE}
 
 
 def resolve_injection_index(file_lines: List[str], line_above: str,
@@ -165,8 +215,7 @@ def shift_injection(file_lines: List[str], injection_id: int,
         return {"ok": False,
                 "reason": "Cannot move the block outside the function body."}
 
-    new_above = file_lines[new_index - 1] if new_index - 1 >= 0 else ""
-    new_below = file_lines[new_index] if new_index < n else ""
+    new_above, new_below = anchor_context(file_lines, new_index)
     new_offset = int(inj.get("offset_lines") or 0) + (-1 if direction == "up" else 1)
     db.update_injection_anchors(injection_id, new_above, new_below,
                                 offset_lines=new_offset)
@@ -181,8 +230,7 @@ def apply_injections(file_text: str, injections: List[dict]) -> Tuple[str, List[
     confidence, applied}``. Insertions are applied bottom-up so earlier indices
     stay valid, and conflicts (confidence 0) are skipped and reported.
     """
-    lines = file_text.splitlines()
-    keep_trailing_nl = file_text.endswith("\n")
+    lines = source_lines(file_text)
 
     resolved = []
     for inj in injections:
@@ -198,15 +246,13 @@ def apply_injections(file_text: str, injections: List[dict]) -> Tuple[str, List[
         idx = r["index"]
         applied = False
         if idx is not None:
-            snippet = (inj.get("injected_code") or "").splitlines()
+            snippet = source_lines(inj.get("injected_code") or "")
             lines[idx:idx] = snippet
             applied = True
         results.append({"injection_id": inj.get("id"), "index": idx,
                         "confidence": r["confidence"], "applied": applied})
 
     new_text = "\n".join(lines)
-    if keep_trailing_nl and new_text and not new_text.endswith("\n"):
-        new_text += "\n"
     # Preserve the original order of results for the caller.
     order = {inj.get("id"): i for i, inj in enumerate(injections)}
     results.sort(key=lambda d: order.get(d["injection_id"], 0))

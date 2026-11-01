@@ -1086,6 +1086,11 @@ def _extract_typedefs(content: str) -> Set[str]:
 
 # ─── Build Index ─────────────────────────────────────────────────────────────
 
+def file_function_list(content: str, relpath: str) -> List[FunctionInfo]:
+    """The functions defined in one file, without building a whole index."""
+    return _extract_functions(content, relpath, set())
+
+
 def build_index(source) -> CodeIndex:
     """
     Build a complete code index for any C/C++ software project.

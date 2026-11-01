@@ -126,7 +126,8 @@ def create_build(body: BuildBody, state: AppState = Depends(get_state),
             raise ProjectError(f"This release already has a test build called {name}.")
         if not any(p["id"] == body.test_project_id for p in db.list_test_projects()):
             raise ProjectError("Choose a test project for this build.")
-        build_id = db.create_test_build(rid, name, body.test_project_id, **_settings(body))
+        settings = {**tb.build_defaults(db), **_settings(body)}
+        build_id = db.create_test_build(rid, name, body.test_project_id, **settings)
         bus.publish("db-changed", {"reason": "test-build-created", "id": build_id})
         return db.get_test_build(build_id)
     return _guard(go)

@@ -8,6 +8,8 @@ import { persistKey, removePersistedKey } from "./prefs";
 const ICON_LABELS_KEY = "arch.ui.iconLabels";
 const FILE_EXPLORER_KEY = "arch.ui.fileExplorer";
 const CHANGED_EVENT = "arch-settings-changed";
+// Sent after Preferences → Paths saves, for views that show those build settings.
+export const BUILD_SETTINGS_EVENT = "arch-build-settings-changed";
 
 export type FileExplorerMode = "custom" | "system";
 

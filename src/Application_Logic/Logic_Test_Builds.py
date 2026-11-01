@@ -130,6 +130,9 @@ def render_hooked_files(db, provider, test_project_id: int,
         text = db.read_test_project_file(test_project_id, f["rel_path"])
         if text is not None:
             files[f["rel_path"]] = text
+            # The helper replaces the whole file, so that file's hooks are lost.
+            conflicts.extend({"src_file_path": f["rel_path"], "injection_id": h["id"]}
+                             for h in by_file.get(f["rel_path"], ()))
     return files, conflicts
 
 
@@ -453,6 +456,36 @@ def preflight(db, store: BinaryStore, build_ids: list, overridden_releases: tupl
 # ----------------------------------------------------------------------
 # Commands
 # ----------------------------------------------------------------------
+def default_terminal() -> str:
+    return "cmd" if sys.platform == "win32" else "bash"
+
+
+def build_folder(path: str) -> str:
+    """Where a build runs. A make script's path means the folder it's in, the
+    place a user would open a terminal to run it."""
+    return os.path.dirname(path) if os.path.isfile(path) else path
+
+
+def stored_build_folder(db) -> str:
+    """The project's build folder. Older projects hold a make script's path in
+    ``inject_make_script`` instead."""
+    path = db.get_meta("inject_build_cwd", "") or ""
+    if not path:
+        path = os.path.dirname(db.get_meta("inject_make_script", "") or "")
+    return build_folder(path)
+
+
+def build_defaults(db) -> dict:
+    """The project's build settings (Preferences → Paths), as a new build's start."""
+    return {
+        "terminal": db.get_meta("inject_terminal", "") or default_terminal(),
+        "wsl_distro": db.get_meta("inject_wsl_distro", "") or "",
+        "build_command": db.get_meta("inject_build_command", "") or "",
+        "build_cwd": stored_build_folder(db),
+        "source_dir": db.get_meta("inject_source_path", "") or "",
+    }
+
+
 def build_argv(terminal: str, command: str, cwd: str, distro: str) -> list:
     """Construct the platform/terminal-appropriate argv for ``command``."""
     if terminal == "cmd":
@@ -468,6 +501,31 @@ def build_argv(terminal: str, command: str, cwd: str, distro: str) -> list:
         return argv
     # bash (default)
     return ["bash", "-lc", command]
+
+
+def terminal_window_argv(terminal: str, cwd: str, distro: str) -> list:
+    """Opens an empty terminal window for the user to type in, unlike
+    :func:`build_argv`, which runs one command and captures its output."""
+    if sys.platform == "darwin":
+        return ["open", "-a", "Terminal", cwd]
+    if sys.platform != "win32":
+        return ["x-terminal-emulator"]
+    if terminal == "powershell":
+        return ["powershell.exe", "-NoExit"]
+    if terminal == "bash":
+        return ["bash.exe"]
+    if terminal == "wsl":
+        return ["wsl.exe", *(["-d", distro] if distro else []), "--cd", cwd]
+    return ["cmd.exe"]
+
+
+def popen_args(argv: list):
+    """What to hand ``Popen``. cmd.exe reads its command line itself, so a command
+    with quotes in it must reach it as written: list quoting would turn them into
+    ``\\"``, which cmd.exe doesn't understand."""
+    if sys.platform == "win32" and argv[0] == "cmd.exe":
+        return f'cmd.exe /s /c "{argv[2]}"'
+    return argv
 
 
 def _terminate_tree(proc: subprocess.Popen) -> None:
@@ -489,8 +547,9 @@ def run_command(argv: list, cwd: Optional[str], terminal: str,
     kwargs = {} if sys.platform == "win32" else {"start_new_session": True}
     try:
         proc = subprocess.Popen(
-            argv, cwd=popen_cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, encoding="utf-8", errors="replace", **kwargs)
+            popen_args(argv), cwd=popen_cwd, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1, encoding="utf-8",
+            errors="replace", **kwargs)
     except (OSError, ValueError) as e:
         on_line(f"Failed to launch: {e}")
         return -1
