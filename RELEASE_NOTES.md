@@ -1,3 +1,21 @@
+# v3.2.1 — Sync Worker fixes for Windows, clearer progress, update check
+
+## 🪟 Sync Worker window
+- **The window opens from the tray on Windows.** It now does the same Windows start-up as the app and has its own WebView2 profile.
+- **Opening it twice brings the open window forward,** and a window that crashed can't stop the next one from opening.
+- **The worker and its window keep log files,** `sync-worker.log` and `sync-window.log` in the app's `sync` data folder, so a failure can be traced.
+
+## 🔄 Clearer progress for shared projects
+- **Adding a project shows every step,** and if it fails, you see why. Before, some failures showed nothing at all.
+- **Sharing the open project keeps you in it.** A progress card shows each step, the app no longer drops back to the first window, and a failed share leaves your session as it was.
+- **Opening a shared project for the first time shows its progress,** including on the start screen.
+- **The tray icon turns while data is moving,** and so does the sync icon in the status bar.
+- **Setting up a shared project is lighter on the share,** with one write where there used to be about a hundred.
+
+## 🔔 Update check
+- **The pill can't stay on Checking.** The check uses the repository's current address, has a time limit, and tries once more if it fails.
+- **If the check fails, hover over the pill to see why.**
+
 # v3.2.0 — Test Builds, shared projects on a NAS, Sync Worker
 
 ## 🔨 New: Test Builds
@@ -18,30 +36,3 @@
 - **A wrong clock on another PC can no longer free a lock that's in use.**
 - **A heartbeat can no longer leave a half-written lock,** which another session could have treated as free.
 - **A lock left behind by a crash is free after 10 minutes of silence.** With the Sync Worker running, that needs no waiting in the app.
-
-# v3.1.1 — Parameter port tests, compiler-verified variable use, no size limits
-
-## 🔌 New: parameter port tests
-- **Test ports that are a parameter, not a function.** Put `required` or
-  `provided` in a Variable Search column's title and bind a Test column to its
-  Match column. Required values must come into the function, as a parameter or a
-  read; provided values must go out, returned, written or through an output
-  pointer. Helpers the function calls count too.
-- **Separate match threshold** for parameters (70%), because generated names rarely
-  match exactly. In the CLI: `parameter_columns` and `min_parameter_score`.
-- **Object files show variable use.** A variable hidden behind a macro or used from
-  assembly now passes when the compiler's relocations show the function references
-  it, marked *direction not confirmed* because a relocation can't tell a read from
-  a write. Parameter tests also run with object files and no source. Import object
-  files again to get this.
-
-## 📏 No more size limits in the source analysis
-- **Functions over 5000 lines are no longer dropped.** They disappeared from the
-  Code Map with all their calls, which matters for generated step functions.
-- **No limit on the variables per function.** The Code Map also records `++`/`--`
-  and plain global writes as writes, and sees `return g_value;`.
-- Rebuild the Code Map to get this.
-
-## 🐛 Fixed (ARM Thumb objects)
-- **A call in the first instruction of a Thumb function** was credited to the
-  function before it, so Cortex-M object files could verify the wrong call.
