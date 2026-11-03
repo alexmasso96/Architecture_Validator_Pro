@@ -53,15 +53,21 @@ SYNC_NOW = "sync.now"
 POLL_SECONDS = 30
 LOOP_SECONDS = 2
 HOLD_WAIT_SECONDS = 5
+# "Sync now" looks busy at least this long, so the user sees that it checked.
+MIN_CHECK_SECONDS = 2.5
 
 STATE_SYNCED = "synced"
 STATE_PULLING = "pulling"
 STATE_PUSHING = "pushing"
 STATE_COPYING = "copying"
-BUSY_STATES = (STATE_PULLING, STATE_PUSHING, STATE_COPYING)
+STATE_CHECKING = "checking"
+BUSY_STATES = (STATE_PULLING, STATE_PUSHING, STATE_COPYING, STATE_CHECKING)
 STATE_OFFLINE = "offline"
 STATE_CONFLICT = "conflict"
 STATE_BLOCKED = "blocked"
+
+NO_CHANGES = "No new changes"
+SYNCED_NOW = "Changes synced"
 
 
 # ----------------------------------------------------------------------
@@ -158,14 +164,23 @@ def _alive(pid: int) -> bool:
 # ----------------------------------------------------------------------
 class SyncWorker:
     def __init__(self, store: SyncStore, username: str, poll_seconds: float = POLL_SECONDS,
-                 hold_wait: float = HOLD_WAIT_SECONDS) -> None:
+                 hold_wait: float = HOLD_WAIT_SECONDS,
+                 min_check: float = MIN_CHECK_SECONDS) -> None:
         self.store = store
         self.username = username
         self.poll_seconds = poll_seconds
         self.hold_wait = hold_wait
+        self.min_check = min_check
         self._next_poll: dict = {}
         self._blocked: set = set()
         self._active = 0
+        self._wake = threading.Event()
+        # During "Sync now", the synced statuses wait until it has looked busy
+        # long enough. Keyed by project, with what each one moved.
+        self._held: Optional[dict] = None
+        self._moved: set = set()
+        # Told the result of a "Sync now", such as NO_CHANGES. The tray shows it.
+        self.on_checked = None
 
     @property
     def active(self) -> bool:
@@ -173,12 +188,22 @@ class SyncWorker:
         return self._active > 0
 
     @contextmanager
-    def _working(self):
+    def _working(self, entry: Optional[dict] = None):
         self._active += 1
+        if entry is not None:
+            self._moved.add(entry["project_uuid"])
         try:
             yield
         finally:
             self._active -= 1
+
+    def wake(self) -> None:
+        """Starts the next pass now instead of at the end of the loop's wait."""
+        self._wake.set()
+
+    def wait(self, seconds: float) -> None:
+        self._wake.wait(seconds)
+        self._wake.clear()
 
     def tick(self, force: bool = False) -> None:
         """One pass over every tracked project. Problems stay with their project."""
@@ -187,20 +212,59 @@ class SyncWorker:
             # "Sync now" is also how a blocked project gets another try.
             remove_file(requested)
             self._blocked.clear()
-            force = True
+            self._sync_now()
+            return
         for entry in self.store.tracked():
+            self._tick_entry(entry, force)
+
+    def _sync_now(self) -> None:
+        """A pass the user asked for. It always shows that it looked: every
+        project says it's checking and the tray turns for a moment, then each
+        says what it found, and ``on_checked`` hears the overall result."""
+        tracked = self.store.tracked()
+        started = time.monotonic()
+        before = {e["project_uuid"]: self.store.status(e) for e in tracked}
+        with self._working():
+            for entry in tracked:
+                self._set_status(entry, STATE_CHECKING, "Checking for changes")
+            self._held, self._moved = {}, set()
             try:
-                self._tick_project(entry, force)
-            except engine.SyncBlocked as e:
-                self._blocked.add(entry["project_uuid"])
-                self._set_status(entry, STATE_BLOCKED, str(e))
-            except engine.SyncError as e:
-                self._set_status(entry, STATE_OFFLINE, str(e))
-            except (OSError, sqlite3.Error) as e:
-                logger.warning("Sync of %s failed", entry["name"], exc_info=True)
-                self._set_status(entry, STATE_OFFLINE, str(e))
+                for entry in tracked:
+                    self._tick_entry(entry, force=True)
+                rest = self.min_check - (time.monotonic() - started)
+                if rest > 0:
+                    time.sleep(rest)
+            finally:
+                held, self._held = self._held, None
+            for project, (entry, extra) in held.items():
+                self._set_status(entry, STATE_SYNCED,
+                                 SYNCED_NOW if project in self._moved else NO_CHANGES, **extra)
+            for entry in tracked:
+                # A project the pass couldn't look at says what it said before.
+                if self.store.status(entry).get("state") == STATE_CHECKING:
+                    write_json(self.store.control(entry, STATUS_FILE),
+                               before[entry["project_uuid"]])
+        if tracked and self.on_checked is not None and len(held) == len(tracked):
+            self.on_checked(SYNCED_NOW if self._moved else NO_CHANGES)
+
+    def _tick_entry(self, entry: dict, force: bool) -> None:
+        try:
+            self._tick_project(entry, force)
+        except engine.SyncBlocked as e:
+            self._blocked.add(entry["project_uuid"])
+            self._set_status(entry, STATE_BLOCKED, str(e))
+        except engine.SyncError as e:
+            self._set_status(entry, STATE_OFFLINE, str(e))
+        except (OSError, sqlite3.Error) as e:
+            logger.warning("Sync of %s failed", entry["name"], exc_info=True)
+            self._set_status(entry, STATE_OFFLINE, str(e))
 
     def _set_status(self, entry: dict, state: str, message: str = "", **extra) -> None:
+        if self._held is not None:
+            if state == STATE_SYNCED:
+                self._held[entry["project_uuid"]] = (entry, extra)
+                return
+            self._held.pop(entry["project_uuid"], None)    # a later problem wins
         current = self.store.status(entry)
         status = {"state": state, "message": message,
                   "last_synced": current.get("last_synced", ""),
@@ -272,13 +336,13 @@ class SyncWorker:
             self._set_status(entry, STATE_COPYING, "Making your local copy",
                              percent=percent)
 
-        with self._working():
+        with self._working(entry):
             progress(0)
             engine.clone(entry["remote"], entry["local"], only_if_missing=True,
                          progress=progress)
 
     def _pull(self, entry: dict, manifest: dict) -> None:
-        with self._working():
+        with self._working(entry):
             self._apply_pull(entry, manifest)
 
     def _apply_pull(self, entry: dict, manifest: dict) -> None:
@@ -301,7 +365,7 @@ class SyncWorker:
         self._set_status(entry, STATE_SYNCED, revision=report["revision"])
 
     def _push(self, entry: dict, request: dict) -> None:
-        with self._working():
+        with self._working(entry):
             self._publish(entry, request)
 
     def _publish(self, entry: dict, request: dict) -> None:
@@ -390,7 +454,7 @@ def run_until(worker: SyncWorker, stop: threading.Event) -> None:
             worker.tick()
         except Exception:  # noqa: BLE001 — the applet outlives any one failure
             logger.exception("Sync pass failed")
-        stop.wait(LOOP_SECONDS)
+        worker.wait(LOOP_SECONDS)
 
 
 def worker_running(store: SyncStore) -> bool:

@@ -65,7 +65,7 @@ def _user(tmp, name, remote):
     store = sw.SyncStore(str(tmp / name))
     entry = store.add(remote, name)
     engine.clone(remote, entry["local"])
-    return store, entry, sw.SyncWorker(store, name, poll_seconds=0, hold_wait=0.1)
+    return store, entry, sw.SyncWorker(store, name, poll_seconds=0, hold_wait=0.1, min_check=0)
 
 
 def test_tracking_a_database_copied_there_by_hand(tmp_path):
@@ -386,6 +386,64 @@ def test_sync_now_gives_a_blocked_project_another_try(shared, tmp_path):
     assert store.status(entry)["state"] == sw.STATE_SYNCED
 
 
+def test_sync_now_with_nothing_new_still_shows_it_checked(shared, tmp_path, monkeypatch):
+    store, entry, worker = _user(tmp_path, "alex", shared)
+    worker.tick(force=True)
+    worker.min_check = 0.3
+    results, seen = [], []
+    worker.on_checked = results.append
+    real_poll = worker._poll
+
+    def poll(e):
+        seen.append((worker.active, store.status(e)["state"]))
+        real_poll(e)
+    monkeypatch.setattr(worker, "_poll", poll)
+
+    sw.request_sync_now(store)
+    started = time.monotonic()
+    worker.tick()
+    # The tray turns and the project says it's checking, for long enough to notice.
+    assert seen == [(True, sw.STATE_CHECKING)]
+    assert time.monotonic() - started >= 0.3
+    assert not worker.active
+    assert store.status(entry)["state"] == sw.STATE_SYNCED
+    assert store.status(entry)["message"] == sw.NO_CHANGES
+    assert results == [sw.NO_CHANGES]
+
+
+def test_sync_now_that_receives_changes_says_so(shared, tmp_path):
+    store_a, entry_a, worker_a = _user(tmp_path, "alex", shared)
+    store_b, entry_b, worker_b = _user(tmp_path, "bo", shared)
+    token = "t1"
+    assert FileLockManager.acquire_lock(shared, token)[0]
+    _set_prompt(entry_a["local"], "new text")
+    sw.write_json(store_a.control(entry_a, sw.PUSH_REQUEST), {"token": token})
+    worker_a.tick()
+    FileLockManager.release_lock(shared, token)
+
+    results = []
+    worker_b.on_checked = results.append
+    sw.request_sync_now(store_b)
+    worker_b.tick()
+    assert _prompt(entry_b["local"]) == "new text"
+    assert store_b.status(entry_b)["message"] == sw.SYNCED_NOW
+    assert results == [sw.SYNCED_NOW]
+
+
+def test_sync_now_problem_isnt_covered_by_the_wait(shared, tmp_path):
+    store, entry, worker = _user(tmp_path, "alex", shared)
+    worker.tick(force=True)
+    results = []
+    worker.on_checked = results.append
+    os.rename(shared, shared + ".gone")
+    os.rename(engine.manifest_path(shared), engine.manifest_path(shared) + ".gone")
+    sw.request_sync_now(store)
+    worker.tick()
+    assert store.status(entry)["state"] == sw.STATE_SYNCED
+    assert store.status(entry)["message"] != sw.NO_CHANGES
+    assert results == []    # no "no changes" when it couldn't look
+
+
 def test_only_one_worker_runs_per_user(tmp_path):
     store = sw.SyncStore(str(tmp_path / "w"))
     assert sw.claim_worker(store) is True
@@ -433,7 +491,7 @@ def app_env(tmp_path, monkeypatch, shared):
     with TestClient(app) as c:
         state = app.state.appstate
         yield c, state, shared, sw.SyncWorker(state.sync_store(), "alex", poll_seconds=0,
-                                              hold_wait=1)
+                                              hold_wait=1, min_check=0)
 
 
 def _open(c, path, mode="exclusive"):

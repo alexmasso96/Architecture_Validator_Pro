@@ -65,6 +65,7 @@ def run(store: SyncStore, stop: threading.Event, worker) -> None:
 
     def sync_now(*_args) -> None:
         request_sync_now(store)
+        worker.wake()
 
     def toggle_login(*_args) -> None:
         if autostart.is_enabled():
@@ -74,6 +75,7 @@ def run(store: SyncStore, stop: threading.Event, worker) -> None:
 
     def quit_applet(tray, *_args) -> None:
         stop.set()
+        worker.wake()
         tray.stop()
 
     summary = summarize(store)
@@ -89,6 +91,15 @@ def run(store: SyncStore, stop: threading.Event, worker) -> None:
     )
     tray = pystray.Icon("architecture-validator-sync", icon_image(summary["attention"]),
                         "Architecture Validator Sync", menu)
+
+    def checked(result: str) -> None:
+        # "Sync now" says what it found, even when that's nothing.
+        try:
+            on_main_thread(tray.notify, result, "Sync Worker")
+        except Exception:  # noqa: BLE001 — a desktop without notifications
+            logger.info("Sync now: %s", result)
+
+    worker.on_checked = checked
 
     def show(icon) -> None:
         icon.visible = True
@@ -107,13 +118,15 @@ def run(store: SyncStore, stop: threading.Event, worker) -> None:
         frames = spin_frames(rest)
         frame = 0
         spin_until = next_summary = 0.0
-        was_spinning = False
+        was_spinning = was_active = False
         while not stop.wait(FRAME_SECONDS):
             now = time.monotonic()
-            if worker.active:
+            active = worker.active
+            if active:
                 spin_until = now + MIN_SPIN_SECONDS
             spinning = now < spin_until
-            if now >= next_summary or worker.active != was_spinning:
+            if now >= next_summary or active != was_active:
+                was_active = active
                 next_summary = now + REFRESH_SECONDS
                 current = summarize(store)
                 if current["attention"] != attention:

@@ -98,6 +98,8 @@ class SyncWindowApi:
 
     def sync_now(self) -> None:
         request_sync_now(self._store)
+        if self._start_worker is not None and not worker_running(self._store):
+            self._start_worker()
 
     def set_start_at_login(self, enabled: bool) -> bool:
         if enabled:
@@ -148,11 +150,11 @@ td{padding:5px 14px;border-bottom:1px solid var(--line)}
 <div id="op" role="status"></div>
 <div id="scroll"></div></main>
 <script>
-let selected=null,rows=[],timer;
+let selected=null,rows=[],timer,checking=null,flash=null;
 const api=()=>window.pywebview.api;
 const el=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e};
-const STATE={synced:"In sync",pulling:"Receiving changes",pushing:"Publishing",copying:"Copying",offline:"Offline",conflict:"Conflict",blocked:"Sync stopped"};
-const BUSY=["pulling","pushing","copying"];
+const STATE={synced:"In sync",checking:"Checking",pulling:"Receiving changes",pushing:"Publishing",copying:"Copying",offline:"Offline",conflict:"Conflict",blocked:"Sync stopped"};
+const BUSY=["pulling","pushing","copying","checking"];
 function showOperation(op){
   const box=document.getElementById("op");box.textContent="";
   box.className=op?(op.error?"show bad":"show"):"";
@@ -160,9 +162,24 @@ function showOperation(op){
   if(op.error){
     box.append(el("span","grow",op.error));
     const b=el("button",null,"Dismiss");b.onclick=async()=>{await api().dismiss();refresh()};box.append(b);
+  }else if(op.done){
+    box.append(el("span","grow",op.message));
   }else{
     box.append(el("span","spin"),el("span","grow",op.message+(op.percent!=null?"… "+op.percent+"%":"…")));
   }
+}
+// After "Sync now": a spinner until the worker has looked, then what it found.
+function syncNowOperation(o){
+  if(!checking)return flash&&Date.now()<flash.until?{message:flash.message,done:true}:null;
+  const busy=o.projects.some(p=>BUSY.includes((p.status||{}).state));
+  if(busy)checking.seen=true;
+  if(checking.seen&&!busy){
+    const cur=o.projects.find(p=>p.project_uuid===selected)||o.projects[0];
+    flash={message:((cur&&cur.status)||{}).message||"Sync finished",until:Date.now()+5000};
+    checking=null;return {message:flash.message,done:true};
+  }
+  if(Date.now()-checking.since>20000){checking=null;return {error:"The Sync Worker didn't answer. Is it running?"}}
+  return {message:"Checking for changes"};
 }
 function where(r){return r.release_name?"Release "+r.release_name:r.model_id!=null?"Model "+r.model_id:"Project"}
 function renderRows(){
@@ -184,7 +201,7 @@ async function loadChanges(){
 async function refresh(){
   const o=await api().overview();
   document.getElementById("login").checked=o.start_at_login;
-  showOperation(o.operation);
+  showOperation(o.operation||syncNowOperation(o));
   const list=document.getElementById("list");list.textContent="";
   if(selected&&!o.projects.some(p=>p.project_uuid===selected))selected=null;
   if(!selected&&o.projects.length)selected=o.projects[0].project_uuid;
@@ -205,12 +222,14 @@ async function refresh(){
   document.getElementById("stop").disabled=!cur;
   document.getElementById("now").disabled=!cur;
   await loadChanges();
-  const moving=(o.operation&&!o.operation.error)||o.projects.some(p=>BUSY.includes((p.status||{}).state));
+  const moving=checking||(o.operation&&!o.operation.error)||o.projects.some(p=>BUSY.includes((p.status||{}).state));
   clearTimeout(timer);timer=setTimeout(refresh,moving?500:5000);
 }
 function start(){
   document.getElementById("add").onclick=async()=>{await api().add_database();refresh()};
-  document.getElementById("now").onclick=async()=>{await api().sync_now();setTimeout(refresh,3000)};
+  document.getElementById("now").onclick=async()=>{
+    checking={since:Date.now(),seen:false};flash=null;showOperation({message:"Checking for changes"});
+    await api().sync_now();setTimeout(refresh,300)};
   document.getElementById("stop").onclick=async()=>{await api().stop_tracking(selected);selected=null;refresh()};
   document.getElementById("login").onchange=async e=>{e.target.checked=await api().set_start_at_login(e.target.checked)};
   document.getElementById("filter").onchange=renderRows;
