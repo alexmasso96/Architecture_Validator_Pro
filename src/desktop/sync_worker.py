@@ -1,11 +1,13 @@
 """
-Sync Worker applet (#16): a separate process that doesn't need the app.
+Sync Worker applet (#16): a separate program that doesn't need the app.
 
 It syncs on a background thread and shows a tray icon on the main thread, which
 macOS requires. Without a desktop to show the icon on, it simply keeps syncing.
 The user can add it to their startup apps from its menu, and the app starts it if
-it isn't running. In a frozen build it's the same executable with ``--sync-worker``,
-and its window is ``--sync-window``.
+it isn't running. In a frozen build it's its own executable next to the app's,
+``ArchitectureValidatorSync``, so Task Manager shows it under its own name, and
+its window is the same program with ``--sync-window``. Its entry is
+``desktop/sync_main.py``.
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ if str(SRC) not in sys.path:
 
 FLAG = "--sync-worker"
 WINDOW_FLAG = "--sync-window"
+DETACH_FLAG = "--detach"
+EXE_NAME = "ArchitectureValidatorSync"
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +34,8 @@ _started: list = []
 
 
 def sync_store():
+    from Application_Logic.Logic_App_Data import app_data_dir
     from Application_Logic.Logic_Sync_Worker import SyncStore
-    from backend.routers.prefs import app_data_dir
     return SyncStore(str(app_data_dir() / "sync"))
 
 
@@ -54,6 +58,7 @@ def main() -> None:
     setup_logging(store, "sync-worker")
     if not claim_worker(store):
         return
+    update_login_item()
     stop = threading.Event()
     worker = SyncWorker(store, FileLockManager.get_username())
     thread = threading.Thread(target=run_until, args=(worker, stop),
@@ -68,11 +73,33 @@ def main() -> None:
         stop.wait()
 
 
+def program() -> list:
+    """The Sync Worker's own program: its executable in a frozen build, or else
+    its entry script. A build without that executable falls back to the app's,
+    which still takes the flags."""
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).with_name(EXE_NAME + (".exe" if os.name == "nt" else ""))
+        return [str(exe) if exe.is_file() else sys.executable]
+    return [sys.executable, str(Path(__file__).resolve().with_name("sync_main.py"))]
+
+
 def command(*flags: str) -> list:
     """How to start this applet from anywhere, such as at login."""
-    if getattr(sys, "frozen", False):
-        return [sys.executable, *(flags or (FLAG,))]
-    return [sys.executable, str(Path(__file__).resolve()), *flags]
+    return [*program(), *(flags or (FLAG,))]
+
+
+def update_login_item() -> None:
+    """Points "Start at login" at the worker's own program. A login item made
+    before it had one still starts the app's executable."""
+    from Application_Logic import Logic_Sync_Autostart as autostart
+
+    if not getattr(sys, "frozen", False):
+        return    # A run from source mustn't take over the installed app's login item.
+    try:
+        if autostart.is_enabled():
+            autostart.enable(command())
+    except OSError:
+        logger.warning("Could not update the login item", exc_info=True)
 
 
 def reap_stopped() -> None:
@@ -81,20 +108,20 @@ def reap_stopped() -> None:
     _started[:] = [p for p in _started if p.poll() is None]
 
 
-def start_detached(*flags: str) -> None:
-    """Starts the applet so it keeps running after this process exits."""
+def start_detached(*flags: str, own_group: bool = False) -> None:
+    """Starts the applet so it keeps running after this process exits.
+
+    With ``own_group``, which the app uses, the applet starts itself once more and
+    that first copy exits at once. The applet is then nobody's child, so Task
+    Manager shows it on its own rather than inside the app that started it.
+    """
+    argv = command(*flags)
+    if own_group:
+        argv.append(DETACH_FLAG)
     kwargs = {"start_new_session": True}
     if os.name == "nt":
         kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW
                   | subprocess.DETACHED_PROCESS}
     _started.append(subprocess.Popen(
-        command(*flags), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, **kwargs))
-
-
-if __name__ == "__main__":
-    if WINDOW_FLAG in sys.argv:
-        from desktop import sync_window
-        sync_window.main()
-    else:
-        main()

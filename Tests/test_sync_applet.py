@@ -106,12 +106,87 @@ def test_stopped_worker_no_longer_looks_alive(tmp_path, monkeypatch):
     assert sync_worker._started == []
 
 
-def test_frozen_command_is_the_app_with_the_flag(monkeypatch):
+def _frozen(monkeypatch, folder, with_sync_program=True):
+    suffix = ".exe" if os.name == "nt" else ""
+    app = folder / f"ArchitectureValidator{suffix}"
+    app.write_text("")
+    sync = folder / f"{sync_worker.EXE_NAME}{suffix}"
+    if with_sync_program:
+        sync.write_text("")
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", "/app/ArchitectureValidator")
-    assert sync_worker.command() == ["/app/ArchitectureValidator", "--sync-worker"]
-    assert sync_worker.command(sync_worker.WINDOW_FLAG) == [
-        "/app/ArchitectureValidator", "--sync-window"]
+    monkeypatch.setattr(sys, "executable", str(app))
+    return str(app), str(sync)
+
+
+def test_frozen_command_is_the_workers_own_program(monkeypatch, tmp_path):
+    _app, sync = _frozen(monkeypatch, tmp_path)
+    assert sync_worker.command() == [sync, "--sync-worker"]
+    assert sync_worker.command(sync_worker.WINDOW_FLAG) == [sync, "--sync-window"]
+
+
+def test_frozen_build_without_the_program_falls_back_to_the_app(monkeypatch, tmp_path):
+    app, _sync = _frozen(monkeypatch, tmp_path, with_sync_program=False)
+    assert sync_worker.command() == [app, "--sync-worker"]
+
+
+class _Recorder:
+    def __init__(self, monkeypatch):
+        self.calls = []
+        monkeypatch.setattr(sync_worker, "_started", [])
+        monkeypatch.setattr(sync_worker.subprocess, "Popen",
+                            lambda argv, **_kw: self.calls.append(argv))
+
+
+def test_app_starts_the_worker_outside_its_own_process_tree(monkeypatch):
+    calls = _Recorder(monkeypatch).calls
+    sync_worker.start_detached(own_group=True)
+    sync_worker.start_detached(sync_worker.WINDOW_FLAG)
+    assert calls[0] == sync_worker.command() + [sync_worker.DETACH_FLAG]
+    assert calls[1] == sync_worker.command(sync_worker.WINDOW_FLAG)
+
+
+def test_detach_starts_the_worker_again_without_the_flag(monkeypatch):
+    from desktop import sync_main
+    calls = _Recorder(monkeypatch).calls
+    monkeypatch.setattr(sync_worker, "main", lambda: calls.append("ran here"))
+    sync_main.main([sync_worker.FLAG, sync_worker.DETACH_FLAG])
+    assert calls == [sync_worker.command(sync_worker.FLAG)]
+
+
+def test_old_login_item_on_the_app_hands_over_to_the_worker(monkeypatch, tmp_path):
+    from desktop import sync_main
+    _app, sync = _frozen(monkeypatch, tmp_path)
+    calls = _Recorder(monkeypatch).calls
+    monkeypatch.setattr(sync_worker, "main", lambda: calls.append("ran here"))
+    sync_main.main([sync_worker.FLAG])
+    assert calls == [[sync, sync_worker.FLAG]]
+
+    # The worker's own program runs it.
+    calls.clear()
+    monkeypatch.setattr(sys, "executable", sync)
+    sync_main.main([sync_worker.FLAG])
+    assert calls == ["ran here"]
+
+
+def test_worker_login_item_moves_to_its_own_program(monkeypatch, tmp_path):
+    _app, sync = _frozen(monkeypatch, tmp_path)
+    enabled = []
+    monkeypatch.setattr(autostart, "is_enabled", lambda: True)
+    monkeypatch.setattr(autostart, "enable", enabled.append)
+    sync_worker.update_login_item()
+    assert enabled == [[sync, sync_worker.FLAG]]
+
+
+def test_worker_doesnt_load_the_app():
+    import subprocess
+    heavy = ("fastapi", "uvicorn", "pydantic", "webview", "rapidfuzz", "elftools",
+             "capstone", "rust_elf_parser", "pandas", "openpyxl", "backend")
+    code = ("import sys; sys.argv = ['x']; import desktop.sync_main, desktop.sync_tray; "
+            "from desktop import sync_worker; sync_worker.sync_store(); "
+            f"print(sorted({{m.split('.')[0] for m in sys.modules}} & set({heavy!r})))")
+    out = subprocess.run([sys.executable, "-c", code], cwd=os.path.abspath("src"),
+                         capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "[]"
 
 
 def test_window_lists_projects_and_their_changes_without_the_app(tmp_path):

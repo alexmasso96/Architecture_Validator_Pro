@@ -558,12 +558,11 @@ if __name__ == "__main__":
     # (PyInstaller) bundle; a no-op in a normal interpreter.
     multiprocessing.freeze_support()
 
-    # The frozen app is also the Sync Worker, a separate process that outlives it.
-    if sync_worker.FLAG in sys.argv:
-        sync_worker.main()
-        sys.exit(0)
-    if sync_worker.WINDOW_FLAG in sys.argv:
-        _open_sync_window()
+    # The Sync Worker has its own program now. A login item from before still
+    # starts this one with the worker's flags, so pass them on.
+    if sync_worker.FLAG in sys.argv or sync_worker.WINDOW_FLAG in sys.argv:
+        from desktop import sync_main
+        sync_main.main()
         sys.exit(0)
 
     # Arm crash logging before anything else can fail. A windowed build has no

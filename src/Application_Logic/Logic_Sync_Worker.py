@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 TRACKED_FILE = "tracked.json"
 PID_FILE = "worker.pid"
+CLAIM_FILE = "worker.claim"
 STATUS_FILE = "status.json"
 HOLD_FILE = "hold.json"
 HOLD_ACK = "hold.ack"
@@ -344,11 +345,39 @@ class SyncWorker:
             engine.clone(entry["remote"], entry["local"])
 
 
+_claims: dict = {}
+
+
+def _hold_claim(store: SyncStore) -> bool:
+    """Takes an OS lock that lasts as long as this process. Two workers started
+    at the same moment could both find no PID file, but only one gets this."""
+    path = os.path.join(store.root, CLAIM_FILE)
+    if path in _claims:
+        return True
+    os.makedirs(store.root, exist_ok=True)
+    handle = open(path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    _claims[path] = handle
+    return True
+
+
 def claim_worker(store: SyncStore) -> bool:
     """Makes this process the user's one worker, unless another already is."""
     pid_path = os.path.join(store.root, PID_FILE)
     running = read_json(pid_path)
     if running and running != os.getpid() and _alive(running):
+        return False
+    if not _hold_claim(store):
         return False
     write_json(pid_path, os.getpid())
     return True

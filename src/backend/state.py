@@ -776,7 +776,7 @@ class AppState:
         if worker_running(self.sync_store()):
             return
         try:
-            start_detached()
+            start_detached(own_group=True)
         except OSError:
             logger.warning("Could not start the Sync Worker", exc_info=True)
 

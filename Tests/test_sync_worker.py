@@ -396,6 +396,19 @@ def test_only_one_worker_runs_per_user(tmp_path):
     assert sw.claim_worker(store) is True
 
 
+def test_two_workers_starting_together_cant_both_claim(tmp_path):
+    import subprocess
+    store = sw.SyncStore(str(tmp_path / "w"))
+    assert sw.claim_worker(store) is True
+    # Another process that finds no PID file still loses to this one.
+    os.remove(os.path.join(store.root, sw.PID_FILE))
+    code = ("import sys; from Application_Logic import Logic_Sync_Worker as sw; "
+            f"print(sw.claim_worker(sw.SyncStore({store.root!r})))")
+    out = subprocess.run([sys.executable, "-c", code], cwd=os.path.abspath("src"),
+                         capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "False"
+
+
 def test_summary_stays_quiet_unless_something_needs_the_user(shared, tmp_path):
     store, entry, worker = _user(tmp_path, "alex", shared)
     assert sw.summarize(sw.SyncStore(str(tmp_path / "none"))) == {

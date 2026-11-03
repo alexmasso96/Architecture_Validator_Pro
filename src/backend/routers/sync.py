@@ -63,6 +63,6 @@ def open_worker(state: AppState = Depends(get_state)) -> dict:
         from desktop.sync_worker import WINDOW_FLAG, start_detached
 
         state.ensure_sync_worker()
-        start_detached(WINDOW_FLAG)
+        start_detached(WINDOW_FLAG, own_group=True)
         return {"ok": True}
     return _guard(go)

@@ -16,34 +16,21 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import threading
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+# app_data_dir is still imported from here by the rest of the backend.
+from Application_Logic.Logic_App_Data import app_data_dir, prefs_file  # noqa: F401
 
 from ..security import require_token
 
 router = APIRouter(prefix="/api/prefs", tags=["prefs"],
                    dependencies=[Depends(require_token)])
 
-APP_DIR_NAME = "ArchitectureValidator"
 _lock = threading.Lock()
-
-
-def _store_path() -> Path:
-    """Per-user app-data location for the prefs file (platform-appropriate)."""
-    override = os.environ.get("ARCH_PREFS_FILE")
-    if override:
-        return Path(override)
-    if sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support"
-    elif os.name == "nt":
-        base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
-    return base / APP_DIR_NAME / "prefs.json"
+_store_path = prefs_file
 
 
 def _read() -> dict[str, str]:
@@ -83,11 +70,6 @@ def write_pref(key: str, value: str | None) -> None:
         else:
             data[key] = value
         _write(data)
-
-
-def app_data_dir() -> Path:
-    """This user's app-data folder, for state that belongs to the machine."""
-    return _store_path().parent
 
 
 class PrefPatch(BaseModel):

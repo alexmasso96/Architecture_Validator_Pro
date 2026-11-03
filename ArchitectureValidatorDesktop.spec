@@ -4,6 +4,11 @@
 # This is the only build spec now — the legacy PyQt spec was removed at the
 # Phase 4 cutover when the PyQt UI was deleted.
 #
+# The same folder also holds the Sync Worker's own program,
+# ArchitectureValidatorSync (entry = src/desktop/sync_main.py). It runs all day,
+# so it's built from its own small analysis instead of carrying the whole app,
+# and Task Manager shows it under its own name. Both share the folder's DLLs.
+#
 # Onedir (COLLECT) is deliberate: a onefile build re-extracts every launch,
 # which re-triggers the EDR small-file scanning penalty this whole migration
 # exists to avoid.
@@ -25,6 +30,34 @@ ICON_ICO = os.path.join(ICON_DIR, 'app.ico')
 ICON_ICNS = os.path.join(ICON_DIR, 'app.icns')
 ICON_PNG = os.path.join(ICON_DIR, 'icon_1024.png')
 exe_icon = ICON_ICO if sys.platform == 'win32' else (ICON_ICNS if sys.platform == 'darwin' else None)
+
+PRODUCT_NAME = 'Architecture Validator Pro'
+with open(os.path.join('src', 'frontend', 'package.json'), encoding='utf-8') as _f:
+    APP_VERSION = __import__('json').load(_f)['version']
+
+
+def version_info(exe_name, description):
+    """The Windows version resource. Task Manager shows its FileDescription as the
+    process name, so without it both programs would just be their file names."""
+    if sys.platform != 'win32':
+        return None
+    from PyInstaller.utils.win32.versioninfo import (
+        FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo,
+        VarStruct, VSVersionInfo)
+    numbers = tuple(int(p) for p in APP_VERSION.split('.')[:3]) + (0,)
+    return VSVersionInfo(
+        ffi=FixedFileInfo(filevers=numbers, prodvers=numbers),
+        kids=[
+            StringFileInfo([StringTable('040904B0', [
+                StringStruct('ProductName', PRODUCT_NAME),
+                StringStruct('FileDescription', description),
+                StringStruct('FileVersion', APP_VERSION),
+                StringStruct('ProductVersion', APP_VERSION),
+                StringStruct('InternalName', exe_name),
+                StringStruct('OriginalFilename', f'{exe_name}.exe'),
+            ])]),
+            VarFileInfo([VarStruct('Translation', [1033, 1200])]),
+        ])
 
 # Bundle the built SPA at <bundle>/frontend/dist so backend.static.frontend_dist()
 # finds it under sys._MEIPASS. Run `npm run build` in src/frontend/ BEFORE
@@ -66,13 +99,17 @@ hiddenimports += collect_submodules('pystray')
 # runtime instead of .NET Framework (desktop/main.py:_configure_dotnet_runtime);
 # build such bundles from a venv prepared by scripts/setup_windows_arm64.py so
 # the CoreCLR-compatible WebView2 assemblies are the ones collected here.
+dotnet_datas, dotnet_binaries, dotnet_hiddenimports = [], [], []
 if sys.platform == 'win32':
     for _pkg in ('pythonnet', 'clr_loader'):
         _d, _b, _h = collect_all(_pkg)
-        datas += _d
-        binaries += _b
-        hiddenimports += _h
-    hiddenimports += ['clr']
+        dotnet_datas += _d
+        dotnet_binaries += _b
+        dotnet_hiddenimports += _h
+    dotnet_hiddenimports += ['clr']
+datas += dotnet_datas
+binaries += dotnet_binaries
+hiddenimports += dotnet_hiddenimports
 
 a = Analysis(
     ['src/desktop/main.py'],
@@ -110,6 +147,51 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=exe_icon,
+    version=version_info('ArchitectureValidator', PRODUCT_NAME),
+)
+
+# --- The Sync Worker's program -------------------------------------------------
+# Only the tray, the sync engine and, for its window, pywebview. Application_Logic
+# loads its heavy modules on first use, so they stay out of this one. Its window
+# borrows the Windows set-up in desktop/main.py, whose worker bootstrap names the
+# web server; that only runs in the app, so the server is left out here.
+sync_a = Analysis(
+    ['src/desktop/sync_main.py'],
+    pathex=['.', 'src'],
+    binaries=dotnet_binaries,
+    datas=collect_data_files('webview') + dotnet_datas,
+    hiddenimports=(collect_submodules('pystray') + collect_submodules('webview')
+                   + dotnet_hiddenimports),
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=['PyQt6', 'PyQt6.sip', 'backend.app', 'uvicorn'],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+sync_pyz = PYZ(sync_a.pure, sync_a.zipped_data, cipher=block_cipher)
+
+sync_exe = EXE(
+    sync_pyz,
+    sync_a.scripts,
+    [],
+    exclude_binaries=True,
+    name='ArchitectureValidatorSync',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=console_build,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=exe_icon,
+    version=version_info('ArchitectureValidatorSync', f'{PRODUCT_NAME} Sync'),
 )
 
 coll = COLLECT(
@@ -117,6 +199,10 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
+    sync_exe,
+    sync_a.binaries,
+    sync_a.zipfiles,
+    sync_a.datas,
     strip=False,
     upx=False,
     upx_exclude=[],
