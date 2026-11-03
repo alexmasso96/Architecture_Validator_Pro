@@ -57,6 +57,8 @@ def _provider_view(p) -> dict:
         "models": p.list_models(),
         "kind": "self_hosted" if isinstance(p, providers.SelfHostedProvider) else "cloud",
     }
+    if p.id == "copilot":
+        view["github_host"] = providers.github_host()
     if isinstance(p, providers.SelfHostedProvider):
         ep = p.endpoint()
         view["endpoint"] = {
@@ -169,8 +171,9 @@ def clear_provider_key(provider_id: str) -> dict:
 # GitHub Copilot OAuth device flow.
 #
 # Copilot can't take a pasted API key — the user authorises a device code at
-# github.com/login/device. start() kicks off the flow and a background poller
-# waits for the user to approve; the frontend polls status() until it flips to
+# <host>/login/device, on github.com or a GitHub Enterprise host. start() kicks
+# off the flow and a background poller waits for the user to approve; the
+# frontend polls status() until it flips to
 # "done" (token stored) or "error". Single user → a single module-level slot.
 # ---------------------------------------------------------------------------
 _copilot_lock = threading.Lock()
@@ -197,7 +200,7 @@ def copilot_login_start() -> dict:
         "user_code": data.get("user_code", ""),
         "verification_uri": data.get("verification_uri")
         or data.get("verification_uri_complete")
-        or "https://github.com/login/device",
+        or providers.github_urls(providers.github_host())["verification"],
         "error": None,
     }
     with _copilot_lock:
@@ -221,6 +224,24 @@ def copilot_login_start() -> dict:
         "interval": interval,
         "expires_in": expires_in,
     }
+
+
+class CopilotHostBody(BaseModel):
+    host: str    # "" or github.com, or a GitHub Enterprise host such as acme.ghe.com
+
+
+@router.put("/providers/copilot/host")
+def set_copilot_host(body: CopilotHostBody) -> dict:
+    """Where Copilot signs in. Changing it signs out, and stops a pending sign-in."""
+    global _copilot_signin
+    p = providers.get_provider("copilot")
+    try:
+        p.set_host(body.host)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    with _copilot_lock:
+        _copilot_signin = None
+    return _provider_view(p)
 
 
 @router.get("/providers/copilot/login")

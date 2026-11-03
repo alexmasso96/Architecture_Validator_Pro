@@ -518,6 +518,8 @@ export interface AIProvider {
   /** "self_hosted" = Ollama / vLLM, configured by base URL. */
   kind?: "cloud" | "self_hosted";
   endpoint?: SelfHostedEndpoint;
+  /** Copilot only: github.com, or the GitHub Enterprise host it signs in to. */
+  github_host?: string;
 }
 
 export interface ProvidersResponse {

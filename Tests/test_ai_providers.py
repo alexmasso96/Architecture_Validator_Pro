@@ -283,3 +283,82 @@ def test_generate_empty_content_raises(env, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# GitHub Enterprise sign-in (#13)
+# ---------------------------------------------------------------------------
+
+def test_github_host_is_normalized(env):
+    prov, _ = env
+    assert prov.normalize_github_host("") == "github.com"
+    assert prov.normalize_github_host("  https://Acme.GHE.com/login ") == "acme.ghe.com"
+    assert prov.normalize_github_host("acme.ghe.com:443") == "acme.ghe.com"
+    for bad in ("acme", "not a host", "acme..ghe.com", "-acme.ghe.com"):
+        with pytest.raises(ValueError):
+            prov.normalize_github_host(bad)
+
+
+def test_enterprise_host_endpoints(env):
+    prov, _ = env
+    assert prov.github_urls("github.com")["device_code"] == prov.DEVICE_CODE_URL
+    urls = prov.github_urls("acme.ghe.com")
+    assert urls["device_code"] == "https://acme.ghe.com/login/device/code"
+    assert urls["oauth_token"] == "https://acme.ghe.com/login/oauth/access_token"
+    assert urls["copilot_token"] == "https://api.acme.ghe.com/copilot_internal/v2/token"
+    assert urls["api_base"] == "https://copilot-api.acme.ghe.com"
+
+
+def test_sign_in_goes_to_the_enterprise_host(env, monkeypatch):
+    prov, creds = env
+    p = prov.get_provider("copilot")
+    p.set_host("acme.ghe.com")
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append(url)
+        if url.endswith("/device/code"):
+            return FakeResp(200, {"device_code": "D", "user_code": "U", "interval": 0})
+        return FakeResp(200, {"access_token": "ghu_acme"})
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        return FakeResp(200, {"token": "CP", "expires_at": 9e12})
+
+    monkeypatch.setattr(prov.requests, "post", fake_post)
+    monkeypatch.setattr(prov.requests, "get", fake_get)
+    monkeypatch.setattr(prov.time, "sleep", lambda _s: None)
+    flow = p.start_device_flow()
+    assert flow["verification_uri"] == "https://acme.ghe.com/login/device"
+    assert p.poll_for_token("D", interval=0) == "ghu_acme"
+    assert p._fresh_copilot_token() == "CP"
+    # No endpoints in the reply: Copilot is on the enterprise host's own API.
+    assert type(p)._cp_api_base == "https://copilot-api.acme.ghe.com"
+    assert calls == ["https://acme.ghe.com/login/device/code",
+                     "https://acme.ghe.com/login/oauth/access_token",
+                     "https://api.acme.ghe.com/copilot_internal/v2/token"]
+
+
+def test_changing_the_host_signs_out(env):
+    prov, creds = env
+    p = prov.get_provider("copilot")
+    creds.set_copilot_oauth_token("ghu_dotcom")
+    p.set_host("github.com")    # unchanged: still signed in
+    assert p.is_configured()
+    p.set_host("acme.ghe.com")
+    assert not p.is_configured()
+    assert prov.github_host() == "acme.ghe.com"
+    creds.set_copilot_oauth_token("ghu_acme")
+    p.set_host("")
+    assert not p.is_configured()
+    assert prov.github_host() == "github.com"
+
+
+def test_enterprise_server_without_copilot_says_so(env, monkeypatch):
+    prov, creds = env
+    p = prov.get_provider("copilot")
+    p.set_host("github.acme.com")
+    creds.set_copilot_oauth_token("ghu_x")
+    monkeypatch.setattr(prov.requests, "get", lambda url, **kw: FakeResp(404))
+    with pytest.raises(prov.AIAuthError, match="doesn't offer Copilot"):
+        p._fresh_copilot_token()

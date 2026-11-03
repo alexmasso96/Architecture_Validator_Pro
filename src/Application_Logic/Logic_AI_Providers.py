@@ -45,6 +45,7 @@ DEVICE_CODE_URL = "https://github.com/login/device/code"
 OAUTH_TOKEN_URL = "https://github.com/login/oauth/access_token"
 COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 COPILOT_API_BASE_DEFAULT = "https://api.githubcopilot.com"
+GITHUB_HOST_DEFAULT = "github.com"
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
@@ -268,6 +269,45 @@ class AIProvider:
 # Copilot
 # ---------------------------------------------------------------------------
 
+_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+
+
+def normalize_github_host(text: str) -> str:
+    """The host the user typed, without a scheme, path or port: a pasted
+    ``https://acme.ghe.com/`` becomes ``acme.ghe.com``. Empty means github.com.
+    Raises ValueError for anything that isn't a host name."""
+    host = (text or "").strip().lower()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].split(":", 1)[0]
+    if not host:
+        return GITHUB_HOST_DEFAULT
+    if not _HOST_RE.match(host):
+        raise ValueError(f"{text.strip()!r} isn't a host name, such as acme.ghe.com.")
+    return host
+
+
+def github_host() -> str:
+    """Where Copilot signs in: github.com, or a GitHub Enterprise host."""
+    cfg = creds.get_endpoint("copilot") or {}
+    return cfg.get("host") or GITHUB_HOST_DEFAULT
+
+
+def github_urls(host: str) -> Dict[str, str]:
+    """Copilot's sign-in and token endpoints on ``host``. A GitHub Enterprise
+    host with data residency (``acme.ghe.com``) serves its API from ``api.<host>``
+    and Copilot from ``copilot-api.<host>``, as VS Code's Copilot does."""
+    if host == GITHUB_HOST_DEFAULT:
+        return {"device_code": DEVICE_CODE_URL, "oauth_token": OAUTH_TOKEN_URL,
+                "copilot_token": COPILOT_TOKEN_URL, "api_base": COPILOT_API_BASE_DEFAULT,
+                "verification": "https://github.com/login/device"}
+    return {"device_code": f"https://{host}/login/device/code",
+            "oauth_token": f"https://{host}/login/oauth/access_token",
+            "copilot_token": f"https://api.{host}/copilot_internal/v2/token",
+            "api_base": f"https://copilot-api.{host}",
+            "verification": f"https://{host}/login/device"}
+
+
 class CopilotProvider(AIProvider):
     id = "copilot"
     label = "GitHub Copilot"
@@ -288,20 +328,44 @@ class CopilotProvider(AIProvider):
     def is_configured(self) -> bool:
         return bool(creds.get_copilot_oauth_token())
 
+    # --- where to sign in ---
+    @classmethod
+    def set_host(cls, text: str) -> str:
+        """Signs in to github.com or a GitHub Enterprise host from now on. A
+        token from the old host is no use on the new one, so it's dropped."""
+        host = normalize_github_host(text)
+        if host == github_host():
+            return host
+        if host == GITHUB_HOST_DEFAULT:
+            creds.clear_endpoint("copilot")
+        else:
+            creds.set_endpoint("copilot", {"host": host})
+        creds.clear_copilot_oauth_token()
+        cls._cp_token = ""
+        cls._cp_expires = 0
+        cls._cp_api_base = COPILOT_API_BASE_DEFAULT
+        return host
+
     # --- device flow ---
     @staticmethod
     def start_device_flow() -> Dict:
-        resp = requests.post(
-            DEVICE_CODE_URL,
-            headers={"Accept": "application/json"},
-            data={"client_id": GITHUB_CLIENT_ID, "scope": "copilot"},
-            timeout=15,
-        )
+        host = github_host()
+        try:
+            resp = requests.post(
+                github_urls(host)["device_code"],
+                headers={"Accept": "application/json"},
+                data={"client_id": GITHUB_CLIENT_ID, "scope": "copilot"},
+                timeout=15,
+            )
+        except requests.ConnectionError as e:
+            raise AIAuthError(f"Couldn't reach {host}. Check the host name and the "
+                              "proxy in Preferences → Network.") from e
         if resp.status_code != 200:
-            raise AIAuthError(f"Failed to start device flow (HTTP {resp.status_code}).")
+            raise AIAuthError(f"Failed to start device flow on {host} (HTTP {resp.status_code}).")
         data = resp.json()
         if "device_code" not in data:
             raise AIAuthError("Unexpected device-flow response.")
+        data.setdefault("verification_uri", github_urls(host)["verification"])
         return data
 
     @staticmethod
@@ -313,7 +377,7 @@ class CopilotProvider(AIProvider):
                 raise AIStopped("Sign-in cancelled.")
             time.sleep(interval)
             resp = requests.post(
-                OAUTH_TOKEN_URL,
+                github_urls(github_host())["oauth_token"],
                 headers={"Accept": "application/json"},
                 data={
                     "client_id": GITHUB_CLIENT_ID,
@@ -356,18 +420,22 @@ class CopilotProvider(AIProvider):
         oauth = creds.get_copilot_oauth_token()
         if not oauth:
             raise AIAuthError("Not signed in to GitHub Copilot.")
+        urls = github_urls(github_host())
         headers = {"Authorization": f"token {oauth}", "Accept": "application/json", **_VSCODE_HEADERS}
-        resp = requests.get(COPILOT_TOKEN_URL, headers=headers, timeout=15)
+        resp = requests.get(urls["copilot_token"], headers=headers, timeout=15)
         if resp.status_code == 401:
             raise AIAuthError("Copilot OAuth token expired — sign in again.")
         if resp.status_code == 403:
             raise AIAuthError("This GitHub account has no Copilot subscription/access.")
+        if resp.status_code == 404 and github_host() != GITHUB_HOST_DEFAULT:
+            raise AIAuthError(f"{github_host()} doesn't offer Copilot. Copilot needs "
+                              "GitHub Enterprise Cloud; GitHub Enterprise Server isn't supported.")
         if resp.status_code != 200:
             raise AIAuthError(f"Copilot token exchange failed (HTTP {resp.status_code}).")
         data = resp.json()
         cls._cp_token = data.get("token", "")
         cls._cp_expires = data.get("expires_at", 0)
-        cls._cp_api_base = data.get("endpoints", {}).get("api", COPILOT_API_BASE_DEFAULT)
+        cls._cp_api_base = data.get("endpoints", {}).get("api", urls["api_base"])
         if not cls._cp_token:
             raise AIAuthError("Copilot token exchange returned no token.")
         return cls._cp_token

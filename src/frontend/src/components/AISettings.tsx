@@ -28,6 +28,7 @@ export function AISettings() {
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [copilotFlow, setCopilotFlow] = useState<CopilotFlow | null>(null);
+  const [hostDraft, setHostDraft] = useState<string | null>(null);
   const pollTimer = useRef<number | null>(null);
 
   // Stop polling the device-flow status on unmount.
@@ -96,6 +97,25 @@ export function AISettings() {
       await load();
     } catch (e) {
       setNote(`Sign-out failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function saveCopilotHost(signedIn: boolean) {
+    const host = (hostDraft ?? "").trim();
+    if (signedIn && !window.confirm("Changing the host signs you out of Copilot. Continue?")) {
+      return;
+    }
+    setBusy("copilot");
+    setNote(null);
+    try {
+      const p = await api.put<AIProvider>("/ai/providers/copilot/host", { host });
+      setHostDraft(null);
+      setNote(`Copilot now signs in to ${p.github_host}.`);
+      await load(true);
+    } catch (e) {
+      setNote(`Couldn't change the host: ${(e as Error).message}`);
     } finally {
       setBusy(null);
     }
@@ -239,6 +259,27 @@ export function AISettings() {
                 </div>
               ) : p.id === "copilot" ? (
                 <div className="ai-copilot">
+                  {!copilotFlow && (
+                    <div className="ai-prov-keyrow">
+                      <input
+                        className="ai-prov-key"
+                        placeholder="github.com"
+                        spellCheck={false}
+                        value={hostDraft ?? (p.github_host === "github.com" ? "" : p.github_host ?? "")}
+                        onChange={(e) => setHostDraft(e.target.value)}
+                        title="Leave empty for github.com. For GitHub Enterprise, enter your company's host, such as acme.ghe.com."
+                      />
+                      {hostDraft !== null && (
+                        <button
+                          className="save-btn"
+                          disabled={busy === "copilot"}
+                          onClick={() => saveCopilotHost(p.configured)}
+                        >
+                          Save host
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {copilotFlow ? (
                     <div className="ai-copilot-flow">
                       <p className="ai-prov-note">
@@ -264,7 +305,7 @@ export function AISettings() {
                     </div>
                   ) : p.configured ? (
                     <div className="ai-copilot-actions">
-                      <span className="ai-prov-note">Signed in with GitHub.</span>
+                      <span className="ai-prov-note">Signed in on {p.github_host ?? "github.com"}.</span>
                       <button
                         className="scope-btn"
                         disabled={busy === "copilot"}
@@ -276,7 +317,8 @@ export function AISettings() {
                   ) : (
                     <div className="ai-copilot-actions">
                       <span className="ai-prov-note">
-                        Authorise with your GitHub account — no API key needed.
+                        Authorise with your GitHub account on {p.github_host ?? "github.com"} —
+                        no API key needed.
                       </span>
                       <button
                         className="save-btn ai-copilot-signin"

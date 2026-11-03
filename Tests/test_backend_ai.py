@@ -151,3 +151,16 @@ def test_chat_streams_tokens(tmp_path, monkeypatch):
 
     assert "".join(tokens) == "Hello world"
     assert done is not None
+
+
+def test_copilot_host_can_be_set_and_cleared(client):
+    r = client.put("/api/ai/providers/copilot/host", json={"host": "https://acme.ghe.com/"},
+                   headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json()["github_host"] == "acme.ghe.com"
+    listed = {p["id"]: p for p in client.get("/api/ai/providers", headers=AUTH).json()["providers"]}
+    assert listed["copilot"]["github_host"] == "acme.ghe.com"
+    assert client.put("/api/ai/providers/copilot/host", json={"host": "not a host"},
+                      headers=AUTH).status_code == 400
+    r = client.put("/api/ai/providers/copilot/host", json={"host": ""}, headers=AUTH)
+    assert r.json()["github_host"] == "github.com"
