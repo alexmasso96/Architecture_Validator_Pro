@@ -357,8 +357,9 @@ def build_code_map(parser, code_index, *, source_root: str,
             # tree, in which case we rely on the source-derived edges (#2C).
             dwarf_calls = subcalls(dwarf_name)
 
-        # Combine calls from static AST analysis and dynamic Capstone disassembly
-        combined_calls = sorted(list(set(ast_func.calls + dwarf_calls)))
+        # Combine calls from static AST analysis and dynamic Capstone disassembly,
+        # in the source's order, so the call tree reads like the code.
+        combined_calls = list(dict.fromkeys(ast_func.calls + dwarf_calls))
 
         # #6C: which of these edges did the compiler confirm? The object
         # dataset keys edges by symbol name — try both the source name and
@@ -439,7 +440,8 @@ def build_code_map(parser, code_index, *, source_root: str,
         # actually backed the check — otherwise every edge would look
         # "unverified" for the wrong reason.
         "edge_verification": object_edges is not None,
-        "defines": dict(code_index.defines) if code_index else {}
+        "defines": dict(code_index.defines) if code_index else {},
+        "source_parser": getattr(code_index, "source_parser", None) if code_index else None,
     }
     if multi:
         result["components"] = [c for (c, _p, _u, _f) in parts]

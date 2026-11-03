@@ -169,7 +169,8 @@ def test_combine_when_tree_present():
     cmap = cm.build_code_map(parser, idx, source_root="x",
                              prefer_source_calls=False)
     main = cmap["functions"]["main"]
-    assert main["calls"] == ["dwarf_callee", "src_callee"]
+    # The source's own order first, then what only the disassembly found.
+    assert main["calls"] == ["src_callee", "dwarf_callee"]
 
 
 def test_autodetect_falls_back_to_source():

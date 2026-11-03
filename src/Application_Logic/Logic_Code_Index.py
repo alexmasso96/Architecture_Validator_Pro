@@ -32,10 +32,13 @@ Core capabilities:
 
 Optimized for speed on large codebases (1000+ files in <10s).
 """
+import logging
 import os
 import re
 from typing import List, Dict, Set, Tuple, Optional
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Configuration ───────────────────────────────────────────────────────────
@@ -134,6 +137,7 @@ class CodeIndex:
         self.all_files: List[Dict] = []
         # Auto-detected project patterns
         self._known_types: Set[str] = set()  # Types discovered from typedefs/enums
+        self.source_parser = "regex"   # or "tree-sitter": which scan built it
 
     def get_callers(self, func_name: str) -> List[str]:
         return self.reverse_call_graph.get(func_name, [])
@@ -1086,12 +1090,45 @@ def _extract_typedefs(content: str) -> Set[str]:
 
 # ─── Build Index ─────────────────────────────────────────────────────────────
 
+def _tree_sitter():
+    """Logic_Code_Index_TS when it can be used. ARCH_SOURCE_PARSER=regex turns it
+    off, to compare against the regex scan."""
+    if os.environ.get("ARCH_SOURCE_PARSER", "").strip().lower() == "regex":
+        return None
+    from . import Logic_Code_Index_TS as ts
+    return ts if ts.available() else None
+
+
 def file_function_list(content: str, relpath: str) -> List[FunctionInfo]:
     """The functions defined in one file, without building a whole index."""
+    ts = _tree_sitter()
+    if ts is not None:
+        try:
+            return ts.file_function_list(content, relpath)
+        except Exception:  # noqa: BLE001 — a parser failure must not lose the file
+            logger.warning("tree-sitter failed on %s; using the regex scan", relpath,
+                           exc_info=True)
     return _extract_functions(content, relpath, set())
 
 
 def build_index(source) -> CodeIndex:
+    """Build the code index of a C/C++ project, with tree-sitter when it's
+    available (Logic_Code_Index_TS) and with the regex scan below otherwise.
+    ``index.source_parser`` says which one did it."""
+    ts = _tree_sitter()
+    if ts is not None:
+        try:
+            index = ts.build_index(source)
+            index.source_parser = "tree-sitter"
+            return index
+        except Exception:  # noqa: BLE001 — fall back rather than lose the index
+            logger.warning("tree-sitter indexing failed; using the regex scan", exc_info=True)
+    index = build_index_regex(source)
+    index.source_parser = "regex"
+    return index
+
+
+def build_index_regex(source) -> CodeIndex:
     """
     Build a complete code index for any C/C++ software project.
 

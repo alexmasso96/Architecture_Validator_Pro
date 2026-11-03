@@ -80,6 +80,8 @@ hiddenimports = [
     'elftools', 'elftools.elf.elffile',
     'pandas', 'openpyxl', 'rapidfuzz', 'capstone', 'bcrypt',
     'rust_elf_parser', 'cpp_demangle', 'cryptography',
+    # The source index's C parser, loaded only when a source is indexed.
+    'tree_sitter', 'tree_sitter_c',
 ]
 hiddenimports += collect_submodules('uvicorn')
 hiddenimports += collect_submodules('webview')

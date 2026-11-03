@@ -7,6 +7,7 @@ hiddenimports = [
     'elftools', 'elftools.elf.elffile',
     'pandas', 'openpyxl', 'rapidfuzz', 'capstone', 'bcrypt',
     'rust_elf_parser', 'cpp_demangle', 'cryptography',
+    'tree_sitter', 'tree_sitter_c',
 ]
 
 a = Analysis(
