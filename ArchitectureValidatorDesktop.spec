@@ -25,11 +25,15 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files, coll
 block_cipher = None
 console_build = bool(os.environ.get('ARCH_BUILD_CONSOLE'))
 
+# Made from Media/icon/icon.svg and icon_sync.svg by Media/icon/render_icon.py.
 ICON_DIR = os.path.join('Media', 'icon')
 ICON_ICO = os.path.join(ICON_DIR, 'app.ico')
 ICON_ICNS = os.path.join(ICON_DIR, 'app.icns')
 ICON_PNG = os.path.join(ICON_DIR, 'icon_1024.png')
 exe_icon = ICON_ICO if sys.platform == 'win32' else (ICON_ICNS if sys.platform == 'darwin' else None)
+# The Sync Worker's executable: the app icon with a sync badge. macOS shows only
+# the bundle's icon, so it needs no .icns of its own.
+sync_exe_icon = os.path.join(ICON_DIR, 'app_sync.ico') if sys.platform == 'win32' else exe_icon
 
 PRODUCT_NAME = 'Architecture Validator Pro'
 with open(os.path.join('src', 'frontend', 'package.json'), encoding='utf-8') as _f:
@@ -190,7 +194,7 @@ sync_exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=exe_icon,
+    icon=sync_exe_icon,
     version=version_info('ArchitectureValidatorSync', f'{PRODUCT_NAME} Sync'),
 )
 
