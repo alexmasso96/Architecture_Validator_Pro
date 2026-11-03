@@ -542,3 +542,30 @@ def test_write_heartbeat_empty_path_is_noop():
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# --------------------------------------------------------------------------
+# local_time_text
+# --------------------------------------------------------------------------
+
+def test_lock_time_is_shown_in_local_time(monkeypatch):
+    monkeypatch.setenv("TZ", "Europe/Bucharest")
+    import time
+    if not hasattr(time, "tzset"):
+        return    # Windows can't switch zones in-process.
+    time.tzset()
+    try:
+        # 14:50 UTC is 16:50 in Bucharest in November.
+        assert FileLockManager.local_time_text(
+            "2026-11-03T14:50:43.316592+00:00") == "2026-11-03 16:50"
+        assert FileLockManager.local_time_text("2026-11-03T14:50:43Z") == "2026-11-03 16:50"
+        # A timestamp without a zone is UTC, as is_lock_stale reads it.
+        assert FileLockManager.local_time_text("2026-11-03T14:50:43") == "2026-11-03 16:50"
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+
+
+def test_lock_time_that_isnt_a_timestamp_is_shown_as_it_is():
+    assert FileLockManager.local_time_text("t") == "t"
+    assert FileLockManager.local_time_text("") == "an unknown time"

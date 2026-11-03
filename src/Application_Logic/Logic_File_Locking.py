@@ -65,6 +65,18 @@ class FileLockManager:
             return "unknown"
 
     @staticmethod
+    def local_time_text(timestamp: str) -> str:
+        """A lock's UTC timestamp as this PC's local time, for people to read.
+        Anything that isn't a timestamp is shown as it is."""
+        try:
+            moment = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            return timestamp or "an unknown time"
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+
+    @staticmethod
     def is_lock_stale(lock_data: dict) -> bool:
         """Checks if a lock's last_seen timestamp exceeds the stale threshold.
 
@@ -252,7 +264,8 @@ class FileLockManager:
         if lock_status["status"] == "unreadable":
             return f"The project's lock file can't be read. If this continues, {retry_hint}."
         message = (f"Project is locked by {lock_status['user']} on "
-                   f"{lock_status['hostname']} since {lock_status['timestamp']}")
+                   f"{lock_status['hostname']} since "
+                   f"{FileLockManager.local_time_text(lock_status['timestamp'])}")
         if lock_status.get("remote"):
             message += f". If that session has stopped, {retry_hint}."
         return message
