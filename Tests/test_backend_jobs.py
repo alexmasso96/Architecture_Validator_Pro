@@ -113,6 +113,17 @@ def test_build_mind_map():
             body = _run(c, "build_mind_map", {})
             assert body["status"] == "done", body
             assert body["result"]["maps_built"] == 1
+            status = c.get("/api/ai/mindmap", headers=AUTH).json()
+            assert status["has_mindmap"] and status["has_project_map"]
+            assert status["meta"]["builder_version"] == "3.0"
+
+            from backend.routers.ai import ChatBody, _build_system_prompt
+            state = app.state.appstate
+            chat = dict(provider_id="x", model="m", messages=[])
+            model_prompt = _build_system_prompt(state, ChatBody(**chat))
+            project_prompt = _build_system_prompt(state, ChatBody(**chat, map_scope="project"))
+            assert "# MODEL MAP — Arch_A" in model_prompt
+            assert "# PROJECT MAP" in project_prompt and "### Arch_A" in project_prompt
 
 
 def test_build_mind_map_no_source_fails():

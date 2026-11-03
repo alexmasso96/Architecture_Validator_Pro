@@ -104,7 +104,7 @@ def test_build_mind_map_signatures_no_bodies_and_bindings():
               "requirement_traces": ["REQ-1"]}]
     reqs = [{"id": "REQ-1", "text": "the door lock state shall be reported"}]
     mm = ctx.build_mind_map(FIXTURE_SRC, "DoorControl", 1, ports, reqs)
-    assert mm["builder_version"] == ctx.MINDMAP_BUILDER_VERSION
+    assert mm["builder_version"] == "2.0"    # the v2 builder, kept for v2 readers
     assert mm["source_hash"]
     # functions carry signature but NO body
     f = mm["functions"]["DoorControl_Init"]
@@ -138,7 +138,7 @@ def test_mind_map_to_text_truncates_function_index_last():
     # Synthetic map with many functions but tiny budget: ports survive, function
     # index is truncated.
     mm = {
-        "builder_version": ctx.MINDMAP_BUILDER_VERSION, "model_name": "M",
+        "builder_version": "2.0", "model_name": "M",
         "files": {}, "ports": {"0:P": {"name": "P", "operation": "op",
                                         "implementing_funcs": ["f1"], "files": [],
                                         "requirement_traces": []}},

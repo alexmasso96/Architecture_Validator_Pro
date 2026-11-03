@@ -469,7 +469,7 @@ def apply_lowlevel_to_hlt(md_path: str, generated: Dict[str, str]) -> int:
 # Phase 8 — Code diff engine + mind-map builder (pure, no Qt)
 # ===========================================================================
 
-MINDMAP_BUILDER_VERSION = "2.0"
+MINDMAP_BUILDER_VERSION = "3.0"   # Logic_Project_Map; 2.0 and 1.0 maps still render
 _MM_SRC_EXTS = (".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx")
 # Locked decision #3: file reads are effectively uncapped (high safety ceiling).
 _DIFF_PER_FILE_CAP = 4_000_000
@@ -608,7 +608,8 @@ def compute_diff_hash(current_root, previous_root) -> str:
 def build_mind_map(source_path: str, model_name: str, model_id: int,
                    ports: List[Dict], requirements: List[Dict],
                    generated_at: str = "", code_map: Optional[Dict] = None) -> Dict:
-    """Build the compact CompactMindMap for one architecture model.
+    """Build the v2 CompactMindMap for one architecture model. The mind map
+    job builds v3 maps now (Logic_Project_Map); this stays for v2 readers.
 
     ports:        [{"name", "operation"(opt), "requirement_traces"(opt list)}]
     requirements: [{"id", "text"}]  (already parsed via parse_requirements_file)
@@ -666,7 +667,7 @@ def build_mind_map(source_path: str, model_name: str, model_id: int,
         }
 
     return {
-        "builder_version": MINDMAP_BUILDER_VERSION,
+        "builder_version": "2.0",   # the job now builds v3 maps (Logic_Project_Map)
         "model_id": model_id,
         "model_name": model_name,
         "source_hash": hash_source_tree(source_path) if source_path else "",
@@ -834,6 +835,9 @@ def mind_map_to_text(mind_map: Optional[Dict], budget_chars: int = 14000) -> str
     if not mind_map:
         return "(no mind map available — generate one in the Advanced AI Chat tab)"
     version = mind_map.get("builder_version", "")
+    if version == "3.0":
+        from . import Logic_Project_Map as project_map
+        return project_map.render(mind_map, budget_chars)
     if version == "2.0":
         text = _render_mind_map_v2(mind_map, budget_chars)
     else:

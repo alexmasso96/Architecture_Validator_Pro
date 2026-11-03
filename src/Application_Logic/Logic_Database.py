@@ -1176,6 +1176,20 @@ class ProjectDatabase:
                 (rid, self._enc_text("C", code_map_json),
                  datetime.datetime.now().isoformat(timespec="seconds")))
 
+    def get_project_map(self, release_id=None) -> Optional[dict]:
+        """The release's project-wide map (Logic_Project_Map). It's kept inside
+        the release's Code Map, so it's encrypted and synced with it and needs no
+        table of its own; rebuilding the Code Map drops it, as it's then stale."""
+        pm = (self.get_release_code_map(release_id) or {}).get("project_map")
+        return pm if isinstance(pm, dict) else None
+
+    def save_project_map(self, project_map: dict, release_id=None) -> None:
+        code_map = self.get_release_code_map(release_id)
+        if code_map is None:
+            return
+        code_map["project_map"] = project_map
+        self.save_release_code_map(json.dumps(code_map), release_id=release_id)
+
     def has_release_code_map(self, release_id=None) -> bool:
         return self.get_release_code_map(release_id) is not None
 

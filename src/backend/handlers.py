@@ -73,21 +73,38 @@ def _resolve_model_ids(state: AppState, params: dict, wdb) -> list[int]:
 
 
 def _extract_ports(wdb, layout, model_id: int) -> list[dict]:
-    """[{name, operation}] from a model's rows, deduped — headless port pull
-    (the Qt _extract_ports). Port col = first 'Port Search'; ops col from meta."""
-    port_col = next((c[0] for c in layout if c[1] == "Port Search"), None)
+    """A model's ports for its map, deduped: the port's name, the function and
+    variable its row matched (a Function Search match wins over the Port Search
+    one), and its direction when a column gives it. The operations column is the
+    fallback for the function."""
+    from Application_Logic.Logic_CallTree_Test import cell_text, parse_match
+
+    names = [c[0] for c in layout]
+    def first(kind):
+        return next((c[0] for c in layout if c[1] == kind), None)
+
+    def match_of(col):
+        i = names.index(col) if col in names else -1
+        return names[i + 1] if 0 <= i < len(names) - 1 else None
+
+    port_col, func_col, var_col = first("Port Search"), first("Function Search"), first("Variable Search")
     ops_col = wdb.get_meta("operations_column_name")
+    dir_col = next((n for n in names if "direction" in n.lower()), None)
     ports, seen = [], set()
     for r in wdb.get_model_rows(model_id):
-        name = (r.get(port_col, {}) or {}).get("text", "").strip() if port_col else ""
-        op = (r.get(ops_col, {}) or {}).get("text", "").strip() if ops_col else ""
+        name = cell_text(r.get(port_col)) if port_col else ""
         if not name:
             continue
-        key = (name, op)
+        op = cell_text(r.get(ops_col)) if ops_col else ""
+        fn = next((parse_match(cell_text(r.get(match_of(c)))) for c in (func_col, port_col)
+                   if c and match_of(c) and cell_text(r.get(match_of(c)))), "") or op
+        var = parse_match(cell_text(r.get(match_of(var_col)))) if var_col and match_of(var_col) else ""
+        key = (name, fn, var)
         if key in seen:
             continue
         seen.add(key)
-        ports.append({"name": name, "operation": op})
+        ports.append({"name": name, "operation": op, "function": fn, "variable": var,
+                      "direction": cell_text(r.get(dir_col)) if dir_col else ""})
     return ports
 
 
@@ -288,11 +305,15 @@ def _make_build_mind_map(state: AppState):
             layout = wdb.load_column_layout()
             names = {m["id"]: m["name"] for m in wdb.get_all_models()}
             model_ids = _resolve_model_ids(state, params, wdb)
-            mm_jobs = [(mid, names.get(mid, str(mid)), _extract_ports(wdb, layout, mid), reqs)
+            ports = {mid: _extract_ports(wdb, layout, mid) for mid in names}
+            mm_jobs = [(mid, names.get(mid, str(mid)), ports.get(mid, []), reqs)
                        for mid in model_ids]
+            # The project map is rebuilt with every run, from every model's ports.
+            project_models = [(mid, name, ports[mid]) for mid, name in names.items()]
 
             built = run_mindmap_job(mm_jobs, current_source, previous_source, wdb,
-                                    release_id=current_rid, progress_cb=progress)
+                                    release_id=current_rid, progress_cb=progress,
+                                    project_models=project_models)
         return {"maps_built": built, "models": len(model_ids)}
     return handler
 

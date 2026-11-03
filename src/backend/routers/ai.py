@@ -329,6 +329,7 @@ def mindmap_status(model_id: Optional[int] = None, release_id: Optional[int] = N
             "model_id": mid,
             "release_id": rid,
             "has_mindmap": db.has_model_mindmap(mid, release_id=rid),
+            "has_project_map": db.get_project_map(rid) is not None,
             "has_source": db.has_release_source(rid) if rid is not None else False,
             "meta": meta,
         }
@@ -368,6 +369,9 @@ class ChatBody(BaseModel):
     model_id: Optional[int] = None
     release_id: Optional[int] = None
     ground_in_mindmap: bool = True
+    # "model": the active model's map; "project": the whole release's overview,
+    # which is less to read for a small model that doesn't need one model's detail.
+    map_scope: str = "model"
 
 
 def _build_system_prompt(state: AppState, body: ChatBody) -> Optional[str]:
@@ -382,7 +386,10 @@ def _build_system_prompt(state: AppState, body: ChatBody) -> Optional[str]:
     if mid is None and state.arch_manager is not None:
         mid = state.arch_manager.active_model_id
     rid = body.release_id if body.release_id is not None else db.get_active_release_id()
-    mm = db.get_model_mindmap(mid, release_id=rid) if mid is not None else None
+    if body.map_scope == "project":
+        mm = db.get_project_map(rid)
+    else:
+        mm = db.get_model_mindmap(mid, release_id=rid) if mid is not None else None
     base = body.system_prompt or ctx.get_chat_rules(db)
     if mm:
         return base + "\n\n# CODE MIND MAP\n" + ctx.mind_map_to_text(mm)

@@ -544,6 +544,8 @@ export interface MindmapStatus {
   model_id: number | null;
   release_id: number | null;
   has_mindmap: boolean;
+  /** The release's project-wide map exists (built with every mind map run). */
+  has_project_map?: boolean;
   has_source?: boolean;
   meta: MindmapMeta | null;
 }

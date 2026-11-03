@@ -95,6 +95,9 @@ export function AIChat({ toast }: { toast: (msg: string) => void }) {
   const [model, setModel] = useState("");
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [ground, setGround] = useState(true);
+  // The active model's map, or the whole project's overview (less to read for a
+  // small model, and the place for questions across models).
+  const [mapScope, setMapScope] = useState<"model" | "project">("model");
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -171,6 +174,7 @@ export function AIChat({ toast }: { toast: (msg: string) => void }) {
           messages: history,
           system_prompt: systemPrompt,
           ground_in_mindmap: ground,
+          map_scope: mapScope,
         },
         {
           onToken: appendAssistant,
@@ -276,6 +280,18 @@ export function AIChat({ toast }: { toast: (msg: string) => void }) {
             onChange={(e) => setGround(e.target.checked)}
           />
           Ground in Code Mind Map
+        </label>
+        <label className="aig-field">
+          <span>Mind Map</span>
+          <select
+            value={mapScope}
+            disabled={!ground}
+            onChange={(e) => setMapScope(e.target.value as "model" | "project")}
+            title="This model: the active model's ports, calls and data. Whole project: what runs each model, and the calls and data between them."
+          >
+            <option value="model">This model</option>
+            <option value="project">Whole project</option>
+          </select>
         </label>
         <div className="spacer" />
         <button
