@@ -324,7 +324,14 @@ class AppState:
             # Resolve the per-block cipher (and migrate a legacy whole-file
             # ARCHENC1 project to per-block in place). Raises PasswordRequired /
             # PasswordInvalid for the existing 401/403 mapping — before we lock.
-            cipher = self._resolve_cipher_on_open(path, password)
+            # A shared project is already locked by now, because its local copy
+            # may only exist once it's synced. Asking for the password must not
+            # leave that lock behind, or the retry finds the project locked by us.
+            try:
+                cipher = self._resolve_cipher_on_open(path, password)
+            except BaseException:
+                self._abandon_sync_open(mode)
+                raise
             encrypted = cipher is not None
 
             if mode == MODE_EXCLUSIVE and self.sync_entry is None:
@@ -718,6 +725,18 @@ class AppState:
         self.sync_entry = entry
         self.sync_token = token
         return entry["local"]
+
+    def _abandon_sync_open(self, mode: str) -> None:
+        """Undoes ``_sync_open`` when the project doesn't open after all: the lock
+        it took on the share is released, and no session is left behind."""
+        entry, token = self.sync_entry, self.sync_token
+        self.sync_entry = None
+        self.sync_token = None
+        if entry is not None and mode == MODE_EXCLUSIVE:
+            try:
+                FileLockManager.release_lock(entry["remote"], token)
+            except Exception:  # noqa: BLE001
+                logger.warning("Error releasing the shared lock", exc_info=True)
 
     def _use_worker_lock_watch(self, store, entry: dict) -> None:
         """The always-running worker may have watched this lock for hours, so a

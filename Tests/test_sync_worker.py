@@ -710,3 +710,29 @@ def test_change_log_is_no_longer_part_of_the_app(app_env):
     c, _state, remote, _worker = app_env
     _open(c, remote)
     assert c.get("/api/sync/log", headers=AUTH).status_code in (404, 405)
+
+
+def test_password_prompt_doesnt_leave_the_shared_project_locked(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARCH_PREFS_FILE", str(tmp_path / "appdata" / "prefs.json"))
+    monkeypatch.setenv("ARCH_SYNC_WORKER", "off")
+    (tmp_path / "nas").mkdir()
+    local, remote = str(tmp_path / "Encrypted.arch"), str(tmp_path / "nas" / "Encrypted.arch")
+    password = "Secret-Pass-123!"
+    app = create_app(token=TOKEN, heartbeat_interval=0.05)
+    with TestClient(app) as c:
+        r = c.post("/api/project/new", json={"path": local, "password": password}, headers=AUTH)
+        assert r.status_code == 200, r.text
+        assert c.post("/api/project/close", headers=AUTH).status_code == 200
+        engine.publish(local, remote, "alex")
+        app.state.appstate.sync_store().add(remote, "alex")
+
+        # The start screen opens without a password first, then asks for it.
+        r = c.post("/api/project/open", json={"path": remote, "mode": "exclusive"},
+                   headers=AUTH)
+        assert r.status_code == 401
+        assert FileLockManager.check_lock(remote)["status"] == "unlocked"
+
+        r = c.post("/api/project/open", json={"path": remote, "mode": "exclusive",
+                                              "password": password}, headers=AUTH)
+        assert r.status_code == 200, r.text
+        assert r.json()["tracked"] is True
