@@ -52,7 +52,9 @@ def test_list_providers(client):
     assert any(m["id"] for m in anth["models"])
 
 
-def test_set_and_clear_key(client):
+def test_set_and_clear_key(client, monkeypatch):
+    # Stay offline: with a key set, listing models queries the provider's API.
+    monkeypatch.setattr(providers.AnthropicProvider, "discover_models", lambda self: [])
     r = client.put("/api/ai/providers/anthropic", json={"api_key": "sk-test"}, headers=AUTH)
     assert r.status_code == 200
     assert r.json()["configured"] is True

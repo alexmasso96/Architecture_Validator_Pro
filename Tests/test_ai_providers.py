@@ -362,3 +362,82 @@ def test_enterprise_server_without_copilot_says_so(env, monkeypatch):
     monkeypatch.setattr(prov.requests, "get", lambda url, **kw: FakeResp(404))
     with pytest.raises(prov.AIAuthError, match="doesn't offer Copilot"):
         p._fresh_copilot_token()
+
+
+# ---------------------------------------------------------------------------
+# list_models() uses live discovery for cloud providers
+# ---------------------------------------------------------------------------
+
+def test_list_models_static_when_not_configured(env, monkeypatch):
+    prov, _ = env
+    def boom(*a, **k):
+        raise AssertionError("no network when signed out")
+    monkeypatch.setattr(prov.requests, "get", boom)
+    p = prov.get_provider("openai")
+    assert p.list_models() == p._models
+
+
+def test_list_models_uses_discovery_and_caches(env, monkeypatch):
+    prov, creds = env
+    creds.set_key("openai", "k")
+    calls = []
+    payload = {"data": [{"id": "gpt-6"}]}
+    monkeypatch.setattr(prov.requests, "get",
+                        lambda *a, **k: calls.append(1) or FakeResp(200, payload))
+    p = prov.get_provider("openai")
+    assert [m["id"] for m in p.list_models()] == ["gpt-6"]
+    assert [m["id"] for m in p.list_models()] == ["gpt-6"]
+    assert len(calls) == 1                      # second call served from cache
+    p.refresh_models()
+    assert len(calls) == 2
+
+
+def test_list_models_rediscovers_after_key_change(env, monkeypatch):
+    prov, creds = env
+    creds.set_key("openai", "k1")
+    calls = []
+    monkeypatch.setattr(prov.requests, "get",
+                        lambda *a, **k: calls.append(1) or FakeResp(200, {"data": [{"id": "gpt-6"}]}))
+    p = prov.get_provider("openai")
+    p.list_models()
+    creds.set_key("openai", "k2")
+    p.list_models()
+    assert len(calls) == 2
+
+
+def test_list_models_falls_back_to_static_on_failure(env, monkeypatch):
+    prov, creds = env
+    creds.set_key("openai", "k")
+    monkeypatch.setattr(prov.requests, "get", lambda *a, **k: FakeResp(500, {}, "err"))
+    p = prov.get_provider("openai")
+    assert p.list_models() == p._models
+
+
+def test_copilot_discovery_filters_picker_models(env, monkeypatch):
+    prov, creds = env
+    creds.set_copilot_oauth_token("gho_x")
+    token = {"token": "cp", "expires_at": 9e12,
+             "endpoints": {"api": "https://api.individual.githubcopilot.com"}}
+    models = {"data": [
+        {"id": "claude-opus-4.5", "name": "Claude Opus 4.5", "model_picker_enabled": True,
+         "capabilities": {"type": "chat", "limits": {"max_prompt_tokens": 128000}},
+         "policy": {"state": "enabled"}},
+        {"id": "gpt-5", "name": "GPT-5", "model_picker_enabled": True,
+         "capabilities": {"type": "chat"}, "policy": {"state": "unconfigured"}},
+        {"id": "gpt-4o-2024-05-13", "model_picker_enabled": False,
+         "capabilities": {"type": "chat"}},
+        {"id": "secret-model", "capabilities": {"type": "chat"},
+         "policy": {"state": "disabled"}},
+        {"id": "text-embedding-3-small", "capabilities": {"type": "embeddings"}},
+    ]}
+    seen = []
+    def fake_get(url, *a, **k):
+        seen.append(url)
+        return FakeResp(200, token if "copilot_internal" in url else models)
+    monkeypatch.setattr(prov.requests, "get", fake_get)
+    p = prov.get_provider("copilot")
+    type(p)._cp_token = ""
+    out = p.list_models()
+    assert [m["id"] for m in out] == ["claude-opus-4.5", "gpt-5"]
+    assert out[0]["context_tokens"] == 128000
+    assert seen[-1] == "https://api.individual.githubcopilot.com/models"
