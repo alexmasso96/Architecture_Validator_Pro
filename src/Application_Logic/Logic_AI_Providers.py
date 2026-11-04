@@ -475,6 +475,14 @@ class CopilotProvider(AIProvider):
             raise AIAuthError("Copilot token exchange returned no token.")
         return cls._cp_token
 
+    # Models Copilot serves only through OpenAI's Responses API (/responses),
+    # not /chat/completions — learnt from each model's supported_endpoints in
+    # discovery, or from the API's own "unsupported_api_for_model" refusal.
+    _responses_only: set = set()
+
+    def _uses_responses(self, model: str) -> bool:
+        return model in type(self)._responses_only
+
     def build_request(self, messages, model, system_prompt, tools_param=None):
         api_token = self._fresh_copilot_token()
         system, convo = _split_system(messages, system_prompt)
@@ -486,6 +494,9 @@ class CopilotProvider(AIProvider):
             "Copilot-Integration-Id": "vscode-chat",
             **_VSCODE_HEADERS,
         }
+        base = type(self)._cp_api_base
+        if self._uses_responses(model):
+            return f"{base}/responses", headers, _responses_body(model, system, convo)
         body = {"model": model, "messages": msgs, "stream": False}
         if tools_param:
             body["tools"] = tools_param
@@ -495,9 +506,28 @@ class CopilotProvider(AIProvider):
         else:
             body["temperature"] = _DEFAULT_TEMPERATURE
             body["max_tokens"] = _DEFAULT_MAX_TOKENS
-        return f"{type(self)._cp_api_base}/chat/completions", headers, body
+        return f"{base}/chat/completions", headers, body
+
+    def _post_and_json(self, url, headers, body, stop_check=None):
+        try:
+            return super()._post_and_json(url, headers, body, stop_check=stop_check)
+        except AIGenerationError as e:
+            # A model we didn't know was Responses-only (static list, or one
+            # added since discovery): remember it and send the turn there.
+            if not (url.endswith("/chat/completions") and "unsupported_api_for_model" in str(e)):
+                raise
+            model = body.get("model", "")
+            type(self)._responses_only.add(model)
+            msgs = body.get("messages", [])
+            system = "\n\n".join(m.get("content", "") for m in msgs if m.get("role") == "system")
+            convo = [m for m in msgs if m.get("role") != "system"]
+            url = url[: -len("/chat/completions")] + "/responses"
+            return super()._post_and_json(url, headers, _responses_body(model, system, convo),
+                                          stop_check=stop_check)
 
     def parse_response(self, data):
+        if isinstance(data, dict) and "output" in data and "choices" not in data:
+            return _responses_text(data)
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -516,9 +546,47 @@ class CopilotProvider(AIProvider):
                 return []
             data = resp.json()
             items = data.get("data", data) if isinstance(data, dict) else data
-            return _models_from_openai_list(_copilot_chat_models(items))
+            items = _copilot_chat_models(items)
+            for m in items:
+                eps = m.get("supported_endpoints")
+                if isinstance(eps, list) and eps and "/chat/completions" not in eps \
+                        and "/responses" in eps:
+                    type(self)._responses_only.add(m.get("id", ""))
+            return _models_from_openai_list(items)
         except (requests.RequestException, ValueError, AIError):
             return []
+
+
+def _responses_body(model: str, system: str, convo: List[Message]) -> Dict:
+    """An OpenAI Responses API request for a plain-text conversation. Copilot
+    has no native tool calling here (bracket-tag fallback), so text suffices.
+    No temperature: the Responses-only models are reasoning models, which
+    reject it."""
+    body = {
+        "model": model,
+        "input": [{"role": m.get("role", "user"), "content": m.get("content", "")}
+                  for m in convo],
+        "stream": False,
+        "max_output_tokens": _DEFAULT_MAX_TOKENS,
+    }
+    if system:
+        body["instructions"] = system
+    return body
+
+
+def _responses_text(data: Dict) -> str:
+    """The assistant text of a Responses API reply (its message items'
+    output_text parts; reasoning items are skipped)."""
+    if isinstance(data.get("output_text"), str) and data["output_text"]:
+        return data["output_text"]
+    parts = []
+    for item in data.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for c in item.get("content") or []:
+            if isinstance(c, dict) and c.get("type") in ("output_text", "text"):
+                parts.append(c.get("text", ""))
+    return "".join(parts)
 
 
 def _copilot_chat_models(items) -> list:

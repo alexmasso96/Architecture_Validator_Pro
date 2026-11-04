@@ -441,3 +441,88 @@ def test_copilot_discovery_filters_picker_models(env, monkeypatch):
     assert [m["id"] for m in out] == ["claude-opus-4.5", "gpt-5"]
     assert out[0]["context_tokens"] == 128000
     assert seen[-1] == "https://api.individual.githubcopilot.com/models"
+
+
+# ---------------------------------------------------------------------------
+# Copilot models served only by the Responses API
+# ---------------------------------------------------------------------------
+
+def _copilot_signed_in(prov, creds):
+    creds.set_copilot_oauth_token("gho_x")
+    p = prov.get_provider("copilot")
+    type(p)._cp_token, type(p)._cp_expires = "cp", 9e12
+    type(p)._cp_api_base = "https://api.githubcopilot.com"
+    return p
+
+
+_RESPONSES_REPLY = {"output": [
+    {"type": "reasoning", "summary": []},
+    {"type": "message", "role": "assistant",
+     "content": [{"type": "output_text", "text": "Hi "}, {"type": "output_text", "text": "there"}]},
+]}
+
+
+def test_copilot_discovery_marks_responses_only_models(env, monkeypatch):
+    prov, creds = env
+    p = _copilot_signed_in(prov, creds)
+    models = {"data": [
+        {"id": "gpt-6-luna", "capabilities": {"type": "chat"},
+         "supported_endpoints": ["/responses"]},
+        {"id": "gpt-5", "capabilities": {"type": "chat"},
+         "supported_endpoints": ["/chat/completions", "/responses"]},
+        {"id": "claude-opus-4.5", "capabilities": {"type": "chat"}},
+    ]}
+    monkeypatch.setattr(prov.requests, "get", lambda *a, **k: FakeResp(200, models))
+    p.discover_models()
+    msgs = [{"role": "user", "content": "hello"}]
+    url, _, body = p.build_request(msgs, "gpt-6-luna", "be brief")
+    assert url == "https://api.githubcopilot.com/responses"
+    assert body["instructions"] == "be brief"
+    assert body["input"] == [{"role": "user", "content": "hello"}]
+    assert "temperature" not in body and "messages" not in body
+    for chat_model in ("gpt-5", "claude-opus-4.5"):
+        url, _, body = p.build_request(msgs, chat_model, None)
+        assert url.endswith("/chat/completions") and "messages" in body
+
+
+def test_copilot_retries_on_responses_after_unsupported_api(env, monkeypatch):
+    prov, creds = env
+    p = _copilot_signed_in(prov, creds)
+    posted = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        posted.append((url, json))
+        if url.endswith("/chat/completions"):
+            return FakeResp(400, {}, '{"error":{"message":"model \\"gpt-6-luna\\" is not '
+                                     'accessible via the /chat/completions endpoint",'
+                                     '"code":"unsupported_api_for_model"}}')
+        return FakeResp(200, _RESPONSES_REPLY)
+
+    monkeypatch.setattr(prov.requests, "post", fake_post)
+    out = prov.generate("copilot", "gpt-6-luna",
+                        [{"role": "user", "content": "go"}], system_prompt="sys")
+    assert out == "Hi there"
+    assert posted[1][0].endswith("/responses")
+    assert posted[1][1]["instructions"] == "sys"
+    assert posted[1][1]["input"] == [{"role": "user", "content": "go"}]
+    # Remembered: the next turn goes straight to /responses.
+    posted.clear()
+    prov.generate("copilot", "gpt-6-luna", [{"role": "user", "content": "again"}])
+    assert len(posted) == 1 and posted[0][0].endswith("/responses")
+
+
+def test_copilot_other_http_400_not_retried(env, monkeypatch):
+    prov, creds = env
+    _copilot_signed_in(prov, creds)
+    posted = []
+    monkeypatch.setattr(prov.requests, "post",
+                        lambda url, **k: posted.append(url) or FakeResp(400, {}, "bad request"))
+    with pytest.raises(prov.AIGenerationError):
+        prov.generate("copilot", "gpt-5", [{"role": "user", "content": "go"}])
+    assert len(posted) == 1
+
+
+def test_responses_text_prefers_output_text(env):
+    prov, _ = env
+    assert prov._responses_text({"output_text": "x", "output": []}) == "x"
+    assert prov._responses_text(_RESPONSES_REPLY) == "Hi there"
