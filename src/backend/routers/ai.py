@@ -4,7 +4,12 @@ AI router (plan §3.2): provider config + SSE-streamed chat.
     GET    /api/ai/providers           → providers with configured flag + model catalogue
     PUT    /api/ai/providers/{id}       → set the API key (api-key providers; Copilot uses device flow)
     DELETE /api/ai/providers/{id}       → clear the stored key
-    POST   /api/ai/chat                 → SSE stream: token* then done|error
+    POST   /api/ai/chat                 → SSE stream: context, tool*, usage*, token, credits?, done|error
+    POST   /api/ai/context              → estimated context use of a chat request
+    GET    /api/ai/model-info           → context window / efforts / tools of one model
+    GET    /api/ai/usage/{id}           → the account's credits (Copilot quota)
+    GET|PUT|PATCH|DELETE /api/ai/chats  → this user's chat history for the open project
+    GET|PUT /api/ai/agents, PUT /api/ai/rules, POST /api/ai/agents/import|export
 
 Provider credentials are machine-global (encrypted file via Logic_AI_Credentials,
 honoring ARCHVALIDATOR_CONFIG_DIR), independent of the open project. Chat
@@ -358,8 +363,19 @@ def parse_hlt(body: ParseHltBody) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Chat (SSE token stream)
+# Chat (SSE stream of the agent's progress and answer)
 # ---------------------------------------------------------------------------
+class ChatOptions(BaseModel):
+    # Effort level ("none".."max"); None = the model's default.
+    effort: Optional[str] = None
+    # Ollama: the context window to run with (num_ctx). Other providers: a cap on
+    # how much of the model's window the conversation may fill (history is
+    # trimmed, oldest first, to stay under it).
+    num_ctx: Optional[int] = None
+    context_limit: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+
+
 class ChatBody(BaseModel):
     provider_id: str
     model: str
@@ -372,33 +388,204 @@ class ChatBody(BaseModel):
     # "model": the active model's map; "project": the whole release's overview,
     # which is less to read for a small model that doesn't need one model's detail.
     map_scope: str = "model"
+    agent_id: Optional[str] = None
+    # Let the model read the code (read-only tools). Off = mind map only.
+    use_tools: bool = True
+    # The files open in the chat's editor: rules with applyTo match them.
+    open_files: list[str] = []
+    options: ChatOptions = ChatOptions()
 
 
-def _build_system_prompt(state: AppState, body: ChatBody) -> Optional[str]:
-    """Chat rules + the compact mind map for the model/release (Phase 12 strategy)."""
-    if not body.ground_in_mindmap:
-        return body.system_prompt
+_FILE_TOOLS = {"read_file", "list_files", "search_code"}
+# Room kept free for the answer when fitting the history into the window.
+_OUTPUT_RESERVE = 4096
+
+
+def _chat_scope(state: AppState, body: ChatBody):
+    """(db or None, model id, release id) the chat is about."""
     db = state.db
     if db is None or not db.is_open:
-        return body.system_prompt
-    from Application_Logic import Logic_AI_Context as ctx
+        return None, None, None
     mid = body.model_id
     if mid is None and state.arch_manager is not None:
         mid = state.arch_manager.active_model_id
     rid = body.release_id if body.release_id is not None else db.get_active_release_id()
-    if body.map_scope == "project":
-        mm = db.get_project_map(rid)
-    else:
-        mm = db.get_model_mindmap(mid, release_id=rid) if mid is not None else None
-    base = body.system_prompt or ctx.get_chat_rules(db)
-    if mm:
-        return base + "\n\n# CODE MIND MAP\n" + ctx.mind_map_to_text(mm)
-    return base
+    return db, mid, rid
+
+
+def _chat_parts(state: AppState, body: ChatBody) -> dict:
+    """The pieces of the request, each kept apart so the context meter can
+    show what fills the window: rules (project + agent + rule files), mind
+    map, tools and the executor that runs them."""
+    from Application_Logic import Logic_AI_Agents as agents
+    from Application_Logic import Logic_AI_Context as ctx
+    from Application_Logic import Logic_AI_Tools as ai_tools
+    from Application_Logic.Logic_Source_Store import release_source_provider
+
+    db, mid, rid = _chat_scope(state, body)
+    agent = agents.find_agent(db, body.agent_id)
+    base_rules = body.system_prompt or (ctx.get_chat_rules(db) if db is not None
+                                        else ctx.DEFAULT_CHAT_RULES)
+    rules = agents.project_rules(db) if db is not None else []
+    mind_map = ""
+    if db is not None and body.ground_in_mindmap:
+        if body.map_scope == "project":
+            mm = db.get_project_map(rid)
+        else:
+            mm = db.get_model_mindmap(mid, release_id=rid) if mid is not None else None
+        if mm:
+            mind_map = "# CODE MIND MAP\n" + ctx.mind_map_to_text(mm)
+    system = agents.compose_system_prompt(base_rules, agent, rules, body.open_files)
+    tools, executor, has_source = [], None, False
+    if body.use_tools:
+        source = release_source_provider(db, rid) if db is not None else None
+        has_source = source is not None
+        tools = agents.tools_for_agent(agent, ai_tools.default_tools())
+        if source is None:
+            tools = [t for t in tools if t.name not in _FILE_TOOLS]
+        if db is None:
+            tools = []
+        if tools:
+            diff_hash = db.get_meta("ai_last_diff_hash") or ""
+            executor = ai_tools.ToolExecutor(None, db=db, model_id=mid if mid is not None else -1,
+                                             diff_hash=diff_hash, provider=source,
+                                             release_id=rid)
+    return {"agent": agent, "system": system, "mind_map": mind_map, "tools": tools,
+            "executor": executor, "has_source": has_source,
+            "has_mind_map": bool(mind_map), "project_open": db is not None}
+
+
+def _context_window(body: ChatBody) -> int:
+    try:
+        info = providers.get_provider(body.provider_id).model_info(body.model)
+    except Exception:  # noqa: BLE001 — an unknown model still gets a meter
+        info = {"context_tokens": providers.context_window_for(body.model)}
+    window = int(info.get("context_tokens") or 0) or providers.context_window_for(body.model)
+    if body.provider_id == "ollama" and body.options.num_ctx:
+        window = int(body.options.num_ctx)
+    if body.options.context_limit:
+        window = min(window, int(body.options.context_limit))
+    return window
+
+
+def _breakdown(parts: dict, messages: list[dict], window: int) -> dict:
+    est = providers.estimate_tokens
+    tools_tok = est([{"name": t.name, "description": t.description,
+                      "parameters": t.input_schema} for t in parts["tools"]])
+    history = _history_tokens(messages)
+    system = est(parts["system"])
+    mind = est(parts["mind_map"])
+    total = system + mind + tools_tok + history
+    return {"system": system, "mind_map": mind, "tools": tools_tok, "history": history,
+            "total": total, "window": window,
+            "has_source": parts["has_source"], "has_mind_map": parts["has_mind_map"],
+            "project_open": parts["project_open"], "agent": parts["agent"].get("name"),
+            "tool_names": [t.name for t in parts["tools"]]}
+
+
+def _history_tokens(messages: list[dict]) -> int:
+    return sum(providers.estimate_tokens(m.get("content", "")) for m in messages)
+
+
+def _fit_history(messages: list[dict], fixed_tokens: int, window: int) -> tuple[list[dict], int]:
+    """Drop the oldest turns until the request fits the window (keeping the
+    last user message). Returns (messages, how many were dropped)."""
+    msgs = list(messages)
+    budget = window - _OUTPUT_RESERVE - fixed_tokens
+    dropped = 0
+    while len(msgs) > 1 and _history_tokens(msgs) > budget:
+        msgs.pop(0)
+        dropped += 1
+        # Never start on an assistant turn.
+        while len(msgs) > 1 and msgs[0].get("role") != "user":
+            msgs.pop(0)
+            dropped += 1
+    return msgs, dropped
+
+
+@router.post("/context")
+def chat_context(body: ChatBody, state: AppState = Depends(get_state)) -> dict:
+    """What a chat request with this body would put in the model's context
+    (estimated tokens per part), before sending it."""
+    parts = _chat_parts(state, body)
+    return _breakdown(parts, body.messages, _context_window(body))
+
+
+@router.get("/model-info")
+def model_info(provider_id: str, model: str) -> dict:
+    """Context window, output cap, effort levels and tool support of one model."""
+    try:
+        p = providers.get_provider(provider_id)
+    except providers.AIError:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_id}")
+    return p.model_info(model)
+
+
+# Last quota seen per provider — the credits a turn used are the change.
+_quota_cache: dict = {}
+_quota_lock = threading.Lock()
+
+
+def _fetch_quota(provider_id: str) -> Optional[dict]:
+    if provider_id != "copilot":
+        return None
+    p = providers.get_provider("copilot")
+    if not p.is_configured():
+        return None
+    q = p.quota()
+    with _quota_lock:
+        _quota_cache[provider_id] = q
+    return q
+
+
+def _quota_delta(before: Optional[dict], after: Optional[dict]) -> dict:
+    out = {}
+    if not before or not after:
+        return out
+    for qid, a in (after.get("quotas") or {}).items():
+        b = (before.get("quotas") or {}).get(qid)
+        if b is None:
+            continue
+        d = round(float(a.get("used", 0)) - float(b.get("used", 0)), 4)
+        if not d:
+            d = round(float(b.get("remaining", 0)) - float(a.get("remaining", 0)), 4)
+        if d > 0:
+            out[qid] = d
+    return out
+
+
+@router.get("/usage/{provider_id}")
+def provider_usage(provider_id: str, refresh: bool = False) -> dict:
+    """The account's credits: Copilot's plan quotas. Providers without a
+    quota API answer {"kind": "tokens"} (the chat counts tokens instead);
+    self-hosted ones {"kind": "local"}."""
+    try:
+        p = providers.get_provider(provider_id)
+    except providers.AIError:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_id}")
+    if isinstance(p, providers.SelfHostedProvider):
+        return {"kind": "local"}
+    if provider_id != "copilot":
+        return {"kind": "tokens"}
+    if not p.is_configured():
+        return {"kind": "quota", "signed_in": False}
+    with _quota_lock:
+        cached = _quota_cache.get(provider_id)
+    try:
+        q = cached if (cached and not refresh) else _fetch_quota(provider_id)
+    except providers.AIError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    return {"kind": "quota", "signed_in": True, **(q or {})}
 
 
 @router.post("/chat")
 async def chat(body: ChatBody, request: Request,
                state: AppState = Depends(get_state)) -> Response:
+    """One agent turn, streamed as SSE events:
+    ``context`` (what the request holds), ``tool`` / ``tool_result`` (each
+    code lookup), ``usage`` (tokens per model request), ``token`` (answer
+    text), ``credits`` (Copilot quota used by the turn), then ``done`` or
+    ``error``."""
     try:
         provider = providers.get_provider(body.provider_id)
     except providers.AIError:
@@ -407,37 +594,242 @@ async def chat(body: ChatBody, request: Request,
         raise HTTPException(status_code=409,
                             detail=f"Provider '{body.provider_id}' is not configured.")
 
-    system_prompt = _build_system_prompt(state, body)
+    parts = _chat_parts(state, body)
+    window = _context_window(body)
+    first = _breakdown(parts, body.messages, window)
+    fixed = first["system"] + first["mind_map"] + first["tools"]
+    messages, dropped = _fit_history(body.messages, fixed, window)
+    system_prompt = parts["system"] + ("\n\n" + parts["mind_map"] if parts["mind_map"] else "")
+    options = body.options.model_dump(exclude_none=True)
+
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
+    stop = threading.Event()
     _DONE = object()
 
-    def push(item):
-        loop.call_soon_threadsafe(queue.put_nowait, item)
+    def push(kind, payload):
+        loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
 
     def worker():
+        before = None
         try:
-            text = providers.generate(
-                body.provider_id, body.model, body.messages,
-                system_prompt=system_prompt,
-                stream_cb=lambda chunk: push(("token", chunk)),
-            )
-            push(("done", text))
+            if body.provider_id == "copilot":
+                with _quota_lock:
+                    before = _quota_cache.get("copilot")
+                if before is None:
+                    try:
+                        before = _fetch_quota("copilot")
+                    except providers.AIError:
+                        before = None
+            push("context", {**_breakdown(parts, messages, window), "dropped": dropped})
+            executor = parts["executor"]
+            text = providers.generate_with_tools(
+                body.provider_id, body.model, messages, parts["tools"],
+                tool_executor=(executor.execute if executor else (lambda n, a: "(no tools)")),
+                system_prompt=system_prompt, options=options,
+                on_tool_call=lambda name, args: push("tool", {"name": name, "args": args}),
+                on_tool_result=lambda name, args, out: push("tool_result", {
+                    "name": name, "args": args, "chars": len(out),
+                    "preview": out[:400], "error": out.startswith("ERROR:")}),
+                on_usage=lambda u: push("usage", u),
+                stop_check=stop.is_set)
+            if not text:
+                raise providers.AIGenerationError(
+                    f"{provider.label} returned no answer — try again, or another model.")
+            push("token", text)
+            if body.provider_id == "copilot":
+                try:
+                    after = _fetch_quota("copilot")
+                    push("credits", {"delta": _quota_delta(before, after), "quota": after})
+                except providers.AIError:
+                    pass
+            push("done", text)
+        except providers.AIStopped:
+            push("error", "Stopped.")
         except Exception as e:  # noqa: BLE001 — surface to the stream as an error event
-            push(("error", str(e)))
+            push("error", str(e))
         finally:
-            push(_DONE)
+            loop.call_soon_threadsafe(queue.put_nowait, _DONE)
 
     threading.Thread(target=worker, name="ai-chat", daemon=True).start()
 
     async def generator():
-        while True:
-            if await request.is_disconnected():
-                break
-            item = await queue.get()
-            if item is _DONE:
-                break
-            kind, payload = item
-            yield {"event": kind, "data": json.dumps(payload)}
+        try:
+            while True:
+                if await request.is_disconnected():
+                    stop.set()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if item is _DONE:
+                    break
+                kind, payload = item
+                yield {"event": kind, "data": json.dumps(payload)}
+        finally:
+            stop.set()
 
     return EventSourceResponse(generator())
+
+
+# ---------------------------------------------------------------------------
+# Chat history (per user, per project; encrypted in app data)
+# ---------------------------------------------------------------------------
+def _history_key(state: AppState) -> str:
+    from Application_Logic import Logic_AI_Chat_History as history
+    path = None
+    if state.db is not None and state.db.is_open:
+        # The shared location, so a synced copy keeps the same history.
+        path = state.shared_path
+    return history.project_key(path)
+
+
+class ChatSessionBody(BaseModel):
+    id: Optional[str] = None
+    title: Optional[str] = None
+    provider_id: str = ""
+    model: str = ""
+    agent_id: str = ""
+    settings: dict = {}
+    usage: dict = {}
+    messages: list[dict] = []
+
+
+class RenameBody(BaseModel):
+    title: str
+
+
+@router.get("/chats")
+def list_chats(state: AppState = Depends(get_state)) -> dict:
+    from Application_Logic import Logic_AI_Chat_History as history
+    return {"sessions": history.list_sessions(_history_key(state))}
+
+
+@router.get("/chats/{session_id}")
+def get_chat(session_id: str, state: AppState = Depends(get_state)) -> dict:
+    from Application_Logic import Logic_AI_Chat_History as history
+    s = history.get_session(_history_key(state), session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="No such chat.")
+    return s
+
+
+@router.put("/chats/{session_id}")
+def save_chat(session_id: str, body: ChatSessionBody,
+              state: AppState = Depends(get_state)) -> dict:
+    from Application_Logic import Logic_AI_Chat_History as history
+    data = body.model_dump()
+    data["id"] = session_id
+    return history.save_session(_history_key(state), data)
+
+
+@router.patch("/chats/{session_id}")
+def rename_chat(session_id: str, body: RenameBody,
+                state: AppState = Depends(get_state)) -> dict:
+    from Application_Logic import Logic_AI_Chat_History as history
+    s = history.rename_session(_history_key(state), session_id, body.title)
+    if s is None:
+        raise HTTPException(status_code=404, detail="No such chat.")
+    return s
+
+
+@router.delete("/chats/{session_id}")
+def delete_chat(session_id: str, state: AppState = Depends(get_state)) -> dict:
+    from Application_Logic import Logic_AI_Chat_History as history
+    return {"deleted": history.delete_session(_history_key(state), session_id)}
+
+
+# ---------------------------------------------------------------------------
+# Agents and rules (VS Code's .agent.md / .instructions.md, kept in the project)
+# ---------------------------------------------------------------------------
+class AgentsBody(BaseModel):
+    agents: list[dict]
+
+
+class RulesBody(BaseModel):
+    rules: list[dict]
+
+
+class FolderBody(BaseModel):
+    path: str
+
+
+def _agents_view(db) -> dict:
+    from Application_Logic import Logic_AI_Agents as agents
+    return {"agents": agents.all_agents(db), "rules": agents.project_rules(db),
+            "default_agent_id": agents.DEFAULT_AGENT_ID,
+            "tools": list(agents.ALL_TOOLS)}
+
+
+@router.get("/agents")
+def list_agents(state: AppState = Depends(get_state)) -> dict:
+    db = state.db if (state.db is not None and state.db.is_open) else None
+    return _agents_view(db)
+
+
+@router.put("/agents")
+def save_agents(body: AgentsBody, state: AppState = Depends(get_state)) -> dict:
+    def go():
+        from Application_Logic import Logic_AI_Agents as agents
+        db = state.require_edit()
+        agents.save_project_agents(db, body.agents)
+        db.commit()
+        return _agents_view(db)
+    return _guard(go)
+
+
+@router.put("/rules")
+def save_rules(body: RulesBody, state: AppState = Depends(get_state)) -> dict:
+    def go():
+        from Application_Logic import Logic_AI_Agents as agents
+        db = state.require_edit()
+        agents.save_project_rules(db, body.rules)
+        db.commit()
+        return _agents_view(db)
+    return _guard(go)
+
+
+@router.post("/agents/import")
+def import_agents(body: FolderBody) -> dict:
+    """Agents and rules found in a checkout's .github folder (not saved)."""
+    from Application_Logic import Logic_AI_Agents as agents
+    try:
+        return agents.import_from_folder(body.path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+
+@router.post("/agents/export")
+def export_agents(body: FolderBody, state: AppState = Depends(get_state)) -> dict:
+    """Write the project's agents and rules into <folder>/.github the way VS
+    Code reads them. Existing files of the same name are replaced."""
+    import os
+    from Application_Logic import Logic_AI_Agents as agents
+
+    def go():
+        db = state.require_open()
+        if not body.path or not os.path.isdir(body.path):
+            raise HTTPException(status_code=404, detail=f"No such folder: {body.path}")
+        root = body.path
+        if os.path.basename(os.path.normpath(root)) != ".github":
+            root = os.path.join(root, ".github")
+        written = []
+        for a in agents.project_agents(db):
+            path = os.path.join(root, "agents", agents._slug(a["name"]) + ".agent.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(agents.agent_to_md(a))
+            written.append(path)
+        for r in agents.project_rules(db):
+            name = agents._slug(r["name"])
+            if name == "copilot-instructions":
+                path = os.path.join(root, "copilot-instructions.md")
+            else:
+                path = os.path.join(root, "instructions", name + ".instructions.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(agents.instructions_to_md(r))
+            written.append(path)
+        return {"written": written}
+    return _guard(go)

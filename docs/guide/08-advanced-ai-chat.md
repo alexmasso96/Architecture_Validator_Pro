@@ -6,38 +6,74 @@
 
 ![AI Chat](../../Media/images/advanced_ai_chat.png)
 
-The **AI Chat** view lets you ask questions about your firmware and get answers grounded in the *actual* C source — not guesses. When grounded in your **code mind map**, it answers from real functions and files and points at them by name.
+The **AI Chat** view lets you ask questions about your firmware and get answers grounded in the *actual* C source, not guesses. The agent reads the code with read-only tools, and every function or `file.c:123` it mentions is a link that opens the code next to the chat.
 
 > 💡 **Preferences → Tutorials → AI Chat assistant** walks through it interactively.
 
 ## What you need
 
-- A connected AI provider (set up in **Preferences → AI Settings** — same providers and credential store as [AI Generation](07-ai-test-generation.md)).
-- A **code mind map** for the release you're analysing (built in [AI Generation](07-ai-test-generation.md)).
+- A connected AI account (set up in **Preferences → AI Settings**, the same accounts as [AI Generation](07-ai-test-generation.md)).
+- The release's **source imported** (Release Manager), so the agent can read the code.
+- Optionally, a **Code Map and mind map** for the release (Code Map tab): the agent then knows the structure before it opens files. Rebuild them after the call-tree or mind-map changes of V3.3.0.
 
 ## The layout
 
-A two-column workspace:
+Laid out like VS Code:
 
-- **Left — configuration:** the **Provider** and **Model** pickers, a **System Prompt** that steers the assistant's role and tone for the whole conversation, and a **Ground in Code Mind Map** toggle. **Clear Conversation** starts fresh.
-- **Right — the conversation:** the message thread (rendered markdown, with the agent's tool calls shown inline), a multi-line input, and **Send / Stop**. Press **Enter** to send (Shift+Enter for a newline).
+- **Left — explorer:** **Files** (the release's source tree), **Functions** (filterable) and **Chats** (this project's saved conversations).
+- **Middle — the code:** files open in tabs, read-only, with the referenced lines highlighted. Select code and press **Ask about selection** to put it in the chat box.
+- **Right — the agent:** the conversation, the credits bar, and the composer with the agent, model, effort and context pickers.
 
-## Grounding & agentic tools
+Drag the borders between the panes to resize them.
 
-Tick **Ground in Code Mind Map** to give the assistant your indexed source as context. From there it answers using **read-only, sandboxed tools** and shows each call inline, e.g. `→ read_file(adc.c)`:
+## Answers
+
+Answers are rendered Markdown with tables and highlighted code blocks (with **Copy**). A function name in backticks, a `Name()` call or a `path/file.c:123` reference becomes a link: click it to open the file and highlight the function or lines. Each answer lists the **tools it used** (search, file reads, function look-ups). Click a read file or a function there to open it.
 
 | Tool | What it does |
 |------|--------------|
-| `read_file` | Read a source file (sandboxed to the source root) |
-| `search_code` | Grep-style search across the source |
+| `read_file` / `list_files` | Read a source file / list files of the release's source |
+| `search_code` | Substring search across the source |
+| `get_function` / `get_call_graph` | One function's details / its callers and callees (Code Map) |
 | `get_mind_map` | The compact per-model index |
-| `get_requirements` | Imported requirements traceability |
-| `get_function` / `get_call_graph` | One function's neighbourhood / a caller-callee graph |
-| `get_diff` | The stored current-vs-previous diff for a file |
+| `get_requirements` | Imported requirements |
+| `get_diff` | The stored current-vs-previous diff |
 
-Every tool is read-only and confined to the configured source root by a **path-jail** — the agent can read your code but never write or escape the folder.
+Every tool is read-only and confined to the release's stored source.
 
-**Example:** *"Which functions read the ADC, and is each one validated?"* → the agent reads the relevant files and answers with the exact functions, the symbol each port matched, and its review state. Grounding is what turns it from a generic chatbot into one that knows *your* firmware.
+## Models, effort and context
+
+- **Model:** every configured account's models in one list. The chat remembers the last model and settings (per account too) across restarts.
+- **Effort:** shown for models that reason (Copilot's reasoning models, OpenAI o-series/GPT-5, Claude 4+, Gemini 2.5+, Ollama thinking models).
+- **Context:** for Ollama, the context window the model runs with (`num_ctx`, up to what the model takes). For other accounts, a cap on how much of the model's window the chat may fill. When the conversation outgrows it, the oldest messages are left out, and the answer says so.
+- **⋯ settings:** turn the code tools or the mind map off, pick the mind map's scope (this model / whole project), and cap the answer length.
+
+The ring next to **Send** shows how much of the context window the next request fills: rules and agent, mind map, tool definitions and conversation (hover for the split). After an answer, the hover also shows the size of the last request as the provider counted it, tool results included.
+
+## Credits
+
+The bar under the chat title shows the account's balance. For **GitHub Copilot**, that's the chat credits left this month and the reset date (**⟳** refreshes). OpenAI, Anthropic and Gemini are billed per token, and self-hosted Ollama/vLLM cost nothing. **This chat** shows what the conversation used: Copilot credits, tokens in and out, and the number of model requests. Each answer shows its own tokens too.
+
+## Chat history
+
+Every conversation is saved automatically, per project and per user. Chats are encrypted in your app-data folder, not in the `.arch`, so they work in read-only projects and colleagues don't see them. Open, rename (double-click) or delete chats in **Chats**; **＋ New** starts a fresh one. A chat reopens with the model and agent it last used.
+
+## Editing, rolling back and retrying
+
+Hover a message for its actions:
+
+- **✎ Edit** on a prompt: change it, optionally pick another model, and send. The prompt and everything after it are replaced.
+- **⟲ Roll back to here:** remove the prompt and everything after it. Its text goes back into the box.
+- **↻ Retry** on an answer: ask the same question again, or pick **another model** from the menu next to it.
+
+## Agents and rules
+
+Agents and rules are set up the way VS Code's Copilot sets them up (**⚙** next to the agent picker):
+
+- **Agents** (`.agent.md`): a name, a description, instructions, the tools it may use and an optional preferred model, which is picked when you choose the agent. The built-in agents are *Ask*, *Test Engineer* and *Code Reviewer*.
+- **Rules** (`.instructions.md`): text added to every request, or only when the file open in the editor matches the rule's `applyTo` globs (e.g. `**/*.c`). **Project rules** apply to every agent (VS Code's `copilot-instructions.md`).
+
+Agents and rules are saved in the project, so everyone on it shares them. **Import from folder…** reads a checkout's `.github/agents`, `.github/chatmodes`, `.github/instructions`, `copilot-instructions.md` and `AGENTS.md`. **Export to folder…** writes them back in the same layout.
 
 ---
 

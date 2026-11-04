@@ -131,3 +131,25 @@ def test_persists_across_reload(creds, tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_unreadable_store_is_set_aside_not_overwritten(tmp_path, monkeypatch):
+    """A store written under another machine id must survive a save from this
+    process: it's moved aside, never replaced (it held someone's keys)."""
+    import os
+    from cryptography.fernet import Fernet
+    from Application_Logic import Logic_AI_Credentials as c
+    monkeypatch.setenv("ARCHVALIDATOR_CONFIG_DIR", str(tmp_path))
+    path = c._cred_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    foreign = Fernet(Fernet.generate_key()).encrypt(b'{"__copilot_oauth__": "gho_x"}')
+    path.write_bytes(foreign)
+    assert c.get_key("ollama") is None          # unreadable here → looks empty
+    c.set_key("openai", "sk-new")
+    backups = [p for p in os.listdir(tmp_path) if ".unreadable-" in p]
+    assert len(backups) == 1
+    assert (tmp_path / backups[0]).read_bytes() == foreign
+    assert c.get_key("openai") == "sk-new"
+    # A readable store is just updated in place, nothing set aside.
+    c.set_key("anthropic", "sk-a")
+    assert len([p for p in os.listdir(tmp_path) if ".unreadable-" in p]) == 1

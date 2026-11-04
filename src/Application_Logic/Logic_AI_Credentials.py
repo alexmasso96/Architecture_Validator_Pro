@@ -152,9 +152,33 @@ def _load() -> Dict[str, str]:
         return {}
 
 
+def _set_aside_unreadable(path: Path) -> None:
+    """A store this process can't decrypt (written under another machine id —
+    e.g. a process whose MAC/host/user reads differently) is kept as
+    ``credentials.aikeys.unreadable-<time>`` instead of being overwritten, so
+    the keys in it aren't lost and can be recovered by the process that wrote it."""
+    try:
+        token = path.read_bytes()
+    except OSError:
+        return
+    try:
+        _fernet().decrypt(token)
+        return
+    except InvalidToken:
+        pass
+    import time as _time
+    backup = path.with_name(f"{path.name}.unreadable-{_time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        os.replace(path, backup)
+    except OSError:
+        pass
+
+
 def _save(data: Dict[str, str]) -> None:
     _ensure_dir()
     path = _cred_path()
+    if path.is_file():
+        _set_aside_unreadable(path)
     token = _fernet().encrypt(json.dumps(data).encode("utf-8"))
     # Write atomically-ish via a temp file in the same dir, then replace.
     tmp = path.with_suffix(path.suffix + ".tmp")

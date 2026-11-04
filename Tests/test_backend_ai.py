@@ -5,6 +5,7 @@ ARCHVALIDATOR_CONFIG_DIR so tests never touch the real machine store, and the
 provider call is faked so no network is needed.
 """
 import asyncio
+import json
 import os
 import socket
 import sys
@@ -97,18 +98,23 @@ def _free_port():
 
 
 def test_chat_streams_tokens(tmp_path, monkeypatch):
+    """The chat runs the agent's tool loop and streams its progress: the
+    context it sends, each tool call and result, token usage, then the answer."""
     monkeypatch.setenv("ARCHVALIDATOR_CONFIG_DIR", str(tmp_path / "creds2"))
     from Application_Logic import Logic_AI_Credentials as creds
     creds.set_key("anthropic", "sk-fake")   # makes is_configured() True
+    seen = {}
 
-    def fake_generate(provider_id, model, messages, system_prompt=None,
-                      stream_cb=None, stop_check=None):
-        for tok in ["Hel", "lo", " wor", "ld"]:
-            if stream_cb:
-                stream_cb(tok)
+    def fake_loop(provider_id, model, messages, tools, tool_executor,
+                  system_prompt=None, on_tool_call=None, on_tool_result=None,
+                  on_usage=None, options=None, stop_check=None, **kw):
+        seen.update(messages=messages, options=options, system=system_prompt)
+        on_tool_call("search_code", {"query": "Motor"})
+        on_tool_result("search_code", {"query": "Motor"}, "a.c:1: Motor_Init()")
+        on_usage({"input_tokens": 120, "output_tokens": 30})
         return "Hello world"
 
-    monkeypatch.setattr(providers, "generate", fake_generate)
+    monkeypatch.setattr(providers, "generate_with_tools", fake_loop)
 
     port = _free_port()
     app = create_app(token=TOKEN)
@@ -122,14 +128,15 @@ def test_chat_streams_tokens(tmp_path, monkeypatch):
     assert srv.started
 
     async def run():
-        tokens, done = [], None
+        events = []
         async with httpx.AsyncClient(timeout=10.0) as http:
             async with http.stream(
                 "POST", f"http://127.0.0.1:{port}/api/ai/chat",
                 headers=AUTH,
                 json={"provider_id": "anthropic", "model": "claude-3-5-haiku-latest",
                       "messages": [{"role": "user", "content": "hi"}],
-                      "ground_in_mindmap": False},
+                      "ground_in_mindmap": False,
+                      "options": {"effort": "low"}},
             ) as resp:
                 assert resp.status_code == 200
                 event = None
@@ -137,22 +144,26 @@ def test_chat_streams_tokens(tmp_path, monkeypatch):
                     if line.startswith("event:"):
                         event = line.split(":", 1)[1].strip()
                     elif line.startswith("data:"):
-                        data = line.split(":", 1)[1].strip()
-                        if event == "token":
-                            tokens.append(data.strip('"'))
-                        elif event == "done":
-                            done = data
+                        events.append((event, json.loads(line.split(":", 1)[1].strip())))
+                        if event in ("done", "error"):
                             break
-        return tokens, done
+        return events
 
     try:
-        tokens, done = asyncio.run(run())
+        events = asyncio.run(run())
     finally:
         srv.should_exit = True
         thread.join(timeout=5)
 
-    assert "".join(tokens) == "Hello world"
-    assert done is not None
+    kinds = [k for k, _ in events]
+    assert kinds[0] == "context"
+    assert kinds[-1] == "done", events
+    assert "tool" in kinds and "tool_result" in kinds and "usage" in kinds
+    assert dict(events)["token"] == "Hello world"
+    assert dict(events)["usage"] == {"input_tokens": 120, "output_tokens": 30}
+    assert seen["options"] == {"effort": "low"}
+    # The agent's citation rules always reach the model.
+    assert "CITING CODE" in seen["system"]
 
 
 def test_copilot_host_can_be_set_and_cleared(client):

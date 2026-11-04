@@ -617,3 +617,153 @@ export interface JobPayload {
   message: string;
   error?: string;
 }
+
+// ---------------------------------------------------------------------------
+// AI Chat: model info, context, credits, history, agents
+// ---------------------------------------------------------------------------
+export interface AIModelInfo {
+  id: string;
+  context_tokens: number;
+  /** Ollama: the largest window the model takes. */
+  max_context_tokens?: number | null;
+  max_output_tokens?: number | null;
+  /** Effort levels the model takes ([] = no effort setting). */
+  efforts: string[];
+  tools: boolean;
+  /** Ollama: the context window is set per chat (num_ctx). */
+  configurable_context: boolean;
+}
+
+export interface ChatContextBreakdown {
+  system: number;
+  mind_map: number;
+  tools: number;
+  history: number;
+  total: number;
+  window: number;
+  has_source: boolean;
+  has_mind_map: boolean;
+  project_open: boolean;
+  agent?: string;
+  tool_names: string[];
+  dropped?: number;
+}
+
+export interface CopilotQuota {
+  entitlement: number;
+  remaining: number;
+  used: number;
+  unlimited: boolean;
+  percent_remaining: number;
+  has_quota: boolean;
+  overage_count: number;
+}
+
+export interface ProviderUsage {
+  kind: "quota" | "tokens" | "local";
+  signed_in?: boolean;
+  plan?: string;
+  sku?: string;
+  reset_date?: string;
+  token_based_billing?: boolean;
+  quotas?: Record<string, CopilotQuota>;
+}
+
+export interface ChatToolUse {
+  name: string;
+  args: Record<string, unknown>;
+  chars?: number;
+  preview?: string;
+  error?: boolean;
+}
+
+export interface ChatUsage {
+  input_tokens: number;
+  output_tokens: number;
+  requests: number;
+  /** Copilot credits spent, by quota id. */
+  credits?: Record<string, number>;
+  /** The last request's prompt size: what the conversation fills now. */
+  last_input_tokens?: number;
+}
+
+export interface ChatTurn {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  provider_id?: string;
+  model?: string;
+  agent_id?: string;
+  effort?: string | null;
+  tools?: ChatToolUse[];
+  usage?: ChatUsage;
+  error?: string;
+  /** History trimmed to fit the window for this answer. */
+  dropped?: number;
+  ts?: string;
+}
+
+export interface ChatSettings {
+  effort: string | null;
+  num_ctx: number | null;
+  context_limit: number | null;
+  max_output_tokens: number | null;
+  ground: boolean;
+  map_scope: "model" | "project";
+  use_tools: boolean;
+}
+
+export interface ChatSession {
+  id: string;
+  title?: string;
+  provider_id: string;
+  model: string;
+  agent_id: string;
+  settings: Partial<ChatSettings>;
+  usage: Partial<ChatUsage>;
+  messages: ChatTurn[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  created_at?: string;
+  updated_at?: string;
+  provider_id: string;
+  model: string;
+  agent_id: string;
+  message_count: number;
+  usage: Partial<ChatUsage>;
+}
+
+export interface ChatAgent {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  /** null = every tool. */
+  tools: string[] | null;
+  model: string;
+  source: "builtin" | "project";
+  file?: string;
+}
+
+export interface ChatRule {
+  id: string;
+  name: string;
+  description: string;
+  /** Comma-separated globs; "" = every request. */
+  apply_to: string;
+  body: string;
+  enabled: boolean;
+  file?: string;
+}
+
+export interface AgentsResponse {
+  agents: ChatAgent[];
+  rules: ChatRule[];
+  default_agent_id: string;
+  tools: string[];
+}

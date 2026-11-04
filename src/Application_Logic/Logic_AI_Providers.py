@@ -103,6 +103,91 @@ class ToolCall:
     input: dict = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# Per-request options (chat settings) and token usage
+# ---------------------------------------------------------------------------
+# A chat turn may carry {"effort": str, "num_ctx": int, "max_output_tokens": int}.
+# Each provider maps them onto its own request body in apply_options(); a value
+# a model can't take is left out rather than sent and refused.
+
+EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh", "max")
+_BASIC_EFFORTS = ["low", "medium", "high"]
+
+# Thinking-token budgets for the providers that take a budget, not a level.
+_ANTHROPIC_THINKING_BUDGET = {"low": 2048, "medium": 8192, "high": 16384,
+                              "xhigh": 32000, "max": 64000}
+_GEMINI_THINKING_BUDGET = {"none": 0, "low": 1024, "medium": 8192, "high": 24576,
+                           "xhigh": 32768, "max": 32768}
+
+
+def _effort(options: Optional[Dict]) -> Optional[str]:
+    """The requested effort level, or None for the model's default."""
+    e = (options or {}).get("effort")
+    return e if e in EFFORT_LEVELS else None
+
+
+def _max_output(options: Optional[Dict]) -> Optional[int]:
+    try:
+        n = int((options or {}).get("max_output_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def parse_usage(data: Dict) -> Dict[str, int]:
+    """{input_tokens, output_tokens} of one raw response, whatever the provider
+    (OpenAI/Copilot/vLLM chat, Responses API, Anthropic, Gemini, Ollama). Missing
+    counts are 0; an unknown shape gives {}."""
+    if not isinstance(data, dict):
+        return {}
+    u = data.get("usage")
+    if isinstance(u, dict) and u:
+        if "prompt_tokens" in u or "completion_tokens" in u:
+            return {"input_tokens": int(u.get("prompt_tokens") or 0),
+                    "output_tokens": int(u.get("completion_tokens") or 0)}
+        # Anthropic counts cached prompt tokens apart from input_tokens.
+        inp = (int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0)
+               + int(u.get("cache_creation_input_tokens") or 0))
+        return {"input_tokens": inp, "output_tokens": int(u.get("output_tokens") or 0)}
+    g = data.get("usageMetadata")
+    if isinstance(g, dict):
+        return {"input_tokens": int(g.get("promptTokenCount") or 0),
+                "output_tokens": int(g.get("candidatesTokenCount") or 0)
+                + int(g.get("thoughtsTokenCount") or 0)}
+    if "prompt_eval_count" in data or "eval_count" in data:
+        return {"input_tokens": int(data.get("prompt_eval_count") or 0),
+                "output_tokens": int(data.get("eval_count") or 0)}
+    return {}
+
+
+def estimate_tokens(value) -> int:
+    """Rough token count (~4 characters a token) of text or of any JSON-able
+    value — for the context meter before a provider reports real usage."""
+    if value is None:
+        return 0
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return (len(text) + 3) // 4
+
+
+def _openai_reasoning_model(model: str) -> bool:
+    low = model.lower()
+    return low.startswith(("o1", "o3", "o4", "gpt-5", "gpt-6"))
+
+
+def _anthropic_thinking_model(model: str) -> bool:
+    """Claude models that take extended thinking (3.7 and 4+, incl. the 5 family)."""
+    low = model.lower()
+    if "claude-3-5" in low or "claude-3-haiku" in low or "claude-3-opus" in low \
+            or "claude-3-sonnet" in low:
+        return False
+    return low.startswith("claude")
+
+
+def _gemini_thinking_model(model: str) -> bool:
+    low = model.lower()
+    return low.startswith("gemini") and not re.match(r"gemini-(1\.|2\.0)", low)
+
+
 # Well-known VS Code / Copilot-Chat OAuth app client id (same one editor plugins
 # and community tools use; not org-specific).
 GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98"
@@ -244,6 +329,33 @@ class AIProvider:
         """The assistant message to replay before tool results. Default flattens
         to text; providers needing verbatim content blocks (Anthropic) override."""
         return {"role": "assistant", "content": self.parse_response(data)}
+
+    def supports_tools_for(self, model: str) -> bool:
+        """Native tool calling for this model (default: the provider's flag)."""
+        return bool(self.SUPPORTS_TOOLS)
+
+    # --- chat settings ---
+    def efforts_for(self, model: str) -> List[str]:
+        """The effort levels this model takes ([] = no effort setting)."""
+        return []
+
+    def model_info(self, model: str) -> Dict:
+        """What the chat settings need to know about one model: context window,
+        output cap, effort levels and native tool support."""
+        entry = next((m for m in self.list_models() if m.get("id") == model), {}) or {}
+        return {
+            "id": model,
+            "context_tokens": int(entry.get("context_tokens") or 0) or context_window_for(model),
+            "max_output_tokens": int(entry.get("max_output_tokens") or 0) or None,
+            "efforts": list(entry.get("efforts") or self.efforts_for(model)),
+            "tools": self.supports_tools_for(model),
+            "configurable_context": False,
+        }
+
+    def apply_options(self, body: Dict, model: str, options: Optional[Dict]) -> None:
+        """Map chat options (effort, output cap, context size) onto a request
+        body built by build_request. Default: nothing to map."""
+        return None
 
     # --- pure, unit-testable ---
     def build_request(self, messages: List[Message], model: str,
@@ -479,9 +591,24 @@ class CopilotProvider(AIProvider):
     # not /chat/completions — learnt from each model's supported_endpoints in
     # discovery, or from the API's own "unsupported_api_for_model" refusal.
     _responses_only: set = set()
+    # Per-model capabilities from discovery: {model: {"efforts": [...], "tools": bool}}.
+    _caps: Dict[str, Dict] = {}
+
+    # Copilot's chat models take OpenAI-style tool calls on both endpoints.
+    SUPPORTS_TOOLS = True
 
     def _uses_responses(self, model: str) -> bool:
         return model in type(self)._responses_only
+
+    def supports_tools_for(self, model: str) -> bool:
+        caps = type(self)._caps.get(model)
+        return True if caps is None else bool(caps.get("tools", True))
+
+    def efforts_for(self, model: str) -> List[str]:
+        caps = type(self)._caps.get(model)
+        if caps is not None:
+            return list(caps.get("efforts") or [])
+        return list(_BASIC_EFFORTS) if _openai_reasoning_model(model) else []
 
     def build_request(self, messages, model, system_prompt, tools_param=None):
         api_token = self._fresh_copilot_token()
@@ -496,7 +623,8 @@ class CopilotProvider(AIProvider):
         }
         base = type(self)._cp_api_base
         if self._uses_responses(model):
-            return f"{base}/responses", headers, _responses_body(model, system, convo)
+            return (f"{base}/responses", headers,
+                    _responses_body(model, system, convo, tools_param))
         body = {"model": model, "messages": msgs, "stream": False}
         if tools_param:
             body["tools"] = tools_param
@@ -507,6 +635,22 @@ class CopilotProvider(AIProvider):
             body["temperature"] = _DEFAULT_TEMPERATURE
             body["max_tokens"] = _DEFAULT_MAX_TOKENS
         return f"{base}/chat/completions", headers, body
+
+    def apply_options(self, body, model, options):
+        effort = _effort(options)
+        cap = _max_output(options)
+        responses = "input" in body and "messages" not in body
+        if effort and effort in self.efforts_for(model):
+            if responses:
+                body["reasoning"] = {"effort": effort}
+            else:
+                body["reasoning_effort"] = effort
+                # A reasoning request takes no temperature.
+                body.pop("temperature", None)
+        if cap:
+            for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
+                if key in body:
+                    body[key] = cap
 
     def _post_and_json(self, url, headers, body, stop_check=None):
         try:
@@ -522,16 +666,53 @@ class CopilotProvider(AIProvider):
             system = "\n\n".join(m.get("content", "") for m in msgs if m.get("role") == "system")
             convo = [m for m in msgs if m.get("role") != "system"]
             url = url[: -len("/chat/completions")] + "/responses"
-            return super()._post_and_json(url, headers, _responses_body(model, system, convo),
-                                          stop_check=stop_check)
+            rbody = _responses_body(model, system, convo, body.get("tools"))
+            if body.get("reasoning_effort"):
+                rbody["reasoning"] = {"effort": body["reasoning_effort"]}
+            return super()._post_and_json(url, headers, rbody, stop_check=stop_check)
 
     def parse_response(self, data):
         if isinstance(data, dict) and "output" in data and "choices" not in data:
             return _responses_text(data)
         try:
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError):
             return ""
+
+    # --- tool calling: OpenAI chat format is the canonical in-conversation
+    # shape; _responses_body converts it for the Responses API. ---
+    def build_tools_param(self, tools):
+        return OpenAIProvider.build_tools_param(self, tools)
+
+    def parse_tool_calls(self, data):
+        if isinstance(data, dict) and "output" in data and "choices" not in data:
+            out = []
+            for item in data.get("output") or []:
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    try:
+                        args = json.loads(item.get("arguments") or "{}")
+                    except (ValueError, TypeError):
+                        args = {}
+                    out.append(ToolCall(id=item.get("call_id") or item.get("id", ""),
+                                        name=item.get("name", ""), input=args))
+            return out
+        return OpenAIProvider.parse_tool_calls(self, data)
+
+    def capture_assistant_turn(self, data):
+        if isinstance(data, dict) and "output" in data and "choices" not in data:
+            calls = [{"id": item.get("call_id") or item.get("id", ""), "type": "function",
+                      "function": {"name": item.get("name", ""),
+                                   "arguments": item.get("arguments") or "{}"}}
+                     for item in data.get("output") or []
+                     if isinstance(item, dict) and item.get("type") == "function_call"]
+            turn = {"role": "assistant", "content": _responses_text(data)}
+            if calls:
+                turn["tool_calls"] = calls
+            return turn
+        return OpenAIProvider.capture_assistant_turn(self, data)
+
+    def format_tool_results(self, results):
+        return OpenAIProvider.format_tool_results(self, results)
 
     def discover_models(self):
         try:
@@ -552,25 +733,127 @@ class CopilotProvider(AIProvider):
                 if isinstance(eps, list) and eps and "/chat/completions" not in eps \
                         and "/responses" in eps:
                     type(self)._responses_only.add(m.get("id", ""))
+                supports = (m.get("capabilities") or {}).get("supports") or {}
+                efforts = supports.get("reasoning_effort")
+                type(self)._caps[m.get("id", "")] = {
+                    "efforts": [e for e in efforts if isinstance(e, str)]
+                    if isinstance(efforts, list) else [],
+                    "tools": bool(supports.get("tool_calls", True)),
+                }
             return _models_from_openai_list(items)
         except (requests.RequestException, ValueError, AIError):
             return []
 
+    # --- plan quota (credits) ---
+    def quota(self) -> Dict:
+        """This account's Copilot plan and what's left of its monthly quotas,
+        as VS Code's Copilot status shows them. Raises AIAuthError when signed
+        out or refused."""
+        oauth = creds.get_copilot_oauth_token()
+        if not oauth:
+            raise AIAuthError("Not signed in to GitHub Copilot.")
+        url = github_urls(github_host())["copilot_token"].replace("/v2/token", "/user")
+        try:
+            resp = requests.get(url, headers={"Authorization": f"token {oauth}",
+                                              "Accept": "application/json", **_VSCODE_HEADERS},
+                                timeout=15)
+        except requests.RequestException as e:
+            raise AIGenerationError(f"Couldn't reach {github_host()}: {e}") from e
+        if resp.status_code in (401, 403):
+            raise AIAuthError("Copilot refused the quota request — sign in again.")
+        if resp.status_code != 200:
+            raise AIGenerationError(f"Copilot quota request failed (HTTP {resp.status_code}).")
+        return parse_copilot_quota(resp.json())
 
-def _responses_body(model: str, system: str, convo: List[Message]) -> Dict:
-    """An OpenAI Responses API request for a plain-text conversation. Copilot
-    has no native tool calling here (bracket-tag fallback), so text suffices.
+
+def parse_copilot_quota(data: Dict) -> Dict:
+    """Normalise copilot_internal/user into {plan, reset_date, quotas: {id: {...}}}.
+    Each quota: entitlement, remaining, used, unlimited, percent_remaining.
+    Older replies carry only limited_user_quotas / monthly_quotas."""
+    data = data if isinstance(data, dict) else {}
+    quotas: Dict[str, Dict] = {}
+    for qid, q in (data.get("quota_snapshots") or {}).items():
+        if not isinstance(q, dict):
+            continue
+        ent = float(q.get("entitlement") or 0)
+        rem = float(q.get("remaining", q.get("quota_remaining", 0)) or 0)
+        used = q.get("credits_used")
+        quotas[qid] = {
+            "entitlement": ent,
+            "remaining": rem,
+            "used": float(used) if isinstance(used, (int, float)) else max(0.0, ent - rem),
+            "unlimited": bool(q.get("unlimited")),
+            "percent_remaining": float(q.get("percent_remaining") or 0),
+            "has_quota": bool(q.get("has_quota", ent > 0 or q.get("unlimited"))),
+            "overage_count": float(q.get("overage_count") or 0),
+        }
+    if not quotas:
+        monthly = data.get("monthly_quotas") or {}
+        left = data.get("limited_user_quotas") or {}
+        for qid in monthly:
+            ent = float(monthly.get(qid) or 0)
+            rem = float(left.get(qid, ent) or 0)
+            quotas[qid] = {"entitlement": ent, "remaining": rem, "used": max(0.0, ent - rem),
+                           "unlimited": False,
+                           "percent_remaining": (rem / ent * 100) if ent else 0.0,
+                           "has_quota": ent > 0, "overage_count": 0.0}
+    return {
+        "plan": data.get("copilot_plan") or "",
+        "sku": data.get("access_type_sku") or "",
+        "reset_date": data.get("quota_reset_date") or data.get("limited_user_reset_date") or "",
+        "token_based_billing": bool(data.get("token_based_billing")),
+        "quotas": quotas,
+    }
+
+
+def _responses_tools(tools_param) -> List[Dict]:
+    """OpenAI chat-format tool definitions → Responses API function tools."""
+    out = []
+    for t in tools_param or []:
+        fn = (t or {}).get("function") if isinstance(t, dict) else None
+        if fn:
+            out.append({"type": "function", "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters") or {"type": "object", "properties": {}}})
+        elif isinstance(t, dict):
+            out.append(t)
+    return out
+
+
+def _responses_body(model: str, system: str, convo: List[Message], tools_param=None) -> Dict:
+    """An OpenAI Responses API request. The conversation is kept in OpenAI chat
+    format (as the tool loop builds it); assistant tool calls become
+    function_call items and tool results function_call_output items.
     No temperature: the Responses-only models are reasoning models, which
     reject it."""
+    items: List[Dict] = []
+    for m in convo:
+        role = m.get("role", "user")
+        if role == "tool":
+            items.append({"type": "function_call_output", "call_id": m.get("tool_call_id", ""),
+                          "output": str(m.get("content", ""))})
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            if m.get("content"):
+                items.append({"role": "assistant", "content": m["content"]})
+            for tc in m["tool_calls"]:
+                fn = tc.get("function") or {}
+                items.append({"type": "function_call", "call_id": tc.get("id", ""),
+                              "name": fn.get("name", ""),
+                              "arguments": fn.get("arguments") or "{}"})
+            continue
+        items.append({"role": role, "content": m.get("content", "")})
     body = {
         "model": model,
-        "input": [{"role": m.get("role", "user"), "content": m.get("content", "")}
-                  for m in convo],
+        "input": items,
         "stream": False,
         "max_output_tokens": _DEFAULT_MAX_TOKENS,
     }
     if system:
         body["instructions"] = system
+    tools = _responses_tools(tools_param)
+    if tools:
+        body["tools"] = tools
     return body
 
 
@@ -627,13 +910,17 @@ def _models_from_openai_list(items) -> List[Dict]:
         if any(tok in low for tok in _NON_CHAT):
             continue
         seen.add(mid)
-        ctx = 0
+        ctx = out_cap = 0
         cap = m.get("capabilities") or {}
         limits = cap.get("limits") or {}
         if isinstance(limits, dict):
             ctx = (limits.get("max_context_window_tokens")
                    or limits.get("max_prompt_tokens") or 0)
-        out.append({"id": mid, "name": m.get("name", mid), "context_tokens": ctx})
+            out_cap = limits.get("max_output_tokens", 0) or 0
+        entry = {"id": mid, "name": m.get("name", mid), "context_tokens": ctx}
+        if out_cap:
+            entry["max_output_tokens"] = out_cap
+        out.append(entry)
     return out
 
 
@@ -676,6 +963,21 @@ class AnthropicProvider(AIProvider):
         if tools_param:
             body["tools"] = tools_param
         return ANTHROPIC_URL, headers, body
+
+    def efforts_for(self, model):
+        return ["none", "low", "medium", "high"] if _anthropic_thinking_model(model) else []
+
+    def apply_options(self, body, model, options):
+        cap = _max_output(options)
+        if cap:
+            body["max_tokens"] = cap
+        effort = _effort(options)
+        if effort and effort != "none" and effort in self.efforts_for(model):
+            budget = _ANTHROPIC_THINKING_BUDGET[effort]
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            # The answer needs room beyond the thinking budget.
+            body["max_tokens"] = max(int(body.get("max_tokens") or 0), budget + 8192)
+            body.pop("temperature", None)
 
     def parse_response(self, data):
         try:
@@ -772,6 +1074,20 @@ class OpenAIProvider(AIProvider):
         except (KeyError, IndexError, TypeError, AttributeError):
             return ""
 
+    def efforts_for(self, model):
+        return list(_BASIC_EFFORTS) if _openai_reasoning_model(model) else []
+
+    def apply_options(self, body, model, options):
+        effort = _effort(options)
+        if effort and effort in self.efforts_for(model):
+            body["reasoning_effort"] = effort
+            body.pop("temperature", None)
+        cap = _max_output(options)
+        if cap:
+            for key in ("max_completion_tokens", "max_tokens"):
+                if key in body:
+                    body[key] = cap
+
     # --- tool calling (OpenAI 'tools' / 'tool_calls') ---
     def build_tools_param(self, tools):
         return [{"type": "function",
@@ -860,6 +1176,20 @@ class GeminiProvider(AIProvider):
         url = f"{GEMINI_BASE}/{model}:generateContent?key={key}"
         headers = {"Content-Type": "application/json"}
         return url, headers, body
+
+    def efforts_for(self, model):
+        return ["none", "low", "medium", "high"] if _gemini_thinking_model(model) else []
+
+    def apply_options(self, body, model, options):
+        cfg = body.setdefault("generationConfig", {})
+        cap = _max_output(options)
+        if cap:
+            cfg["maxOutputTokens"] = cap
+        effort = _effort(options)
+        if effort and effort in self.efforts_for(model):
+            cfg["thinkingConfig"] = {"thinkingBudget": _GEMINI_THINKING_BUDGET[effort]}
+        if not cfg:
+            body.pop("generationConfig", None)
 
     def parse_response(self, data):
         try:
@@ -1071,6 +1401,76 @@ class OllamaProvider(SelfHostedProvider):
         except AttributeError:
             return ""
 
+    # --- per-model capabilities (/api/show), for the chat settings ---
+    _SHOW_TTL = 600.0
+
+    def _show(self, model: str) -> Dict:
+        """/api/show of one model: {capabilities: [...], context_length: int}.
+        Cached; {} when the server can't say (older Ollama, unreachable)."""
+        cache = self.__dict__.setdefault("_show_cache", {})
+        hit = cache.get(model)
+        if hit and time.time() - hit[0] < self._SHOW_TTL:
+            return hit[1]
+        info: Dict = {}
+        try:
+            resp = requests.post(self.base_url() + "/api/show", headers=self._headers(),
+                                 json={"model": model}, timeout=_DISCOVERY_TIMEOUT + 5,
+                                 proxies=self._proxies())
+            if resp.status_code == 200:
+                data = resp.json() or {}
+                info["capabilities"] = [c for c in data.get("capabilities") or []
+                                        if isinstance(c, str)]
+                for k, v in (data.get("model_info") or {}).items():
+                    if k.endswith(".context_length") and isinstance(v, int):
+                        info["context_length"] = v
+                        break
+        except (requests.RequestException, ValueError):
+            info = {}
+        cache[model] = (time.time(), info)
+        return info
+
+    def supports_tools_for(self, model: str) -> bool:
+        if self.SUPPORTS_TOOLS:
+            return True
+        return "tools" in (self._show(model).get("capabilities") or [])
+
+    def efforts_for(self, model: str) -> List[str]:
+        if "thinking" in (self._show(model).get("capabilities") or []):
+            return ["none", "low", "medium", "high"]
+        return []
+
+    def model_info(self, model: str) -> Dict:
+        show = self._show(model)
+        return {
+            "id": model,
+            "context_tokens": self.num_ctx(),
+            "max_context_tokens": show.get("context_length"),
+            "max_output_tokens": None,
+            "efforts": self.efforts_for(model),
+            "tools": self.supports_tools_for(model),
+            "configurable_context": True,
+        }
+
+    def apply_options(self, body, model, options):
+        opts = body.setdefault("options", {})
+        try:
+            n = int((options or {}).get("num_ctx") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n:
+            limit = self._show(model).get("context_length") or 1_048_576
+            opts["num_ctx"] = max(2048, min(n, limit))
+        cap = _max_output(options)
+        if cap:
+            opts["num_predict"] = cap
+        effort = _effort(options)
+        if effort and effort in self.efforts_for(model):
+            # gpt-oss takes a level; other thinking models take on/off.
+            if "gpt-oss" in model.lower():
+                body["think"] = "low" if effort == "none" else effort
+            else:
+                body["think"] = effort != "none"
+
     # Ollama takes OpenAI-style tool definitions; calls come back with
     # arguments as an object (not a JSON string) and usually without ids.
     def build_tools_param(self, tools):
@@ -1198,15 +1598,17 @@ def generate(provider_id: str, model: str, messages: List[Message],
 
 # Bracket-tag grammar for the text-fallback path (locked decision #2 — Copilot).
 # The model emits e.g. [READ: path/to/file.c] when it wants to inspect code.
-_FALLBACK_TAG_RE = re.compile(r"\[(READ|LIST|SEARCH|MINDMAP|REQUIREMENTS|DIFF)(?::\s*([^\]]*))?\]",
-                              re.IGNORECASE)
+_FALLBACK_TAG_RE = re.compile(
+    r"\[(READ|LIST|SEARCH|MINDMAP|REQUIREMENTS|DIFF|FUNCTION|CALLGRAPH)(?::\s*([^\]]*))?\]",
+    re.IGNORECASE)
 _FALLBACK_TAG_TOOL = {
     "READ": "read_file", "LIST": "list_files", "SEARCH": "search_code",
     "MINDMAP": "get_mind_map", "REQUIREMENTS": "get_requirements", "DIFF": "get_diff",
+    "FUNCTION": "get_function", "CALLGRAPH": "get_call_graph",
 }
 _FALLBACK_ARG_KEY = {
     "read_file": "path", "list_files": "pattern", "search_code": "query",
-    "get_diff": "file_path",
+    "get_diff": "file_path", "get_function": "name", "get_call_graph": "name",
 }
 
 
@@ -1235,13 +1637,46 @@ def _parse_fallback_calls(text: str) -> "List[ToolCall]":
     return calls
 
 
+_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
+
+
+def _text_json_calls(text: str, tool_names) -> "List[ToolCall]":
+    """Tool calls a model wrote as JSON text ({"name": ..., "arguments": {...}},
+    bare or in a ```json block) — only for names that are real tools."""
+    if not text or "{" not in text:
+        return []
+    blobs = _JSON_BLOCK_RE.findall(text) or [text.strip()]
+    calls = []
+    for i, blob in enumerate(blobs):
+        try:
+            obj = json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        for j, item in enumerate(obj if isinstance(obj, list) else [obj]):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or (item.get("function") or {}).get("name")
+            args = item.get("arguments", item.get("parameters", {}))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {}
+            if name in tool_names:
+                calls.append(ToolCall(id=f"tj{i}_{j}", name=name,
+                                      input=args if isinstance(args, dict) else {}))
+    return calls
+
+
 def generate_with_tools(provider_id: str, model: str, messages: List[Message],
                         tools: "List[Tool]", tool_executor,
                         system_prompt: Optional[str] = None,
                         max_turns: int = 10, max_tool_calls: int = 40,
                         max_tool_output_chars: int = 4_000_000,
                         on_tool_call=None, on_text=None,
-                        stop_check: StopCheck = None) -> str:
+                        stop_check: StopCheck = None,
+                        options: Optional[Dict] = None,
+                        on_usage=None, on_tool_result=None) -> str:
     """Run an agentic loop: the model may request read-only tools; we execute
     them locally and feed results back until it returns a final answer.
 
@@ -1278,12 +1713,14 @@ def generate_with_tools(provider_id: str, model: str, messages: List[Message],
                 raise AIGenerationError(
                     f"Cumulative tool output exceeded {max_tool_output_chars} chars.")
             results[call.id] = (call.name, out)
+            if on_tool_result:
+                on_tool_result(call.name, call.input, out)
         return results
 
-    native = provider.SUPPORTS_TOOLS
+    native = provider.supports_tools_for(model) if tools else False
     tools_param = provider.build_tools_param(tools) if native else None
     effective_system = system_prompt
-    if not native:
+    if not native and tools:
         cat = _fallback_tool_catalogue(tools)
         effective_system = (system_prompt + "\n\n" + cat) if system_prompt else cat
 
@@ -1291,11 +1728,25 @@ def generate_with_tools(provider_id: str, model: str, messages: List[Message],
         if stop_check and stop_check():
             raise AIStopped("Stopped before turn.")
         url, headers, body = provider.build_request(convo, model, effective_system, tools_param)
+        provider.apply_options(body, model, options)
         data = provider._post_and_json(url, headers, body, stop_check=stop_check)
         text = provider.parse_response(data)
+        if on_usage:
+            on_usage(parse_usage(data))
 
         if native:
             calls = provider.parse_tool_calls(data)
+            if not calls:
+                # Some small models (qwen2.5-coder on Ollama) write the call as
+                # JSON text instead of a tool call: run it if it names a tool.
+                calls = _text_json_calls(text, {t.name for t in tools})
+                if calls:
+                    convo.append({"role": "assistant", "content": text})
+                    results = _run_calls(calls)
+                    blob = "\n\n".join(f"[{name} result]\n{out}"
+                                        for _cid, (name, out) in results.items())
+                    convo.append({"role": "user", "content": "TOOL RESULTS:\n" + blob})
+                    continue
             if not calls:
                 if on_text and text:
                     on_text(text)

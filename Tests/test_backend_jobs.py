@@ -117,13 +117,17 @@ def test_build_mind_map():
             assert status["has_mindmap"] and status["has_project_map"]
             assert status["meta"]["builder_version"] == "3.0"
 
-            from backend.routers.ai import ChatBody, _build_system_prompt
+            from backend.routers.ai import ChatBody, _chat_parts
             state = app.state.appstate
             chat = dict(provider_id="x", model="m", messages=[])
-            model_prompt = _build_system_prompt(state, ChatBody(**chat))
-            project_prompt = _build_system_prompt(state, ChatBody(**chat, map_scope="project"))
-            assert "# MODEL MAP — Arch_A" in model_prompt
-            assert "# PROJECT MAP" in project_prompt and "### Arch_A" in project_prompt
+            model_parts = _chat_parts(state, ChatBody(**chat))
+            project_parts = _chat_parts(state, ChatBody(**chat, map_scope="project"))
+            assert "# MODEL MAP — Arch_A" in model_parts["mind_map"]
+            assert "# PROJECT MAP" in project_parts["mind_map"]
+            assert "### Arch_A" in project_parts["mind_map"]
+            # The release has source, so the agent gets the file tools.
+            assert model_parts["has_source"]
+            assert {"read_file", "search_code"} <= {t.name for t in model_parts["tools"]}
 
 
 def test_build_mind_map_no_source_fails():

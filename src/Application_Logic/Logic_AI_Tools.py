@@ -34,14 +34,54 @@ class ToolError(Exception):
     """Raised for sandbox violations / bad tool input (returned to the model)."""
 
 
+def _name_tokens(name: str) -> List[str]:
+    """'Pwt_TorqueCompute' → ['pwt', 'torque', 'compute']."""
+    import re
+    parts = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name or "").lower()
+    return [t for t in re.split(r"[^a-z0-9]+", parts) if t]
+
+
+def find_function(funcs, name: str):
+    """(resolved name, suggestions) for a function name a model asked about:
+    exact, case-insensitive, then by name parts — a port or wrapper name such
+    as 'p_torque_Compute' finds 'Pwt_Torque_Compute'. Resolved is None when
+    it's ambiguous or unknown; suggestions then lists close names."""
+    if not name:
+        return None, []
+    if name in funcs:
+        return name, []
+    low = name.lower()
+    exact = [f for f in funcs if f.lower() == low]
+    if len(exact) == 1:
+        return exact[0], []
+    sub = [f for f in funcs if low in f.lower()]
+    if len(sub) == 1:
+        return sub[0], []
+    want = [t for t in _name_tokens(name) if len(t) > 1 and t not in ("fn", "func")]
+    scored = []
+    for f in funcs:
+        have = set(_name_tokens(f))
+        hit = sum(1 for t in want if t in have)
+        if hit:
+            scored.append((hit, -abs(len(have) - len(want)), f))
+    scored.sort(reverse=True)
+    if want and scored and scored[0][0] == len(want) \
+            and (len(scored) == 1 or scored[1][0] < len(want)):
+        return scored[0][2], []
+    return None, (sub or [f for _h, _l, f in scored])[:8]
+
+
 def default_tools() -> List[Tool]:
     """Provider-neutral definitions for the read-only tool set."""
     return [
-        Tool("read_file", "Read a source file (path relative to the source root).",
+        Tool("read_file", "Read a source file. Use a path as list_files or search_code "
+             "return it (e.g. 'powertrain/torque.c'); a bare file name works when it's unique.",
              {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
-        Tool("list_files", "List source files matching a glob under the source root.",
+        Tool("list_files", "List the source files. pattern: a glob ('*.c', 'powertrain/*') "
+             "or a word in the path ('torque'); empty lists everything.",
              {"type": "object", "properties": {"pattern": {"type": "string"}}}),
-        Tool("search_code", "Search the source for a substring; returns file:line matches.",
+        Tool("search_code", "Search the source for a substring (case-insensitive), e.g. a "
+             "function or variable name; returns file:line: text matches.",
              {"type": "object", "properties": {"query": {"type": "string"},
                                                "path": {"type": "string"}}, "required": ["query"]}),
         Tool("get_mind_map", "Get the compact mind-map index for the current model.",
@@ -50,7 +90,8 @@ def default_tools() -> List[Tool]:
              {"type": "object", "properties": {}}),
         Tool("get_diff", "Get the code diff (all files, or one file_path) vs the previous source.",
              {"type": "object", "properties": {"file_path": {"type": "string"}}}),
-        Tool("get_function", "Get detailed properties, reads/writes, and conditions of a function.",
+        Tool("get_function", "Get a function's file and line, signature, calls, variables read "
+             "and written, and conditions, from the Code Map. Use the exact C function name.",
              {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}),
         Tool("get_call_graph", "Get the call graph (callers/callees) around a function up to a specific depth.",
              {"type": "object", "properties": {
@@ -102,7 +143,13 @@ class ToolExecutor:
             rel = (path or "").replace(os.sep, "/").lstrip("/")
             data = self.provider.read_file(rel)
             if data is None:
-                raise ToolError(f"Not a file in this release's source: {path}")
+                rel = self._resolve_path(rel)
+                data = self.provider.read_file(rel) if rel else None
+            if data is None:
+                close = self._close_paths(path)
+                hint = (" Did you mean: " + ", ".join(close) + "?") if close else \
+                    " Use list_files to see the files."
+                raise ToolError(f"Not a file in this release's source: {path}.{hint}")
             if len(data) > READ_CAP:
                 return data[:READ_CAP] + "\n/* ...truncated at 4MB... */"
             return data
@@ -115,13 +162,39 @@ class ToolExecutor:
             return data[:READ_CAP] + "\n/* ...truncated at 4MB... */"
         return data
 
+    def _resolve_path(self, rel: str) -> Optional[str]:
+        """A path the model got slightly wrong ('src/a/b.c', 'b.c',
+        'path/to/b.c'): the one release file it ends with, or with its name."""
+        if self.provider is None or not rel:
+            return None
+        files = [sf.rel_path for sf in self.provider.list_files()]
+        low = rel.lower()
+        tail = [f for f in files if low.endswith("/" + f.lower()) or f.lower().endswith("/" + low)]
+        if len(tail) == 1:
+            return tail[0]
+        base = low.rsplit("/", 1)[-1]
+        same = [f for f in files if f.lower().rsplit("/", 1)[-1] == base]
+        return same[0] if len(same) == 1 else None
+
+    def _close_paths(self, path: str) -> List[str]:
+        if self.provider is None:
+            return []
+        stem = (path or "").lower().rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if not stem:
+            return []
+        return [sf.rel_path for sf in self.provider.list_files()
+                if stem in sf.rel_path.lower()][:8]
+
     def list_files(self, pattern: str = "*") -> str:
-        pat = pattern or "*"
+        pat = (pattern or "*").strip() or "*"
+        # A plain word: files whose path contains it.
+        if not any(ch in pat for ch in "*?["):
+            pat = f"*{pat}*"
         if self.provider is not None:
             out = []
             for sf in self.provider.list_files():
                 rel, n = sf.rel_path, os.path.basename(sf.rel_path)
-                if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(n, pat):
+                if fnmatch.fnmatch(rel.lower(), pat.lower()) or fnmatch.fnmatch(n.lower(), pat.lower()):
                     out.append(rel)
                     if len(out) >= MAX_LIST:
                         out.append(f"(+more — refine the pattern; capped at {MAX_LIST})")
@@ -233,13 +306,12 @@ class ToolExecutor:
             return "(no code map available)"
         
         funcs = code_map["functions"]
-        if name not in funcs:
-            matches = [f for f in funcs if name.lower() in f.lower()]
-            if not matches:
-                return f"(function '{name}' not found)"
-            if len(matches) > 1:
-                return f"(function '{name}' not found. Did you mean: {', '.join(matches[:5])}?)"
-            name = matches[0]
+        resolved, close = find_function(funcs, name)
+        if resolved is None:
+            if close:
+                return f"(function '{name}' not found. Did you mean: {', '.join(close)}?)"
+            return f"(function '{name}' not found — try search_code)"
+        name = resolved
             
         f = funcs[name]
         lines = [
@@ -276,13 +348,12 @@ class ToolExecutor:
             return "(no code map available)"
             
         funcs = code_map["functions"]
-        if name not in funcs:
-            matches = [f for f in funcs if name.lower() in f.lower()]
-            if not matches:
-                return f"(function '{name}' not found)"
-            if len(matches) > 1:
-                return f"(function '{name}' not found. Did you mean: {', '.join(matches[:5])}?)"
-            name = matches[0]
+        resolved, close = find_function(funcs, name)
+        if resolved is None:
+            if close:
+                return f"(function '{name}' not found. Did you mean: {', '.join(close)}?)"
+            return f"(function '{name}' not found — try search_code)"
+        name = resolved
 
         callers_map = {f: [] for f in funcs}
         for f_caller, f_data in funcs.items():
