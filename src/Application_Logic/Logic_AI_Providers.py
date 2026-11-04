@@ -27,6 +27,7 @@ so they can be unit-tested without any network access.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -113,6 +114,11 @@ _VSCODE_HEADERS = {
     "User-Agent": "GitHubCopilotChat/0.25.0",
 }
 
+# Cloud providers' discovered model lists: re-queried at most this often, so
+# opening AI Settings or the chat doesn't hit every provider's API each time.
+_CLOUD_DISCOVERY_TTL = 600.0
+_CLOUD_DISCOVERY_FAIL_TTL = 60.0
+
 _DEFAULT_MAX_TOKENS = 16384
 _DEFAULT_TEMPERATURE = 0.2
 _HTTP_TIMEOUT = 120
@@ -179,9 +185,34 @@ class AIProvider:
     def is_configured(self) -> bool:
         raise NotImplementedError
 
+    # (fetched_at, fingerprint, models) of the last live discovery, per instance.
+    _cloud_cache: Optional[Tuple[float, str, List[Dict]]] = None
+
+    def _discovery_fingerprint(self) -> str:
+        """Changes whenever the account behind discovery changes (new key,
+        sign-in, other host), so a cached list from the old one isn't reused."""
+        return hashlib.sha256((creds.get_key(self.id) or "").encode()).hexdigest()
+
     def list_models(self) -> List[Dict]:
-        """Static fallback catalogue (instant, no network)."""
-        return list(self._models)
+        """The models this account can actually use, discovered live and cached;
+        the static catalogue when signed out or discovery fails."""
+        if not self.is_configured():
+            return list(self._models)
+        fp = self._discovery_fingerprint()
+        cached = self._cloud_cache
+        if cached and cached[1] == fp:
+            at, _, models = cached
+            ttl = _CLOUD_DISCOVERY_TTL if models else _CLOUD_DISCOVERY_FAIL_TTL
+            if time.time() - at < ttl:
+                return list(models or self._models)
+        found = self.discover_models()
+        self._cloud_cache = (time.time(), fp, found)
+        return list(found or self._models)
+
+    def refresh_models(self) -> List[Dict]:
+        """Drop the cached discovery and query the provider again now."""
+        self._cloud_cache = None
+        return self.list_models()
 
     def discover_models(self) -> List[Dict]:
         """Query the provider for the models actually available to this account.
@@ -327,6 +358,10 @@ class CopilotProvider(AIProvider):
 
     def is_configured(self) -> bool:
         return bool(creds.get_copilot_oauth_token())
+
+    def _discovery_fingerprint(self) -> str:
+        raw = f"{github_host()}\n{creds.get_copilot_oauth_token() or ''}"
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     # --- where to sign in ---
     @classmethod
@@ -481,9 +516,31 @@ class CopilotProvider(AIProvider):
                 return []
             data = resp.json()
             items = data.get("data", data) if isinstance(data, dict) else data
-            return _models_from_openai_list(items)
+            return _models_from_openai_list(_copilot_chat_models(items))
         except (requests.RequestException, ValueError, AIError):
             return []
+
+
+def _copilot_chat_models(items) -> list:
+    """Keep the Copilot models VS Code's picker offers: chat models, not
+    hidden from the picker, and not disabled by the account's/org's policy.
+    (A model whose policy is 'unconfigured' is kept — it's one the user can
+    still turn on in their Copilot settings.)"""
+    if not isinstance(items, list):
+        return []
+    out = []
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        kind = (m.get("capabilities") or {}).get("type")
+        if kind and kind != "chat":
+            continue
+        if m.get("model_picker_enabled") is False:
+            continue
+        if ((m.get("policy") or {}).get("state")) == "disabled":
+            continue
+        out.append(m)
+    return out
 
 
 def _models_from_openai_list(items) -> List[Dict]:
@@ -506,7 +563,8 @@ def _models_from_openai_list(items) -> List[Dict]:
         cap = m.get("capabilities") or {}
         limits = cap.get("limits") or {}
         if isinstance(limits, dict):
-            ctx = limits.get("max_context_window_tokens", 0) or 0
+            ctx = (limits.get("max_context_window_tokens")
+                   or limits.get("max_prompt_tokens") or 0)
         out.append({"id": mid, "name": m.get("name", mid), "context_tokens": ctx})
     return out
 
