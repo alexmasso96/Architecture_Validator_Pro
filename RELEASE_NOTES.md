@@ -1,3 +1,10 @@
+# v3.3.1 — Your full list of AI models
+
+## 🤖 AI models
+- **Fixed: the model picker only showed an old, built-in list** for GitHub Copilot, OpenAI, Anthropic and Gemini. It now shows the models your account actually has, including the newest ones.
+- **Copilot shows the same models as VS Code:** chat models your account or company allows. Models you still need to turn on in your Copilot settings are listed too.
+- **The list is checked again every 10 minutes,** and right away when you sign in, change your API key or change the GitHub host. If a provider can't be reached, the built-in list is shown instead.
+
 # v3.3.0 — Better AI mind maps, a sharper Code Map, GitHub Enterprise sign-in, a separate Sync Worker
 
 ## 🧠 AI mind maps built from your Code Map
