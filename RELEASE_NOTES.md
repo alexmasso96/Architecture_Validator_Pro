@@ -1,3 +1,31 @@
+# v3.3.0 — Better AI mind maps, a sharper Code Map, GitHub Enterprise sign-in, a separate Sync Worker
+
+## 🧠 AI mind maps built from your Code Map
+- **The mind map now comes from the Code Map and your ports' matched functions,** not from guessing by keyword. It lists each port with its function, parameters, return type and line, what runs it, the data it uses and the most important functions around it.
+- **One map per model, plus one for the whole project.** In AI Chat, pick **Mind Map: This model** or **Whole project**. The project map shows what runs each model and the calls and data shared between models. Small and self-hosted models answer better with less to read.
+- **Rebuild the mind map once to get the new format.** Older maps still work until then.
+
+## 🗺️ The Code Map reads your source better
+- **Source files are now read with tree-sitter,** a real C parser. The old scan stays as the fallback for C++ files and for files it can't parse.
+- **Functions that return `const` pointers are found.** The old scan missed them, for example every `*_GetState` function in the test project.
+- **AUTOSAR-style macros such as `FUNC`, `P2VAR`, `P2CONST` and `STATIC` are understood,** including the macros your project defines itself.
+- **Calls are listed in the order the code makes them,** not alphabetically.
+- **Test-column results don't change:** reads, writes and conditions are worked out the same way as before.
+
+## 🔐 Copilot through GitHub Enterprise
+- **Sign in to Copilot with a GitHub Enterprise Cloud account (GHE.com).** Enter your company's GitHub host for Copilot under **Preferences → AI Settings**, then sign in as usual.
+- **GitHub Enterprise Server isn't supported,** because it doesn't offer Copilot. The app now tells you so instead of failing quietly.
+
+## 🔄 Sync Worker
+- **The Sync Worker is now its own small program,** shown as **Architecture Validator Pro Sync** in Task Manager, next to the app. It starts faster and uses less memory.
+- **It has its own icon,** with a sync badge, and the app has a new icon too.
+- **Sync now shows that it's checking,** with the tray icon turning for a few seconds, and then tells you when nothing changed.
+- **Fixed: a shared project could stay locked** when opening an encrypted one was stopped, for example at the master password prompt. Others couldn't open it until the lock timed out.
+- **Lock messages show the time in your time zone,** not UTC.
+
+## ⚠️ Known issue
+- **The update pill can stay yellow** when GitHub's limit on update checks is used up. Hover over it to see why. It doesn't affect the app, and it's planned for a later release.
+
 # v3.2.2 — Test Injection fixes, search, new guides
 
 ## 🪝 Hooks land where you put them
