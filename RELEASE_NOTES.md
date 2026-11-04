@@ -1,3 +1,33 @@
+# v3.4.0 — AI Chat reads your code, VS Code style
+
+## 💬 AI Chat answers from your code
+- **Fixed: AI Chat answers rarely pointed at real code.** The chat now lets the AI read the release's source: it searches it, opens files and looks up functions and their callers before it answers. Each answer lists what it looked at.
+- **Laid out like VS Code:** files, functions and your chats on the left, the code in the middle, the chat on the right. Drag the borders to resize.
+- **Click a function or `file.c:123` in an answer** to open the code and highlight it. Code blocks are coloured and have a **Copy** button, and tables show as tables.
+- **Ask about selection:** select code in the middle and send it to the chat.
+- **Rebuild your Code Map and mind map once** if they were built before V3.3.0, so the AI gets the new structure.
+
+## 🤖 Models, effort and context
+- **One model list for all your AI accounts.** The chat remembers the last model and its settings, and the last model of each account.
+- **Pick the reasoning effort** for models that support it, and the **context size**: for Ollama, the window the model runs with; for other accounts, how much of the window the chat may fill. When a long chat no longer fits, the oldest messages are left out, and the answer says so.
+- **A ring next to Send shows how full the context is.** Hover over it to see what fills it.
+
+## 💳 Credits
+- **See your GitHub Copilot credits** left this month and when they reset.
+- **Each chat shows what it used:** Copilot credits, tokens in and out, and the number of requests. Each answer shows its own tokens.
+
+## 🗂️ Chat history
+- **Every chat is saved,** per project and per user, encrypted on your computer. It isn't stored in the `.arch` file, so it also works in read-only projects. Open, rename or delete chats under **Chats**.
+- **Edit a prompt and send it again**, optionally with another model, **roll back** the chat to a prompt, or **retry** an answer with the same or another model.
+
+## 🧑‍💻 Agents and rules
+- **Pick an agent for the chat:** *Ask*, *Test Engineer* or *Code Reviewer*, or create your own with its instructions, its tools and a preferred model.
+- **Rules** are added to every request, or only when the file open in the chat matches, for example `**/*.c`. You can now also edit the project's chat rules here.
+- **Agents and rules are saved in the project,** so everyone on it shares them. They use the same files as VS Code's Copilot: import them from a checkout's `.github` folder, or export them there.
+
+## 🔐 AI accounts
+- **Fixed: the saved AI keys could be lost** when the app couldn't read its credentials file. That file is now kept aside, not overwritten.
+
 # v3.3.2 — Newer Copilot models work in chat
 
 ## 🤖 AI models
