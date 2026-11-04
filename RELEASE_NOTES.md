@@ -1,3 +1,8 @@
+# v3.3.2 — Newer Copilot models work in chat
+
+## 🤖 AI models
+- **Fixed: some newer Copilot models failed with "HTTP 400 … not accessible via the /chat/completions endpoint".** Models such as `gpt-6-luna` only work through a newer Copilot API, and the app now uses it for them. Other models work as before.
+
 # v3.3.1 — Your full list of AI models
 
 ## 🤖 AI models
