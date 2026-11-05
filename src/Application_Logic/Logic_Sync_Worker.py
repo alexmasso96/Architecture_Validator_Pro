@@ -49,6 +49,8 @@ SESSION_FILE = "session.json"
 PUSH_REQUEST = "push.request"
 LOCK_WATCH = "lock_watch.json"
 SYNC_NOW = "sync.now"
+# Written by the updater: finish this pass, then exit so the app can be replaced.
+QUIT_REQUEST = "quit.request"
 
 POLL_SECONDS = 30
 LOOP_SECONDS = 2
@@ -448,12 +450,21 @@ def claim_worker(store: SyncStore) -> bool:
 
 
 def run_until(worker: SyncWorker, stop: threading.Event) -> None:
-    """The worker's loop. A tick that fails is tried again on the next one."""
+    """The worker's loop. A tick that fails is tried again on the next one.
+
+    A quit request is honoured after a pass, so a push the closing app asked for
+    is published before the worker exits."""
+    quit_path = os.path.join(worker.store.root, QUIT_REQUEST)
     while not stop.is_set():
         try:
             worker.tick()
         except Exception:  # noqa: BLE001 — the applet outlives any one failure
             logger.exception("Sync pass failed")
+        if os.path.exists(quit_path):
+            remove_file(quit_path)
+            logger.info("Quitting: asked to by the updater")
+            stop.set()
+            break
         worker.wait(LOOP_SECONDS)
 
 
@@ -464,6 +475,17 @@ def worker_running(store: SyncStore) -> bool:
 
 def request_sync_now(store: SyncStore) -> None:
     write_json(os.path.join(store.root, SYNC_NOW), True)
+
+
+def worker_pid(store: SyncStore) -> Optional[int]:
+    """The running worker's process id, or None when none is running."""
+    pid = read_json(os.path.join(store.root, PID_FILE))
+    return pid if pid and _alive(pid) else None
+
+
+def request_quit(store: SyncStore) -> None:
+    """Asks the running worker to exit after its current pass."""
+    write_json(os.path.join(store.root, QUIT_REQUEST), True)
 
 
 # ----------------------------------------------------------------------

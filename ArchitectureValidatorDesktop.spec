@@ -70,6 +70,11 @@ datas = [
     ('src/frontend/dist', 'frontend/dist'),
     (ICON_PNG, ICON_DIR),
 ]
+# Which build this is, for in-app updates (src/desktop/build_info.py). CI writes
+# it with scripts/write_build_info.py; a local build without it can't tell which
+# commit it is, so it always offers the newest build of its branch.
+if os.path.isfile('build_info.json'):
+    datas.append(('build_info.json', '.'))
 # uvicorn/webview import their backends lazily — collect them so the frozen app
 # can find the event loop, HTTP/WS protocols, and the platform webview backend.
 datas += collect_data_files('webview')

@@ -9,6 +9,8 @@ interface PyApi {
   pick_folder(): Promise<string | null>;
   pick_open_file(fileTypes?: string[]): Promise<string | null>;
   pick_save_file(defaultName?: string): Promise<string | null>;
+  // Starts the downloaded update's installer and closes the app.
+  install_update?(): Promise<{ ok: boolean; error: string }>;
 }
 
 declare global {

@@ -6879,3 +6879,26 @@ a.code-ref code { color: var(--accent); }
 .agents-del { align-self: flex-start; }
 .agents-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--border); }
 .agents-hint { flex: 1 1 auto; font-size: 11px; color: var(--muted); }
+
+/* ---------- In-app updates: download / restart controls ---------- */
+.update-install {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 260px;
+}
+.update-install .job-bar {
+  width: 100%;
+  margin-top: 0;
+}
+.update-channel {
+  justify-content: flex-start;
+}
+.update-channel select.prefs-input {
+  max-width: 280px;
+}
+.changelog-foot {
+  border-top: 1px solid var(--border);
+  padding: 12px 18px;
+}

@@ -3,7 +3,7 @@ import { api } from "./api/client";
 import type { JobPayload, ProjectStatus, SyncOverview, SyncStatus } from "./api/types";
 import { useSSE } from "./api/useSSE";
 import { nativeSetTitle } from "./native";
-import { useUpdateCheck } from "./update";
+import { fetchLastUpdateResult, useUpdateCheck } from "./update";
 import { ChangelogModal } from "./components/ChangelogModal";
 import { JobProgressOverlay } from "./components/JobProgressOverlay";
 import { Preferences } from "./components/Preferences";
@@ -99,6 +99,15 @@ export default function App() {
     const ms = Math.min(12000, Math.max(2600, msg.length * 60));
     toastTimer.current = window.setTimeout(() => setToastMsg(null), ms);
   }, []);
+
+  // Once, after an in-app update: say how it went (desktop/updater.py).
+  useEffect(() => {
+    fetchLastUpdateResult().then((r) => {
+      if (!r) return;
+      const to = r.to?.label || (r.to?.version ? `v${r.to.version}` : "the new version");
+      toast(r.ok ? `Updated to ${to}` : `The update didn't install: ${r.error}`);
+    });
+  }, [toast]);
 
   // Lock / takeover events flip the project to view-only — refresh status so the
   // banner + edit guards update without a manual reload.
@@ -228,10 +237,16 @@ export default function App() {
 
   const showChangelog = () => setChangelogOpen(true);
   const changelogModal =
-    changelogOpen && update.body ? (
+    changelogOpen && (update.body || update.status === "update-available") ? (
       <ChangelogModal
-        version={update.latestVersion}
-        body={update.body}
+        version={update.label}
+        body={
+          update.body ||
+          (update.channel === "branch"
+            ? `**${update.label}**${update.title ? ` — ${update.title}` : ""}\n\nBranch builds have no release notes.`
+            : "")
+        }
+        update={update}
         onClose={() => setChangelogOpen(false)}
       />
     ) : null;

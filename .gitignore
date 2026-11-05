@@ -72,3 +72,5 @@ build_windows.bat
 
 # Local-only audit scratchpad (working notes, not a deliverable)
 AUDIT_FINDINGS.md
+# Written by scripts/write_build_info.py for the desktop build
+/build_info.json

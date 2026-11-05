@@ -416,6 +416,23 @@ class JsApi:
             return None
         return res if isinstance(res, str) else res[0]
 
+    def install_update(self) -> dict:
+        """Starts the downloaded update's installer and closes the app, which
+        the installer waits for (desktop/updater.py). Closing the window runs the
+        normal shutdown, so the worker releases the project's edit lock."""
+        from desktop import updater
+
+        try:
+            updater.launch(os.getpid())
+        except Exception as exc:  # noqa: BLE001 — reported in the SPA
+            logger.exception("Couldn't start the update")
+            return {"ok": False, "error": str(exc)}
+        if self._window is not None:
+            import threading
+            # Let this call return to the page before the window goes.
+            threading.Timer(0.3, self._window.destroy).start()
+        return {"ok": True, "error": ""}
+
 
 def _open_sync_window() -> None:
     """Starts the Sync Worker's window in this process.
@@ -478,6 +495,13 @@ def main() -> None:
                 f"{_wv2_args} --no-proxy-server".strip()
             )
 
+    # Set when the updater started this build: it waits to hear that the new
+    # version opened its window, and restores the old one if it never does.
+    # Taken out of the environment so the worker and Sync Worker don't inherit it.
+    from desktop import updater
+    update_marker = os.environ.pop(updater.MARKER_ENV, None)
+    updater.start_cleanup()
+
     token = generate_token()
 
     proc, port, lifeline = spawn_worker(token)
@@ -522,6 +546,10 @@ def main() -> None:
         min_size=(900, 600),
     )
     api.set_window(window)
+    if update_marker:
+        def _report_ready() -> None:
+            updater.mark_ready(update_marker)
+        window.events.loaded += _report_ready
 
     logger.info("Entering webview.start() — .NET/WebView2 bootstrap happens now")
     try:
@@ -557,6 +585,13 @@ if __name__ == "__main__":
     # Required so the spawned worker re-executes correctly inside a frozen
     # (PyInstaller) bundle; a no-op in a normal interpreter.
     multiprocessing.freeze_support()
+
+    # The updater: this is a freshly downloaded build, started from its staging
+    # folder to install itself over the old one (desktop/updater.py). Before
+    # crash logging, which would truncate the closing app's crash.log.
+    if "--apply-update" in sys.argv:
+        from desktop import updater
+        sys.exit(updater.main())
 
     # The Sync Worker has its own program now. A login item from before still
     # starts this one with the worker's flags, so pass them on.

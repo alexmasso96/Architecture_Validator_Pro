@@ -54,6 +54,7 @@ _KDF_ITERATIONS = 200_000
 
 _COPILOT_OAUTH_FIELD = "__copilot_oauth__"
 _NETWORK_PROXY_FIELD = "__network_proxy__"
+_GITHUB_TOKEN_FIELD = "__github_token__"
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +281,26 @@ def clear_network_proxy() -> None:
     data = _load()
     if data.pop(_NETWORK_PROXY_FIELD, None) is not None:
         _save(data)
+
+
+# ---------------------------------------------------------------------------
+# Public API — GitHub token for in-app updates
+# ---------------------------------------------------------------------------
+# Downloading a CI build of a branch (an Actions artifact) needs a token, even
+# for a public repository; published releases don't. Kept with the other secrets.
+
+def get_github_token() -> Optional[str]:
+    val = _load().get(_GITHUB_TOKEN_FIELD)
+    return val if val else None
+
+
+def set_github_token(token: str) -> None:
+    data = _load()
+    if token:
+        data[_GITHUB_TOKEN_FIELD] = token
+    else:
+        data.pop(_GITHUB_TOKEN_FIELD, None)
+    _save(data)
 
 
 # ---------------------------------------------------------------------------

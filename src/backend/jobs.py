@@ -94,6 +94,13 @@ class JobManager:
         self.executor.submit(self._run, job, self._handlers[kind], params or {})
         return job
 
+    def running_kinds(self, exclude: tuple[str, ...] = ()) -> list[str]:
+        """Kinds of the jobs queued or running, without those in ``exclude``."""
+        with self._lock:
+            return sorted({j.kind for j in self.jobs.values()
+                           if j.status in (STATUS_QUEUED, STATUS_RUNNING)
+                           and j.kind not in exclude})
+
     def get(self, job_id: str) -> Optional[Job]:
         return self.jobs.get(job_id)
 

@@ -141,6 +141,12 @@ def run(store: SyncStore, stop: threading.Event, worker) -> None:
             elif was_spinning:
                 on_main_thread(set_icon, icon, rest)
             was_spinning = spinning
+        # Stopped from elsewhere (the updater asked the worker to quit): the icon
+        # goes too, so the program exits. Quit from the menu stopped it already.
+        try:
+            icon.stop()
+        except Exception:  # noqa: BLE001
+            pass
 
     if sys.platform == "darwin":
         # Menu bar only: no Dock icon for a background applet.

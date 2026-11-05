@@ -227,6 +227,14 @@ jobs:
         if: matrix.os == 'windows-11-arm'
         run: python scripts/setup_windows_arm64.py
 
+      # Bundled so the app knows its commit and branch: in-app updates compare
+      # it with the newest build (src/desktop/build_info.py). On a pull request,
+      # the head commit, not the merge commit GITHUB_SHA names.
+      - name: Record build info
+        env:
+          BUILD_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/write_build_info.py
+
       - name: Build with PyInstaller
         run: pyinstaller ArchitectureValidatorDesktop.spec --noconfirm
 
