@@ -394,6 +394,10 @@ class ChatBody(BaseModel):
     # The files open in the chat's editor: rules with applyTo match them.
     open_files: list[str] = []
     options: ChatOptions = ChatOptions()
+    # Target Tests: give the agent the live-ECU tools (and the selected test).
+    live_target: bool = False
+    allow_target_writes: bool = False
+    target_test_id: Optional[int] = None
 
 
 _FILE_TOOLS = {"read_file", "list_files", "search_code"}
@@ -450,9 +454,34 @@ def _chat_parts(state: AppState, body: ChatBody) -> dict:
             executor = ai_tools.ToolExecutor(None, db=db, model_id=mid if mid is not None else -1,
                                              diff_hash=diff_hash, provider=source,
                                              release_id=rid)
+    if body.live_target and db is not None:
+        system, tools, executor = _with_target_tools(state, body, db, mid, rid, system,
+                                                     tools, executor)
     return {"agent": agent, "system": system, "mind_map": mind_map, "tools": tools,
             "executor": executor, "has_source": has_source,
             "has_mind_map": bool(mind_map), "project_open": db is not None}
+
+
+def _with_target_tools(state: AppState, body: ChatBody, db, mid, rid, system, tools,
+                       executor):
+    """Add the live-ECU tools, their rules and the selected test to a chat."""
+    from Application_Logic import Logic_AI_Target_Tools as target_tools
+    from Application_Logic.Logic_File_Locking import FileLockManager
+    from .. import target_session as ts
+
+    selected = db.get_target_test(body.target_test_id) if body.target_test_id else None
+    system = system + "\n\n" + target_tools.system_prompt(selected, body.allow_target_writes)
+    names = {t.name for t in tools}
+    tools = list(tools) + [t for t in target_tools.target_tools() if t.name not in names]
+    executor = target_tools.TargetToolExecutor(
+        executor, get_backend=lambda: ts.AI_SESSION.get(ts.get_config(state)), db=db,
+        user=FileLockManager.get_username(), allow_writes=body.allow_target_writes,
+        can_edit=bool(state.can_edit),
+        release_id=rid, model_id=mid,
+        on_change=lambda tid: state.bus.publish(
+            "db-changed", {"reason": "target-tests-changed", "test_id": tid}),
+        audit=ts.AI_SESSION.log)
+    return system, tools, executor
 
 
 def _context_window(body: ChatBody) -> int:

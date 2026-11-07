@@ -43,6 +43,7 @@ from .routers import net as net_router
 from .routers import symbols as symbols_router
 from .routers import sync as sync_router
 from .routers import table_import as table_import_router
+from .routers import target_tests as target_tests_router
 from .routers import test_builds as test_builds_router
 from .routers import testdesign as testdesign_router
 from .routers import update as update_router
@@ -142,6 +143,7 @@ def create_app(
     app.include_router(prefs_router.router)
     app.include_router(table_import_router.router)
     app.include_router(test_builds_router.router)
+    app.include_router(target_tests_router.router)
     app.include_router(sync_router.router)
     app.include_router(update_router.router)
     app.include_router(net_router.router)

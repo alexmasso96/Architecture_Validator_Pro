@@ -40,6 +40,8 @@ def register_handlers(jobs: JobManager, state: AppState) -> None:
     jobs.register("test_build_run", _make_test_build_run(state))
     jobs.register("mapped_switch", _make_mapped_switch(state))
     jobs.register("share_project", _make_share_project(state))
+    jobs.register("target_test_run", _make_target_test_run(state))
+    jobs.register("target_test_debug", _make_target_test_debug(state))
 
 
 # ----------------------------------------------------------------------
@@ -879,4 +881,21 @@ def _make_mapped_switch(state: AppState):
                 detail = f": {', '.join(e.files)}" if e.files else ""
                 raise ProjectError(f"{e}{detail}") from e
         return {**result, "build_name": build["name"]}
+    return handler
+
+
+# ----------------------------------------------------------------------
+# Target Tests: run approved/draft tests on the ECU, or debug one.
+# ----------------------------------------------------------------------
+def _make_target_test_run(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        from . import target_session
+        return target_session.run_job(state, params, progress, cancel, _worker_db)
+    return handler
+
+
+def _make_target_test_debug(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        from . import target_session
+        return target_session.debug_job(state, params, progress, cancel)
     return handler
