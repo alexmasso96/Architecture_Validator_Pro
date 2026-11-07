@@ -430,8 +430,10 @@ class ExpectAPI:
             self._b.stop()
         st = self._b.status()
         reached = hit and (line is not None or st.get("function") == location)
+        actual = ("not reached" if not hit else
+                  f"stopped in {st.get('function')}" if not reached else "reached")
         return self._record("expect.not_reached", [location] + ([line] if line else []),
-                            not reached, st.get("function") if hit else "not reached")
+                            not reached, actual)
 
 
 class _Module:
@@ -595,7 +597,7 @@ def _child_main(conn, config: dict, tests: List[dict], debug: Optional[dict]) ->
                 if action == "step":
                     state["stepping"] = True
                     return
-                if action == "snapshot":
+                if action == "snapshot" or (not action and "watches" in cmd):
                     conn.send({"type": "paused", "line": line,
                                "snapshot": snapshot(backend, state["watches"])})
 
@@ -674,22 +676,18 @@ def run_in_process(config: dict, tests: List[dict],
                 if current is not None:
                     results[current] = _error_result("Stopped by the user.", VERDICT_STOPPED)
                 break
-            if paused and commands is not None:
-                cmd = commands(0.2)
+            if commands is not None and current is not None:
+                cmd = commands(0.1 if paused else 0)
                 if cmd is not None:
                     parent.send(cmd)
-                    if cmd.get("action") in ("continue", "step", "stop"):
+                    if paused and cmd.get("action") in ("continue", "step", "stop"):
                         paused = False
                         started = time.monotonic()
-                continue
-            if commands is not None and current is not None:
-                cmd = commands(0)
-                if cmd is not None:
-                    parent.send(cmd)
-            if not parent.poll(0.1):
+            if not parent.poll(0 if paused else 0.1):
                 if not proc.is_alive():
                     break
-                if current is not None and time.monotonic() - started > test_timeout_s:
+                if not paused and current is not None and \
+                        time.monotonic() - started > test_timeout_s:
                     results[current] = _error_result(
                         f"The test ran longer than {int(test_timeout_s)} s and was stopped.")
                     on_event({"type": "result", "test_id": current, "result": results[current]})

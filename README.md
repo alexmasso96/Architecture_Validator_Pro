@@ -36,6 +36,7 @@ For a full, screenshot-by-screenshot walkthrough of every feature, see the **[Us
 - [Test Builds](docs/guide/12-test-builds.md)
 - [Shared Projects & Sync](docs/guide/13-shared-projects-and-sync.md)
 - [Pipeline CLI](docs/guide/14-pipeline-cli.md)
+- [Target Tests](docs/guide/15-target-tests.md)
 
 > 💡 Every feature also has an **interactive in-app walkthrough** — open **Preferences → Tutorials** for a click-through demo of each view.
 
@@ -54,6 +55,9 @@ Generate **low-level, HiL-debugger-style test designs** from your high-level tes
 ![AI Test Generation — low-level HiL test designs from high-level cases](/Media/images/ai_test_generation.png "AI Test Generation — generate low-level, HiL-debugger-style test designs from your high-level test cases and the real C source")
 
 ![Advanced AI Chat — agentic Q&A grounded in the firmware](/Media/images/advanced_ai_chat.png "Advanced AI Chat — answers questions agentically with read-only, sandboxed tools, grounded in the source mind map and call graph")
+
+### 🎯 Target Tests on the real ECU
+The AI drives **winIDEA** (through the `isystem.connect` SDK) to find out how a function is really reached. It sets breakpoints, reads the condition, changes the variable and runs again. It then writes what worked as a short, restricted Python **test script**. You review it, correct it and approve it, and approved tests replay with **no AI**: each run checks the connection first, resets the target before every test, and records every step as evidence. There's a step debugger with breakpoints and watches, and a simulator for trying it without an ECU. See [Target Tests](docs/guide/15-target-tests.md).
 
 ### 🗺️ Code Map
 A visual **call-graph + source explorer** that joins the ELF/DWARF facts (addresses, sizes, params, structs, globals) to the C source by function name — depth-bounded caller/callee graph, matched-globals panel, and a syntax-highlighted source view. Rebuildable offline (no AI tokens).

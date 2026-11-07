@@ -188,7 +188,7 @@ function useMonacoTheme(): "vs" | "vs-dark" {
 }
 
 // --- SSE over POST -------------------------------------------------------------
-type ChatEvent =
+export type ChatEvent =
   | { kind: "context"; data: ChatContextBreakdown }
   | { kind: "tool"; data: { name: string; args: Record<string, unknown> } }
   | { kind: "tool_result"; data: ChatToolUse }
@@ -198,7 +198,7 @@ type ChatEvent =
   | { kind: "done"; data: string }
   | { kind: "error"; data: string };
 
-async function streamChat(
+export async function streamChat(
   body: unknown,
   onEvent: (e: ChatEvent) => void,
   signal: AbortSignal,
@@ -251,7 +251,7 @@ async function streamChat(
 // ===========================================================================
 // Model picker — every configured provider's models, grouped.
 // ===========================================================================
-function ModelSelect({
+export function ModelSelect({
   providers,
   providerId,
   model,

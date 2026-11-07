@@ -767,3 +767,112 @@ export interface AgentsResponse {
   default_agent_id: string;
   tools: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Target Tests (architecture tests on the real ECU through winIDEA)
+// ---------------------------------------------------------------------------
+export type TargetTestStatus = "draft" | "approved";
+export type TargetVerdict = "passed" | "failed" | "error" | "stopped";
+
+export interface TargetTestResultSummary {
+  id: number;
+  test_id: number;
+  version: number;
+  approved: boolean;
+  release_id: number | null;
+  verdict: TargetVerdict;
+  message: string;
+  started_at: string;
+  duration_ms: number;
+  username: string;
+  target_info: Record<string, string>;
+}
+
+export interface TargetStep {
+  line: number;
+  call: string;
+  args: unknown[];
+  t_ms: number;
+  result?: unknown;
+  error?: string;
+}
+
+export interface TargetExpectation {
+  line: number;
+  call: string;
+  args: unknown[];
+  ok: boolean;
+  actual: unknown;
+  message: string;
+}
+
+export interface TargetCheck {
+  name: string;
+  ok: boolean | null;
+  detail?: string;
+}
+
+export interface TargetTestResult extends TargetTestResultSummary {
+  evidence: { steps: TargetStep[]; expectations: TargetExpectation[]; checks: TargetCheck[] };
+}
+
+export interface TargetTestSummary {
+  id: number;
+  test_key: string;
+  title: string;
+  port: string;
+  requirement: string;
+  model_id: number | null;
+  version: number;
+  approved_version: number | null;
+  approved_by: string;
+  approved_at: string;
+  updated_at: string;
+  status: TargetTestStatus;
+  has_proposal: boolean;
+  last_result: TargetTestResultSummary | null;
+}
+
+export interface TargetTestVersion {
+  version: number;
+  origin: "ai" | "user" | "revert";
+  author: string;
+  note: string;
+  created_at: string;
+}
+
+export interface TargetTestDetail extends TargetTestSummary {
+  code: string;
+  origin: string;
+  rationale: string;
+  pending_code: string;
+  pending_rationale: string;
+  approved_code: string;
+  issues: { line: number; message: string }[];
+  versions: TargetTestVersion[];
+  results: TargetTestResultSummary[];
+}
+
+export interface TargetConfig {
+  kind: "winidea" | "simulator";
+  workspace: string;
+  winidea_dir: string;
+  probe: string;
+  test_timeout_s: number;
+  busy?: string | null;
+}
+
+export interface TargetCheckReport {
+  ok: boolean;
+  message: string;
+  checks: TargetCheck[];
+  info?: Record<string, string>;
+}
+
+export interface TargetSnapshot {
+  status: { state: string; function?: string | null; file?: string | null; line?: number | null };
+  call_stack: string[];
+  call_stack_error?: string;
+  watches: Record<string, string>;
+  registers: Record<string, string>;
+}

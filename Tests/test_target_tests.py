@@ -508,3 +508,29 @@ def test_chat_context_lists_the_target_tools(client):
     body["live_target"] = False
     ctx = _ok(client.post("/api/ai/context", json=body, headers=AUTH))
     assert "target_run_until_stop" not in ctx["tool_names"]
+
+
+def test_debug_watch_added_while_paused_gets_a_fresh_snapshot():
+    import queue
+    cmds = queue.Queue()
+    paused = []
+
+    def on_event(msg):
+        if msg["type"] == "paused":
+            paused.append(msg)
+            if len(paused) == 1:
+                cmds.put({"watches": ["speed_out"]})      # no action: just a new watch
+            else:
+                cmds.put({"action": "continue"})
+
+    def commands(timeout):
+        try:
+            return cmds.get(timeout=timeout) if timeout else cmds.get_nowait()
+        except queue.Empty:
+            return None
+
+    results = tt.run_in_process({"kind": "simulator"}, [{"id": "d", "code": GOOD}], on_event,
+                                commands=commands, debug={"breakpoints": [14]})
+    assert results[0]["verdict"] == tt.VERDICT_PASSED
+    assert paused[0]["snapshot"]["watches"] == {}
+    assert paused[1]["line"] == 14 and "speed_out" in paused[1]["snapshot"]["watches"]
