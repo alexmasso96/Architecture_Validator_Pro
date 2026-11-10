@@ -1,3 +1,27 @@
+# v3.5.0-beta.1 — Target Tests on the ECU, in-app updates, any project file in a test build
+
+This is a beta version. Target Tests has been run on the built-in simulator only, not yet on an ECU, and installing an update in place has not been tried on a packaged build. Install this beta by hand from the files below; later versions can be installed from inside the app.
+
+## 🎯 Target Tests (new)
+- **Architecture tests that run on the real ECU through winIDEA.** The AI drives the debugger to find out how a function is reached, and writes what worked as a short test script. You review, correct and approve it. Approved tests then run without the AI.
+- **Tests are grouped into test suites, one per architecture model.** A test the AI writes goes into the suite of the model it checks. Fold a suite, tick all its tests, run it, or add a test to it. Move a test with the box next to its title.
+- **Stop when a variable is read or written** (`break_on_write`, `break_on_read`), to test a variable port: run, then check who accessed it.
+- **More to read on the target:** a caller's arguments (`read(expr, frame=1)`), a symbol's address, size and type, core registers and memory.
+- **Call a function on the target** from a test (`call`). It needs **Allow memory writes**, like a write does.
+- **The AI can check that the ECU runs the program winIDEA is set up to download,** and can flash it when you ask. Flashing needs the new **Allow flashing** switch, which is off by default.
+- **Try it without an ECU:** choose **Simulator** in the connection settings.
+
+## ⤓ In-app updates (new)
+- **Download and install an update from inside the app,** on Windows and macOS. The download is checked against GitHub's SHA-256 checksum, and the app restarts into the new version. If the new version doesn't start, the old one is put back.
+- **Beta versions:** in **Preferences → Updates**, choose **Beta versions** to see the list of betas. Pick one, read what's new in it, and download it. You can go back to an older version; a project saved with a newer version may not open in it.
+- **Releases** stays the default and never offers a beta.
+
+## 🧪 Test Injection: change any file of the project
+- **The whole project folder is listed,** not only the C sources: makefiles, ARXML files, linker scripts. Folders are read when you unfold them.
+- **Change any text file for a test project** with **✎ Change file**, for example to build without compiler optimizations. The test project keeps its own copy and the original isn't touched. A test build writes the copy over the original, builds, and puts the original back.
+- **Changed Files** lists everything a test project changes in a build: the files it replaces, the files it adds and the files its hooks go into. **Compare** shows a copy next to its original.
+- **You're told when an original has changed** since you changed its copy: in the list, in the pre-flight check and in the build result.
+
 # v3.4.0 — AI Chat reads your code, VS Code style
 
 ## 💬 AI Chat answers from your code

@@ -23,7 +23,7 @@ import { api, ApiError } from "./api/client";
 // The version of this SPA. Keep in lockstep with package.json /
 // RELEASE_NOTES.md on every release. The worker reports the build's own
 // version too (from build_info.json); that one wins when present.
-export const APP_VERSION = "3.4.0";
+export const APP_VERSION = "3.5.0";
 
 export const GITHUB_REPO = "alexmasso96/Architecture_Validator_Pro";
 export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
