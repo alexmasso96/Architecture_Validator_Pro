@@ -17,7 +17,8 @@ import {
   type FileExplorerMode,
 } from "../settings";
 import { persistKey } from "../prefs";
-import { APP_VERSION, compareUrl, type UpdateInfo } from "../update";
+import { type UpdateInfo } from "../update";
+import { UpdatesSettings } from "./UpdatePanel";
 import { AISettings } from "./AISettings";
 import { ColorPicker } from "./ColorPicker";
 import { CustomExplorerArt, SystemExplorerArt } from "./Icons";
@@ -330,70 +331,11 @@ export function Preferences({
           {category === "tutorials" && <Tutorials />}
 
           {category === "updates" && (
-            <div className="prefs-body">
-              <div className="prefs-field">
-                <div className="prefs-label">Current version</div>
-                <div className="update-version">v{APP_VERSION}</div>
-              </div>
-
-              <div className="prefs-field">
-                <div className="prefs-row">
-                  <div className="prefs-label">Status</div>
-                  <button
-                    className="prefs-prefill"
-                    disabled={update.status === "checking"}
-                    onClick={onRecheck}
-                  >
-                    {update.status === "checking" ? "Checking…" : "Check for updates"}
-                  </button>
-                </div>
-
-                {update.status === "update-available" && (
-                  <div className="update-row available">
-                    <span className="update-badge warn">⤓ Update available</span>
-                    <span className="update-detail">
-                      v{update.latestVersion} is the latest release.
-                    </span>
-                    <div className="update-actions">
-                      <button className="save-btn" onClick={onShowChangelog}>
-                        View changelog
-                      </button>
-                      <a
-                        className="update-compare"
-                        href={compareUrl(update.latestVersion!)}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Compare on GitHub →
-                      </a>
-                    </div>
-                  </div>
-                )}
-                {update.status === "latest" && (
-                  <div className="update-row">
-                    <span className="update-badge ok">✓ Up to date</span>
-                    <span className="update-detail">
-                      You're running the latest published release.
-                    </span>
-                  </div>
-                )}
-                {update.status === "error" && (
-                  <div className="update-row">
-                    <span className="update-badge warn">⚠ Check failed</span>
-                    <span className="update-detail">
-                      {update.errorMsg ?? "Could not reach GitHub."}
-                    </span>
-                  </div>
-                )}
-                {(update.status === "checking" || update.status === "idle") && (
-                  <div className="update-row">
-                    <span className="update-detail">
-                      <span className="spin" /> Contacting GitHub…
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
+            <UpdatesSettings
+              update={update}
+              onRecheck={onRecheck}
+              onShowChangelog={onShowChangelog}
+            />
           )}
         </div>
 

@@ -43,11 +43,11 @@ function UpdatePill({
     return (
       <button
         className="update-pill warn"
-        title={`v${update.latestVersion} is available — view changelog`}
+        title={`${update.label} is available — view and install`}
         onClick={onShowChangelog}
       >
         <span className="update-pill-dot" />
-        Update available · v{update.latestVersion}
+        Update available · {update.label}
       </button>
     );
   }

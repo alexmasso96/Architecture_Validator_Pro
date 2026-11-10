@@ -1,15 +1,19 @@
 import { useEffect } from "react";
 import { renderMarkdown } from "../markdown";
+import type { UpdateInfo } from "../update";
+import { UpdateActions } from "./UpdatePanel";
 
 // Scrollable release-notes viewer. Renders the GitHub release `body` (markdown)
 // through the app's own renderer so it matches the rest of the chrome.
 export function ChangelogModal({
   version,
   body,
+  update,
   onClose,
 }: {
   version?: string;
   body: string;
+  update?: UpdateInfo;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -22,7 +26,7 @@ export function ChangelogModal({
     <div className="modal-overlay" onMouseDown={onClose}>
       <div className="modal changelog" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          What's New{version ? ` — v${version}` : ""}
+          What's New{version ? ` — ${version}` : ""}
           <button className="prefs-close" onClick={onClose} title="Close">
             ✕
           </button>
@@ -31,6 +35,11 @@ export function ChangelogModal({
           className="changelog-body md"
           dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
         />
+        {update && update.status === "update-available" && (
+          <div className="changelog-foot">
+            <UpdateActions update={update} />
+          </div>
+        )}
       </div>
     </div>
   );

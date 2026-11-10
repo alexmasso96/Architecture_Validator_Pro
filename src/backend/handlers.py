@@ -40,6 +40,7 @@ def register_handlers(jobs: JobManager, state: AppState) -> None:
     jobs.register("test_build_run", _make_test_build_run(state))
     jobs.register("mapped_switch", _make_mapped_switch(state))
     jobs.register("share_project", _make_share_project(state))
+    jobs.register("update_download", _update_download)
 
 
 # ----------------------------------------------------------------------
@@ -880,3 +881,15 @@ def _make_mapped_switch(state: AppState):
                 raise ProjectError(f"{e}{detail}") from e
         return {**result, "build_name": build["name"]}
     return handler
+
+
+def _update_download(params: dict, progress: Callable[..., None],
+                     cancel: threading.Event):
+    """Downloads, checks and unpacks a version's build: the one ``tag`` names,
+    else the chosen channel's newest (backend/updates.py)."""
+    from . import updates
+
+    try:
+        return updates.download_and_stage(progress, cancel, tag=params.get("tag") or None)
+    except updates.UpdateError as exc:
+        raise RuntimeError(str(exc)) from None
