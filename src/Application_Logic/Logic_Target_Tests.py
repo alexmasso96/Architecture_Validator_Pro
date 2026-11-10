@@ -28,7 +28,9 @@ approves it; approved tests replay with no AI. This module holds:
   that opens its own target connection, so a hung test can't freeze the app,
   and relays debug pauses and commands over a pipe;
 * the **approval rules** (``Approvals``): AI changes are drafts, manual edits
-  are approved, and accepting an AI proposal and approving it are two steps.
+  are approved, and accepting an AI proposal and approving it are two steps;
+* the **test suites** (``suites``, ``resolve_suite``): every test belongs to the
+  suite of one architecture model.
 
 Pure module: the DB is passed in.
 """
@@ -70,12 +72,24 @@ TARGET_API = {
                       "the target, False on timeout (the target is then stopped)",
     "run_to": "run_to(location, line=None, timeout_s=2) — break_at + run_until_stop",
     "step": "step(kind='over') — 'over', 'into' or 'out'",
-    "read": "read(expr) — a variable's or expression's value, as text",
+    "break_on_write": "break_on_write(variable) — stop when the variable is written",
+    "break_on_read": "break_on_read(variable) — stop when the variable is read",
+    "break_on_access": "break_on_access(variable) — stop when it is read or written",
+    "read": "read(expr, frame=0) — a variable's or expression's value, as text; "
+            "frame 1 is the caller's locals and arguments, 2 its caller's",
     "write": "write(expr, value) — set a variable",
     "call_stack": "call_stack() — function names, outermost first",
     "status": "status() — {'state', 'function', 'file', 'line'}",
+    "symbol": "symbol(name) — {'name', 'address', 'size', 'type'} of a variable or function",
+    "read_register": "read_register(name) — a core register's value, as text",
+    "read_memory": "read_memory(address, size) — bytes at an address, as hex text "
+                   "(max 1024)",
+    "call": "call(function, *args) — run a function on the target; returns what it "
+            "returned, as text (changes the target, like write)",
     "wait": "wait(seconds) — let the target run (max 10 s)",
 }
+# Script calls that change the target: they need the user's 'Allow memory writes'.
+WRITING_CALLS = ("target.write", "target.call")
 EXPECT_API = {
     "stopped_at": "stopped_at(function) — the target is stopped in this function",
     "call_stack": "call_stack(frames, exact=False) — these frames, in this order "
@@ -87,7 +101,7 @@ EXPECT_API = {
 }
 SAFE_CALLS = {"range", "len", "int", "float", "str", "abs", "min", "max", "round",
               "hex", "bool"}
-_TEST_META = ("id", "title", "port", "requirement", "model")
+_TEST_META = ("id", "title", "port", "requirement")
 
 _ALLOWED_NODES = (
     ast.Expr, ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Pass, ast.Break,
@@ -357,8 +371,41 @@ class TargetAPI:
             raise TargetError("step kind is 'over', 'into' or 'out'.")
         return self._do("target.step", [kind], lambda: self._b.step(kind))
 
-    def read(self, expr):
+    def _break_on(self, variable, access):
+        name = {"write": "break_on_write", "read": "break_on_read",
+                "any": "break_on_access"}[access]
+        return self._do(f"target.{name}", [variable],
+                        lambda: self._b.set_data_breakpoint(str(variable), access))
+
+    def break_on_write(self, variable):
+        return self._break_on(variable, "write")
+
+    def break_on_read(self, variable):
+        return self._break_on(variable, "read")
+
+    def break_on_access(self, variable):
+        return self._break_on(variable, "any")
+
+    def read(self, expr, frame=0):
+        if frame:
+            return self._do("target.read", [expr, frame],
+                            lambda: self._b.read_frame(str(expr), int(frame)))
         return self._do("target.read", [expr], lambda: self._b.read(str(expr)))
+
+    def symbol(self, name):
+        return self._do("target.symbol", [name], lambda: self._b.symbol_info(str(name)))
+
+    def read_register(self, name):
+        return self._do("target.read_register", [name],
+                        lambda: self._b.read_register(str(name)))
+
+    def read_memory(self, address, size):
+        return self._do("target.read_memory", [address, size],
+                        lambda: self._b.read_memory(int(address), int(size)).hex())
+
+    def call(self, function, *args):
+        return self._do("target.call", [function, *args],
+                        lambda: self._b.call_function(str(function), [str(a) for a in args]))
 
     def write(self, expr, value):
         return self._do("target.write", [expr, value],
@@ -761,6 +808,86 @@ def _run_inline(config, tests, on_event, commands, debug) -> List[dict]:
 
 
 # ======================================================================
+# Test suites
+# ======================================================================
+# A test suite is an architecture model: a test belongs to the suite of the
+# model it tests. The suite is kept in the project (target_tests.model_id), not
+# in the script, so renaming a model keeps its tests.
+
+def _live_models(db) -> List[dict]:
+    return [m for m in db.get_all_models() if not m["is_deleted"]]
+
+
+def suites(db, tests: Optional[List[dict]] = None) -> List[dict]:
+    """The project's test suites in the architecture's order: one per model (a
+    deleted model only while it still has tests), then a last one with
+    ``model_id`` None when some test's model is gone."""
+    tests = db.list_target_tests() if tests is None else tests
+    used = {t["model_id"] for t in tests}
+    out, known = [], set()
+    for m in db.get_all_models():
+        known.add(m["id"])
+        if m["is_deleted"] and m["id"] not in used:
+            continue
+        out.append({"model_id": m["id"], "name": m["name"], "status": m["status"],
+                    "deleted": bool(m["is_deleted"])})
+    if any(mid not in known for mid in used):
+        out.append({"model_id": None, "name": "", "status": "", "deleted": False})
+    return out
+
+
+def suite_names(db) -> List[str]:
+    return [m["name"] for m in _live_models(db)]
+
+
+def find_suite(db, name: str) -> Optional[int]:
+    """The model with this name (case doesn't matter), or None."""
+    name = (name or "").strip().lower()
+    return next((m["id"] for m in _live_models(db) if m["name"].lower() == name), None) \
+        if name else None
+
+
+def suite_for_port(db, port: str) -> Optional[int]:
+    """The model a port belongs to: ``Model.Port`` names it, otherwise the one
+    model whose port column holds the port. None when that isn't one model."""
+    from .Logic_CallTree_Test import cell_text
+
+    port = (port or "").strip()
+    if not port:
+        return None
+    models = _live_models(db)
+    if "." in port:
+        by_name = find_suite(db, port.split(".", 1)[0])
+        if by_name is not None:
+            return by_name
+    column = next((c[0] for c in db.load_column_layout() if c[1] == "Port Search"), None)
+    if column is None:
+        return None
+    wanted = {port.lower(), port.rsplit(".", 1)[-1].strip().lower()}
+    hits = [m["id"] for m in models
+            if any(cell_text(row.get(column)).lower() in wanted
+                   for row in db.get_model_rows(m["id"]))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def resolve_suite(db, model: str = "", port: str = "", fallback=None) -> Optional[int]:
+    """The suite a new test goes into: the model that was named, else the model
+    of the test's port, else ``fallback`` (the model the user is working on).
+    Naming a model that doesn't exist is an error that lists the ones that do."""
+    model = (model or "").strip()
+    if model:
+        mid = find_suite(db, model)
+        if mid is None:
+            raise ApprovalError(f"No architecture model is named '{model}'. The test "
+                                f"suites are: {', '.join(suite_names(db)) or '(none)'}.")
+        return mid
+    mid = suite_for_port(db, port)
+    if mid is not None:
+        return mid
+    return fallback if any(m["id"] == fallback for m in _live_models(db)) else None
+
+
+# ======================================================================
 # Approval rules
 # ======================================================================
 class ApprovalError(Exception):
@@ -866,6 +993,14 @@ class Approvals:
     def reject_proposal(self, test_id: int) -> None:
         self._get(test_id)
         self.db.update_target_test(test_id, pending_code="", pending_rationale="")
+
+    def move(self, test_id: int, model_id: Optional[int]) -> None:
+        """Puts a test in another model's suite. Approval doesn't change: the
+        script is the same."""
+        self._get(test_id)
+        if not any(m["id"] == model_id for m in _live_models(self.db)):
+            raise ApprovalError("That architecture model isn't in the project.")
+        self.db.update_target_test(test_id, model_id=model_id)
 
 
 def status_of(test: dict) -> str:

@@ -8,6 +8,9 @@ settings are saved per user and machine. Runs and debug sessions are jobs
 Approval rules (``Logic_Target_Tests.Approvals``): the AI's tests and changes
 are drafts; a user's edit is approved by that user; accepting an AI proposal
 and approving it are two steps; a new release never removes approval.
+
+Tests are grouped into test suites, one per architecture model: the list comes
+with ``suites`` and every test's ``model_id`` names its suite.
 """
 from __future__ import annotations
 
@@ -50,6 +53,12 @@ def _summary(t: dict, last: Optional[dict]) -> dict:
         "last_result": last}
 
 
+def _in_suites(tests: list, suites: list) -> list:
+    """A test whose model is gone belongs to the suite with no model."""
+    known = {s["model_id"] for s in suites}
+    return [t if t["model_id"] in known else {**t, "model_id": None} for t in tests]
+
+
 def _changed(bus: EventBus, test_id=None):
     bus.publish("db-changed", {"reason": "target-tests-changed", "test_id": test_id})
 
@@ -62,8 +71,10 @@ def list_tests(state: AppState = Depends(get_state)) -> dict:
     def go():
         db = state.require_open()
         last = db.latest_target_test_results()
-        return {"tests": [_summary(t, last.get(t["id"])) for t in db.list_target_tests()],
-                "busy": ts.LEASE.holder}
+        tests = db.list_target_tests()
+        suites = tt.suites(db, tests)
+        return {"tests": [_summary(t, last.get(t["id"])) for t in _in_suites(tests, suites)],
+                "suites": suites, "busy": ts.LEASE.holder}
     return _guard(go)
 
 
@@ -75,6 +86,7 @@ def _detail(db, test_id: int) -> dict:
     if t["approved_version"]:
         v = db.get_target_test_version(test_id, t["approved_version"])
         approved_code = v["code"] if v else ""
+    t = _in_suites([t], tt.suites(db, [t]))[0]
     return {**t, "status": tt.status_of(t), "approved_code": approved_code,
             "issues": tt.validate(t["code"]),
             "versions": db.list_target_test_versions(test_id),
@@ -112,8 +124,14 @@ def create_test(body: NewTestBody, state: AppState = Depends(get_state),
         db = state.require_edit()
         code = body.code or tt.new_test_code(body.test_key or _next_key(db), body.title,
                                              body.port, body.function)
+        # The suite the user picked, else the port's model, else the active model.
+        model_id = tt.resolve_suite(db, fallback=body.model_id)
+        if model_id is None:
+            arch = state.arch_manager
+            model_id = tt.resolve_suite(db, port=tt.parse_meta(code).get("port") or "",
+                                        fallback=arch.active_model_id if arch else None)
         tid = _approvals(db).create(code, tt.ORIGIN_USER, release_id=db.get_active_release_id(),
-                                    model_id=body.model_id)
+                                    model_id=model_id)
         _changed(bus, tid)
         return _detail(db, tid)
     return _guard(go)
@@ -150,6 +168,22 @@ def _action(name: str):
         return _guard(go)
     endpoint.__name__ = name
     return endpoint
+
+
+class SuiteBody(BaseModel):
+    model_id: int
+
+
+@router.put("/{test_id}/suite")
+def move_test(test_id: int, body: SuiteBody, state: AppState = Depends(get_state),
+              bus: EventBus = Depends(get_bus)) -> dict:
+    """Puts the test in another architecture model's test suite."""
+    def go():
+        db = state.require_edit()
+        _approvals(db).move(test_id, body.model_id)
+        _changed(bus, test_id)
+        return _detail(db, test_id)
+    return _guard(go)
 
 
 router.post("/{test_id}/approve")(_action("approve"))

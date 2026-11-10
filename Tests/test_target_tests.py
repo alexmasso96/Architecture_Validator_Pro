@@ -209,6 +209,45 @@ def test_bridge_checks_with_a_fake_sdk():
     assert br._versions_match("9.21.121", "unknown") is None
 
 
+def test_bridge_reads_the_stack_the_way_the_sdk_gives_it():
+    """isystem.connect 9.26: CDataController.getStackFrames fills a
+    StackFrameVector of frames, the current one first."""
+    class Frame:
+        def __init__(self, fn, file, line): self.fn, self.file, self.line = fn, file, line
+        def getFunction(self): return self.fn
+        def getFileName(self): return self.file
+        def getLineNumber(self): return self.line
+
+    asked = []
+
+    class Status:
+        def isStopped(self): return True
+
+    class FakeIC:
+        class StackFrameVector(list):
+            pass
+
+        class CDataController:
+            def __init__(self, _): pass
+
+            def getStackFrames(self, active_only, abs_paths, frames):
+                asked.append((active_only, abs_paths))
+                all_frames = [Frame("Com_SendSignal", "com.c", 40),
+                              Frame("Speed_Main", "speed.c", 123), Frame("main", "main.c", 9)]
+                frames.extend(all_frames[:1] if active_only else all_frames)
+
+        class CDebugFacade:
+            def __init__(self, _): pass
+            def getCPUStatus(self): return Status()
+
+    b = br.WinIdeaBridge(sdk=FakeIC)
+    b.cmgr, b.dbg = object(), FakeIC.CDebugFacade(None)
+    assert b.call_stack() == ["main", "Speed_Main", "Com_SendSignal"]
+    assert b.status() == {"state": "stopped", "function": "Com_SendSignal",
+                          "file": "com.c", "line": 40}
+    assert asked == [(False, False), (True, False)]
+
+
 # ----------------------------------------------------------------------
 # Isolated runner and debugging
 # ----------------------------------------------------------------------
@@ -485,8 +524,8 @@ def test_ai_writes_need_the_users_switch():
 def test_ai_saves_drafts_and_proposals_only(db):
     ex, _b, _ = _ai(db=db, allow_writes=True)
     assert '"verdict": "passed"' in ex.execute("target_try_test", {"code": GOOD})
-    out = ex.execute("save_target_test", {"code": GOOD, "rationale": "B is 5"})
-    tid = int(out.split("draft test ")[1].split(".")[0])
+    out = ex.execute("save_target_test", {"code": GOOD, "model": "A", "rationale": "B is 5"})
+    tid = int(out.split("draft test ")[1].split(" ")[0])
     t = db.get_target_test(tid)
     assert tt.status_of(t) == tt.STATUS_DRAFT and t["rationale"] == "B is 5"
 
@@ -494,8 +533,8 @@ def test_ai_saves_drafts_and_proposals_only(db):
     ex.execute("propose_target_test_change", {"id": tid, "code": UNREACHED, "rationale": "x"})
     t = db.get_target_test(tid)
     assert tt.status_of(t) == tt.STATUS_APPROVED and t["pending_code"] == UNREACHED
-    assert ex.execute("save_target_test", {"code": "import os", "rationale": ""}).startswith(
-        "ERROR")
+    assert ex.execute("save_target_test", {"code": "import os", "model": "A",
+                                           "rationale": ""}).startswith("ERROR")
     assert "TT-0042" in ex.execute("list_target_tests", {})
 
 
@@ -534,3 +573,294 @@ def test_debug_watch_added_while_paused_gets_a_fresh_snapshot():
     assert results[0]["verdict"] == tt.VERDICT_PASSED
     assert paused[0]["snapshot"]["watches"] == {}
     assert paused[1]["line"] == 14 and "speed_out" in paused[1]["snapshot"]["watches"]
+
+
+# ----------------------------------------------------------------------
+# Test suites: one per architecture model
+# ----------------------------------------------------------------------
+def _port_row(name):
+    return {"Port": {"text": name}}
+
+
+@pytest.fixture()
+def suite_db(tmp_path):
+    d = make_project_db(
+        str(tmp_path / "s.arch"),
+        layout=[("TC. ID", "Static Text", True), ("Port", "Port Search", True)],
+        models=[{"name": "SpeedProvider", "rows": [_port_row("Speed"), _port_row("Shared")]},
+                {"name": "Brake", "rows": [_port_row("Pressure"), _port_row("Shared")]}],
+        releases=[{"name": "R1"}])
+    yield d
+    d.close()
+
+
+def _ids(db):
+    return {m["name"]: m["id"] for m in db.get_all_models()}
+
+
+def test_a_new_tests_suite_is_the_named_model_then_its_port_then_the_fallback(suite_db):
+    ids = _ids(suite_db)
+    assert tt.resolve_suite(suite_db, model="brake", port="SpeedProvider.Speed") == ids["Brake"]
+    assert tt.resolve_suite(suite_db, port="SpeedProvider.Anything") == ids["SpeedProvider"]
+    assert tt.resolve_suite(suite_db, port="Pressure", fallback=ids["SpeedProvider"]) == ids["Brake"]
+    # A port two models have doesn't say which: the fallback decides.
+    assert tt.resolve_suite(suite_db, port="Shared", fallback=ids["Brake"]) == ids["Brake"]
+    assert tt.resolve_suite(suite_db, port="Unknown") is None
+    assert tt.resolve_suite(suite_db, fallback=999) is None
+    with pytest.raises(tt.ApprovalError, match="SpeedProvider, Brake"):
+        tt.resolve_suite(suite_db, model="Nope")
+
+
+def test_ai_tests_go_into_their_models_suite(suite_db):
+    ids = _ids(suite_db)
+    ex, _b, _ = _ai(db=suite_db, allow_writes=True)
+    ex.model_id = ids["SpeedProvider"]           # the model the chat is about
+
+    out = ex.execute("save_target_test", {"code": GOOD, "model": "Brake", "rationale": ""})
+    assert "test suite Brake" in out
+    brake_test = int(out.split("draft test ")[1].split(" ")[0])
+    assert suite_db.get_target_test(brake_test)["model_id"] == ids["Brake"]
+
+    # No model named: the test's port (SpeedProvider.Speed) names it.
+    ex.model_id = ids["Brake"]
+    out = ex.execute("save_target_test", {"code": GOOD, "rationale": ""})
+    assert "test suite SpeedProvider" in out
+
+    out = ex.execute("save_target_test", {"code": GOOD, "model": "Engine", "rationale": ""})
+    assert out.startswith("ERROR") and "SpeedProvider, Brake" in out
+    assert len(suite_db.list_target_tests()) == 2
+
+    listing = ex.execute("list_target_tests", {}).splitlines()
+    assert listing[0] == "Suite SpeedProvider: 1 test" and listing[2] == "Suite Brake: 1 test"
+    assert '"suite": "Brake"' in ex.execute("get_target_test", {"id": brake_test})
+
+
+def test_ai_must_name_a_suite_when_nothing_else_does(suite_db):
+    ex, _b, _ = _ai(db=suite_db)
+    code = GOOD.replace('port="SpeedProvider.Speed"', 'port="Shared"')
+    out = ex.execute("save_target_test", {"code": code, "rationale": ""})
+    assert out.startswith("ERROR") and "SpeedProvider, Brake" in out
+    assert suite_db.list_target_tests() == []
+
+
+def test_the_system_prompt_names_the_suites():
+    from Application_Logic import Logic_AI_Target_Tools as at
+    text = at.system_prompt(suites=["SpeedProvider", "Brake"], current="Brake")
+    assert "SpeedProvider, Brake" in text and "working on: Brake" in text
+    many = at.system_prompt(suites=[f"M{i}" for i in range(at.MAX_SUITES_IN_PROMPT + 5)])
+    assert "and 5 more" in many
+
+
+def test_model_is_not_a_script_keyword():
+    code = GOOD.replace('requirement="REQ-123"', 'requirement="REQ-123", model="Brake"')
+    assert any("@test takes" in i["message"] for i in tt.validate(code))
+
+
+def test_suites_follow_the_models(suite_db):
+    ids = _ids(suite_db)
+    ap = tt.Approvals(suite_db, "alex")
+    tid = ap.create(GOOD, tt.ORIGIN_USER, model_id=ids["Brake"])
+    assert [s["name"] for s in tt.suites(suite_db)] == ["SpeedProvider", "Brake"]
+
+    ap.move(tid, ids["SpeedProvider"])
+    t = suite_db.get_target_test(tid)
+    assert t["model_id"] == ids["SpeedProvider"]
+    assert tt.status_of(t) == tt.STATUS_APPROVED          # moving isn't a change to review
+    with pytest.raises(tt.ApprovalError):
+        ap.move(tid, 999)
+
+    # A renamed model keeps its tests; a deleted one keeps its suite while it has tests.
+    suite_db.update_model(ids["SpeedProvider"], name="Speed", is_deleted=1)
+    suite_db.update_model(ids["Brake"], is_deleted=1)
+    assert tt.suites(suite_db) == [
+        {"model_id": ids["SpeedProvider"], "name": "Speed", "status": "In Work", "deleted": True}]
+
+    # The model is gone for good: the test is in the suite with no model.
+    suite_db.delete_model(ids["SpeedProvider"])
+    assert suite_db.get_target_test(tid) is not None
+    assert tt.suites(suite_db)[-1]["model_id"] is None
+
+
+def test_api_lists_suites_and_moves_tests(client):
+    models = _ok(client.get("/api/models", headers=AUTH))
+    a = next(m["id"] for m in models["models"] if m["name"] == "A")
+    b = _ok(client.post("/api/models", json={"name": "B"}, headers=AUTH))["id"]
+
+    t = _ok(client.post("/api/target-tests", json={"title": "x"}, headers=AUTH))
+    assert t["model_id"] == a                          # the active model's suite
+    t2 = _ok(client.post("/api/target-tests", json={"title": "y", "model_id": b}, headers=AUTH))
+    assert t2["model_id"] == b
+
+    listing = _ok(client.get("/api/target-tests", headers=AUTH))
+    assert [s["name"] for s in listing["suites"]] == ["A", "B"]
+    assert {x["id"]: x["model_id"] for x in listing["tests"]} == {t["id"]: a, t2["id"]: b}
+
+    moved = _ok(client.put(f"/api/target-tests/{t['id']}/suite", json={"model_id": b},
+                           headers=AUTH))
+    assert moved["model_id"] == b and moved["status"] == "approved"
+    assert client.put(f"/api/target-tests/{t['id']}/suite", json={"model_id": 999},
+                      headers=AUTH).status_code == 409
+
+
+# ----------------------------------------------------------------------
+# More of the debugger: data breakpoints, frames, symbols, memory, calls, flash
+# ----------------------------------------------------------------------
+def test_a_data_breakpoint_stops_where_the_variable_is_written():
+    b = sim()
+    b.set_data_breakpoint("speed_out", "write")
+    b.run()
+    assert b.status()["function"] == "Speed_Main" and b.status()["line"] == 126
+    assert b.call_stack()[-1] == "Speed_Main"
+    assert b.read("speed_out") == "1"            # stopped after the write
+
+    b.clear_breakpoints()
+    b.reset()
+    b.set_data_breakpoint("a", "read")           # read by `if (a == 5)`
+    b.run()
+    assert b.status()["line"] == 123
+    with pytest.raises(br.TargetError):
+        b.set_data_breakpoint("a", "sometimes")
+    with pytest.raises(br.TargetError):
+        b.set_data_breakpoint("nope")
+
+
+def test_scripts_can_use_data_breakpoints_symbols_and_calls():
+    code = '''from target_tests import test, target, expect
+
+
+@test(id="TT-0100", title="speed_out is written by Speed_Main")
+def tt_0100():
+    target.break_on_write("speed_out")
+    target.run_until_stop(timeout_s=2)
+    expect.stopped_at("Speed_Main")
+    expect.true(target.symbol("speed_out")["size"] == 4, "speed_out is 4 bytes")
+    expect.value("speed_out", 1)
+    target.clear_breakpoints()
+    target.call("Speed_Main")
+    expect.value("speed_out", 2)
+    expect.true(target.read("a", frame=1) == "0", "the caller sees a too")
+'''
+    assert tt.validate(code) == []
+    r = tt.execute(code, sim())
+    assert r["verdict"] == "passed", r
+    assert [s["call"] for s in r["steps"]][:3] == ["reset", "target.break_on_write",
+                                                   "target.run_until_stop"]
+
+
+def test_winidea_bridge_makes_the_sdk_calls_for_the_new_tools():
+    calls = []
+
+    class Value:
+        def __init__(self, text): self.text = text
+        def getResult(self): return self.text
+
+    class Info:
+        def getAddress(self): return 0x20001000
+        def getSizeMAUs(self): return 4
+        def toString(self): return "uint32_t"
+
+    class FakeIC:
+        ACCESS_OK = 1
+
+        class IConnectDebug:
+            fRealTime, fMonitor, gafExpression = 1, 2, 0
+            bHW_accRD, bHW_accWR, bHW_accRW, bHW_SizeDefault = 10, 11, 12, 0
+
+        class CBreakpointController:
+            def __init__(self, _): pass
+            def setHWBP(self, *args): calls.append(("setHWBP", args))
+            def deleteAllHWBP(self): calls.append(("deleteAllHWBP",))
+
+        class CDebugFacade:
+            def __init__(self, _): pass
+            def deleteAll(self): calls.append(("deleteAll",))
+            def evaluate(self, flags, expr): return Value(f"7 ({expr})")
+
+        class CExecutionController:
+            def __init__(self, _): pass
+            def call(self, *args):
+                calls.append(("call", args))
+                return "42"
+
+        class CDataController:
+            def __init__(self, _): pass
+            def readMemory(self, flags, area, address, n, per):
+                return [0xDE, 0xAD] + [FakeIC.ACCESS_OK] * 2 if address == 0x100 else [0, 0, 0, 0]
+            def readRegister(self, flags, name): return Value("0x1000")
+
+        class CDataController2:
+            def __init__(self, _): pass
+            def setStackFrameContext(self, flags, frame): calls.append(("frame", frame))
+
+        class CAddressController:
+            def __init__(self, _): pass
+            def getSymbolInfo(self, flags, name): return Info()
+
+        class CLoaderController:
+            def __init__(self, _): pass
+            def verifyDownload(self): calls.append(("verifyDownload",))
+
+        class CSessionCtrl:
+            def __init__(self, _): pass
+            def begin_program(self): calls.append(("begin_program",))
+
+        class StrVector(list):
+            def push_back(self, v): self.append(v)
+
+    b = br.WinIdeaBridge(sdk=FakeIC)
+    b.cmgr = object()
+    b.dbg, b.exe, b.bpc = (FakeIC.CDebugFacade(None), FakeIC.CExecutionController(None),
+                           FakeIC.CBreakpointController(None))
+
+    b.set_data_breakpoint("speed_out", "write")
+    assert calls[-1] == ("setHWBP", (11, 0, 0, True, "speed_out", 0))
+    b.clear_breakpoints()
+    assert calls[-2:] == [("deleteAll",), ("deleteAllHWBP",)]
+
+    assert b.read_frame("arg", 2) == "7 (arg)"
+    assert [c for c in calls if c[0] == "frame"] == [("frame", 2), ("frame", 0)]
+    assert b.symbol_info("speed_out") == {"name": "speed_out", "address": "0x20001000",
+                                          "size": 4, "type": "uint32_t"}
+    assert b.read_memory(0x100, 2) == b"\xde\xad"
+    with pytest.raises(br.TargetError):
+        b.read_memory(0x200, 2)                   # the access bytes say unreadable
+    assert b.read_register("PC") == "0x1000"
+    assert "matches" in b.verify_image() and calls[-1] == ("verifyDownload",)
+    assert b.call_function("Speed_Get", [1, 2]) == "42"
+    assert calls[-1] == ("call", ("Speed_Get", "1", "2"))
+    b.call_function("f", [1, 2, 3, 4])
+    assert calls[-1] == ("call", ("f", ["1", "2", "3", "4"]))
+    b.flash()
+    assert calls[-1] == ("begin_program",)
+
+
+def test_ai_tools_for_data_breakpoints_symbols_calls_and_flash():
+    ex, b, log = _ai()
+    assert "stops on write" in ex.execute("target_set_data_breakpoint",
+                                          {"variable": "speed_out"})
+    assert "Speed_Main" in ex.execute("target_run_until_stop", {})
+    assert ex.execute("target_read", {"expr": "a", "frame": 1}) == "a (frame 1) = 0"
+    assert '"type": "int"' in ex.execute("target_symbol_info", {"name": "speed_out"})
+    assert ex.execute("target_symbol_info", {"name": "nope"}).startswith("ERROR")
+    assert ex.execute("target_read_register", {"name": "PC"}).startswith("PC = 0x")
+    assert ex.execute("target_read_memory", {"address": "0x100", "size": 4}).startswith("ERROR")
+    assert "no image" in ex.execute("target_verify_image", {})
+
+    # Calling a function and flashing each need their own switch.
+    assert ex.execute("target_call_function", {"function": "Speed_Main"}).startswith("ERROR")
+    assert ex.execute("target_flash", {}).startswith("ERROR")
+    assert "flash" not in b.log
+    ex.allow_writes = ex.allow_flash = True
+    assert "returned" in ex.execute("target_call_function", {"function": "Speed_Main"})
+    assert "programmed" in ex.execute("target_flash", {}) and "flash" in b.log
+    assert [e["tool"] for e in log][-2:] == ["target_call_function", "target_flash"]
+
+    ex.allow_writes = False
+    code = GOOD.replace('target.write("a", 5)', 'target.call("Speed_Main")')
+    assert ex.execute("target_try_test", {"code": code}).startswith("ERROR")
+
+
+def test_the_prompt_says_whether_flashing_is_allowed():
+    from Application_Logic import Logic_AI_Target_Tools as at
+    assert "Flashing is NOT allowed" in at.system_prompt()
+    assert "Flashing is ALLOWED" in at.system_prompt(allow_flash=True)

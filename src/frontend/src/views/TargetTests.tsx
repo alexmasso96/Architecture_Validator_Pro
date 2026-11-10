@@ -9,6 +9,7 @@ import type {
   TargetCheckReport,
   TargetConfig,
   TargetSnapshot,
+  TargetSuite,
   TargetTestDetail,
   TargetTestResult,
   TargetTestSummary,
@@ -18,8 +19,9 @@ import { renderMarkdown } from "../markdown";
 import { ModelSelect, streamChat } from "./AIChat";
 
 // Target Tests: architecture tests on the real ECU through winIDEA.
-// Left: the tests. Middle: the selected test's script, its runs and the
-// debugger. Right: the AI, which can drive the target and propose tests.
+// Left: the tests, grouped into test suites (one per architecture model).
+// Middle: the selected test's script, its runs and the debugger. Right: the
+// AI, which can drive the target and propose tests.
 //
 // Approval: the AI's tests and changes are drafts; a manual save is approved
 // by you; accepting an AI proposal and approving it are two separate steps.
@@ -71,6 +73,31 @@ function VerdictBadge({ r }: { r: { verdict: string; approved: boolean } | null 
 }
 
 const fmt = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v));
+
+// ===========================================================================
+// Test suites
+// ===========================================================================
+const COLLAPSED_SUITES = "tt.collapsedSuites";
+const suiteKey = (modelId: number | null) => String(modelId ?? "none");
+const suiteLabel = (s: TargetSuite) => (s.model_id === null ? "No model" : s.name);
+
+// "2 passed · 1 failed · 1 not run" over the suite's tests' last results.
+function SuiteRollup({ tests }: { tests: TargetTestSummary[] }) {
+  if (!tests.length) return <span className="tt-muted">No tests</span>;
+  const n = (v: string) => tests.filter((t) => t.last_result?.verdict === v).length;
+  const passed = n("passed");
+  const failed = n("failed");
+  const other = n("error") + n("stopped");
+  const notRun = tests.filter((t) => !t.last_result).length;
+  return (
+    <span className="tt-suite-rollup" title={`${tests.length} test${tests.length === 1 ? "" : "s"}`}>
+      {passed > 0 && <span className="tt-badge ok">{passed} passed</span>}
+      {failed > 0 && <span className="tt-badge err">{failed} failed</span>}
+      {other > 0 && <span className="tt-badge warn">{other} error</span>}
+      {notRun > 0 && <span className="tt-badge grey">{notRun} not run</span>}
+    </span>
+  );
+}
 
 // ===========================================================================
 // Connection settings + check
@@ -214,6 +241,7 @@ function ChatPanel({
     }
   });
   const [allowWrites, setAllowWrites] = useState(false);
+  const [allowFlash, setAllowFlash] = useState(false);
   const [messages, setMessages] = useState<TTurn[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -262,7 +290,10 @@ function ChatPanel({
           messages: base.filter((m) => m.content).map((m) => ({ role: m.role, content: m.content })),
           live_target: true,
           allow_target_writes: allowWrites,
+          allow_target_flash: allowFlash,
           target_test_id: selected?.id ?? null,
+          // The chat is about the selected test's model; without one, the active model.
+          model_id: selected?.model_id ?? null,
           use_tools: true,
           ground_in_mindmap: true,
         },
@@ -324,10 +355,17 @@ function ChatPanel({
       </div>
       <label
         className={`tt-writes ${allowWrites ? "on" : ""}`}
-        title="Lets the AI change variables on the target. Every write is logged."
+        title="Lets the AI change variables and call functions on the target. Every one is logged."
       >
         <input type="checkbox" checked={allowWrites} onChange={(e) => setAllowWrites(e.target.checked)} />
         Allow memory writes
+      </label>
+      <label
+        className={`tt-writes ${allowFlash ? "on" : ""}`}
+        title="Lets the AI program the target with the files winIDEA is set up to download, when you ask it to."
+      >
+        <input type="checkbox" checked={allowFlash} onChange={(e) => setAllowFlash(e.target.checked)} />
+        Allow flashing
       </label>
       <div className="tt-chat-msgs">
         {messages.length === 0 && (
@@ -414,6 +452,14 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
   const theme = useMonacoTheme();
   const { confirm, confirmNode } = useConfirm();
   const [tests, setTests] = useState<TargetTestSummary[]>([]);
+  const [suites, setSuites] = useState<TargetSuite[]>([]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(COLLAPSED_SUITES) || "[]") as string[]);
+    } catch {
+      return new Set();
+    }
+  });
   const [busy, setBusy] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [checked, setChecked] = useState<Set<number>>(new Set());
@@ -443,9 +489,10 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
   // --- data ---------------------------------------------------------------
   const reloadList = useCallback(() => {
     api
-      .get<{ tests: TargetTestSummary[]; busy: string | null }>("/target-tests")
+      .get<{ tests: TargetTestSummary[]; suites: TargetSuite[]; busy: string | null }>("/target-tests")
       .then((r) => {
         setTests(r.tests);
+        setSuites(r.suites);
         setBusy(r.busy);
       })
       .catch(() => {});
@@ -601,6 +648,15 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
       .catch(() => {});
   }, [breakpoints, watches, debug]);
 
+  const setSuiteOpen = (key: string, open: boolean) =>
+    setCollapsed((cur) => {
+      const next = new Set(cur);
+      if (open) next.delete(key);
+      else next.add(key);
+      localStorage.setItem(COLLAPSED_SUITES, JSON.stringify([...next]));
+      return next;
+    });
+
   // --- actions ------------------------------------------------------------
   const guard = async (what: string, fn: () => Promise<unknown>) => {
     try {
@@ -628,11 +684,21 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
       if (done) toast(done);
     });
 
-  const create = () =>
+  // Without a suite, the new test goes into the active model's.
+  const create = (modelId?: number) =>
     guard("New test", async () => {
-      const d = await api.post<TargetTestDetail>("/target-tests", { title: "New test" });
+      const d = await api.post<TargetTestDetail>("/target-tests", { title: "New test", model_id: modelId ?? null });
+      if (d.model_id !== null) setSuiteOpen(suiteKey(d.model_id), true);
       reloadList();
       setSelId(d.id);
+    });
+
+  const move = (modelId: number) =>
+    guard("Move", async () => {
+      if (!detail) return;
+      setDetail(await api.put<TargetTestDetail>(`/target-tests/${detail.id}/suite`, { model_id: modelId }));
+      setSuiteOpen(suiteKey(modelId), true);
+      reloadList();
     });
 
   const remove = async () => {
@@ -699,10 +765,33 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
     );
   }, [tests, filter]);
 
+  // Every suite, in the architecture's order, with its tests. While filtering,
+  // only the suites that have a match.
+  const groups = useMemo(() => {
+    const filtering = filter.trim() !== "";
+    return suites
+      .map((suite) => ({
+        suite,
+        key: suiteKey(suite.model_id),
+        all: tests.filter((t) => t.model_id === suite.model_id),
+        shown: shown.filter((t) => t.model_id === suite.model_id),
+      }))
+      .filter((g) => !filtering || g.shown.length > 0);
+  }, [suites, tests, shown, filter]);
+
   const toggle = (id: number) => {
     const next = new Set(checked);
     if (next.has(id)) next.delete(id);
     else next.add(id);
+    setChecked(next);
+  };
+
+  const toggleSuite = (ids: number[], on: boolean) => {
+    const next = new Set(checked);
+    for (const id of ids) {
+      if (on) next.add(id);
+      else next.delete(id);
+    }
     setChecked(next);
   };
 
@@ -716,7 +805,12 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
         <div className="tt-pane-head">
           <span>Target Tests</span>
           <span className="tt-spacer" />
-          <button className="tt-mini" disabled={!canEdit} onClick={create} title="New test (yours: approved)">
+          <button
+            className="tt-mini"
+            disabled={!canEdit}
+            onClick={() => create()}
+            title="New test in the active model's suite (yours: approved)"
+          >
             ＋
           </button>
         </div>
@@ -727,35 +821,102 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
           onChange={(e) => setFilter(e.target.value)}
         />
         <div className="tt-items">
-          {shown.length === 0 && (
+          {groups.length === 0 && (
             <div className="tt-empty">
               {tests.length ? "No test matches." : "No tests yet. Ask the AI on the right to generate one, or click ＋."}
             </div>
           )}
-          {shown.map((t) => (
-            <div
-              key={t.id}
-              className={`tt-item ${t.id === selId ? "sel" : ""}`}
-              onClick={() => setSelId(t.id)}
-            >
-              <input
-                type="checkbox"
-                checked={checked.has(t.id)}
-                onClick={(e) => e.stopPropagation()}
-                onChange={() => toggle(t.id)}
-              />
-              <div className="tt-item-main">
-                <div className="tt-item-title">
-                  <b>{t.test_key || `#${t.id}`}</b> {t.title}
+          {groups.map(({ suite, key, all, shown: rows }) => {
+            const open = !collapsed.has(key) || filter.trim() !== "";
+            const ids = rows.map((t) => t.id);
+            const nChecked = ids.filter((id) => checked.has(id)).length;
+            const approved = all.filter((t) => t.status === "approved").map((t) => t.id);
+            return (
+              <div key={key} className="tt-suite">
+                <div
+                  className={`tt-suite-head ${all.length ? "" : "empty"}`}
+                  onClick={() => setSuiteOpen(key, !open)}
+                  title={
+                    suite.model_id === null
+                      ? "Tests whose architecture model was removed. Move them to a suite."
+                      : `Test suite of the architecture model ${suite.name}`
+                  }
+                >
+                  <span className="tt-suite-caret">{open ? "▾" : "▸"}</span>
+                  <input
+                    type="checkbox"
+                    disabled={!ids.length}
+                    checked={ids.length > 0 && nChecked === ids.length}
+                    ref={(el) => {
+                      if (el) el.indeterminate = nChecked > 0 && nChecked < ids.length;
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => toggleSuite(ids, e.target.checked)}
+                    title="Select the suite's tests"
+                  />
+                  <span className="tt-suite-name">{suiteLabel(suite)}</span>
+                  {suite.deleted && <span className="tt-badge grey">Deleted</span>}
+                  {suite.status === "Retired" && !suite.deleted && <span className="tt-badge grey">Retired</span>}
+                  <span className="tt-suite-count">{all.length}</span>
+                  <span className="tt-spacer" />
+                  <button
+                    className="tt-mini"
+                    disabled={running || !!debug || approved.length === 0}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      run(approved);
+                    }}
+                    title={`Run the suite's approved tests (${approved.length})`}
+                  >
+                    ▶
+                  </button>
+                  {suite.model_id !== null && !suite.deleted && (
+                    <button
+                      className="tt-mini"
+                      disabled={!canEdit}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        create(suite.model_id!);
+                      }}
+                      title={`New test in ${suite.name} (yours: approved)`}
+                    >
+                      ＋
+                    </button>
+                  )}
                 </div>
-                <div className="tt-item-sub">
-                  {t.port && <span className="tt-muted">{t.port}</span>}
-                  <StatusBadge t={t} />
-                  <VerdictBadge r={t.last_result} />
-                </div>
+                {open && all.length > 0 && (
+                  <div className="tt-suite-sum">
+                    <SuiteRollup tests={all} />
+                  </div>
+                )}
+                {open &&
+                  rows.map((t) => (
+                    <div
+                      key={t.id}
+                      className={`tt-item ${t.id === selId ? "sel" : ""}`}
+                      onClick={() => setSelId(t.id)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked.has(t.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => toggle(t.id)}
+                      />
+                      <div className="tt-item-main">
+                        <div className="tt-item-title">
+                          <b>{t.test_key || `#${t.id}`}</b> {t.title}
+                        </div>
+                        <div className="tt-item-sub">
+                          {t.port && <span className="tt-muted">{t.port}</span>}
+                          <StatusBadge t={t} />
+                          <VerdictBadge r={t.last_result} />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         <div className="tt-list-foot">
           <button
@@ -789,7 +950,22 @@ export function TargetTests({ toast, canEdit }: { toast: (m: string) => void; ca
                 <StatusBadge t={detail} />
                 {dirty && <span className="tt-badge grey">Unsaved</span>}
               </div>
-              <span className="tt-spacer" />
+              <select
+                className="tt-suite-pick"
+                value={detail.model_id ?? ""}
+                disabled={!canEdit}
+                onChange={(e) => move(Number(e.target.value))}
+                title="The test suite (architecture model) this test belongs to"
+              >
+                {detail.model_id === null && <option value="">No model</option>}
+                {suites
+                  .filter((x) => x.model_id !== null && (!x.deleted || x.model_id === detail.model_id))
+                  .map((x) => (
+                    <option key={x.model_id} value={x.model_id!}>
+                      {x.name}
+                    </option>
+                  ))}
+              </select>
               {running ? (
                 <button onClick={stopRun} title="Stop the run">■ Stop</button>
               ) : (

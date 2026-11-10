@@ -816,6 +816,14 @@ export interface TargetTestResult extends TargetTestResultSummary {
   evidence: { steps: TargetStep[]; expectations: TargetExpectation[]; checks: TargetCheck[] };
 }
 
+// A test suite is an architecture model. model_id null: tests whose model is gone.
+export interface TargetSuite {
+  model_id: number | null;
+  name: string;
+  status: string;
+  deleted: boolean;
+}
+
 export interface TargetTestSummary {
   id: number;
   test_key: string;

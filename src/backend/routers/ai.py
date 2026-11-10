@@ -397,6 +397,7 @@ class ChatBody(BaseModel):
     # Target Tests: give the agent the live-ECU tools (and the selected test).
     live_target: bool = False
     allow_target_writes: bool = False
+    allow_target_flash: bool = False
     target_test_id: Optional[int] = None
 
 
@@ -469,13 +470,21 @@ def _with_target_tools(state: AppState, body: ChatBody, db, mid, rid, system, to
     from Application_Logic.Logic_File_Locking import FileLockManager
     from .. import target_session as ts
 
+    from Application_Logic import Logic_Target_Tests as tt
+
+    models = {m["id"]: m["name"] for m in db.get_all_models() if not m["is_deleted"]}
     selected = db.get_target_test(body.target_test_id) if body.target_test_id else None
-    system = system + "\n\n" + target_tools.system_prompt(selected, body.allow_target_writes)
+    if selected:
+        selected["suite"] = models.get(selected["model_id"], "")
+    system = system + "\n\n" + target_tools.system_prompt(
+        selected, body.allow_target_writes, suites=tt.suite_names(db),
+        current=models.get(mid, ""), allow_flash=body.allow_target_flash)
     names = {t.name for t in tools}
     tools = list(tools) + [t for t in target_tools.target_tools() if t.name not in names]
     executor = target_tools.TargetToolExecutor(
         executor, get_backend=lambda: ts.AI_SESSION.get(ts.get_config(state)), db=db,
         user=FileLockManager.get_username(), allow_writes=body.allow_target_writes,
+        allow_flash=body.allow_target_flash,
         can_edit=bool(state.can_edit),
         release_id=rid, model_id=mid,
         on_change=lambda tid: state.bus.publish(
