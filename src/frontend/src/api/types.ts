@@ -340,6 +340,32 @@ export interface TestProjectFile {
   ext: string | null;
 }
 
+// One folder of the project folder on disk (Test Injection lists it lazily).
+export interface ProjectTreeEntry {
+  name: string;
+  rel_path: string;
+  is_dir: boolean;
+  size: number;
+}
+
+export interface ProjectTree {
+  folder: string; // "" when this PC has no project folder
+  available: boolean;
+  dir: string;
+  entries: ProjectTreeEntry[];
+}
+
+// What a test project changes in a build: a file it replaces ("modified"), one
+// it adds, or a file its hooks go into.
+export interface ChangedFile {
+  rel_path: string;
+  size: number;
+  status: "modified" | "added" | "hooks";
+  hooks?: number;
+  original_changed: boolean; // the original isn't the one the copy was made from
+  hooks_lost: number; // hooks in a file that is replaced as a whole
+}
+
 export interface SourceFileInfo {
   rel_path: string;
   size: number;

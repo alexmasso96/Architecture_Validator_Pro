@@ -6,6 +6,11 @@ injection hooks, fuzzy anchor resolution/shifting, source export, and the build
 runner. Reads/writes go through ``AppState`` (the open .arch); the production
 source it injects into comes from the active release's DB-stored source (#2E).
 
+It also shows the whole project folder (the test build's source folder on
+disk), so any file can be changed for a test build: a makefile, an ARXML, a
+linker script. A changed file is a full copy kept in the test project
+(``Logic_Project_Files``).
+
 The build runner spawns a compiler in a subprocess on a worker thread and streams
 its output line-by-line over the shared ``build`` SSE event so the frontend
 console can scroll logs live. It runs independently of export.
@@ -27,6 +32,7 @@ from ..security import require_token
 from ..state import AppState, ProjectError
 
 from Application_Logic import Logic_Code_Injection as injection
+from Application_Logic import Logic_Project_Files as project_files
 from Application_Logic import Logic_Test_Builds as test_builds
 from Application_Logic.Logic_File_Locking import FileLockManager
 from Application_Logic.Logic_Source_Store import (
@@ -48,7 +54,7 @@ _builds_lock = threading.Lock()
 def _guard(fn):
     try:
         return fn()
-    except ProjectError as e:
+    except (ProjectError, project_files.ProjectFileError) as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
 
@@ -274,6 +280,148 @@ def delete_file(test_project_id: int, rel_path: str = Query(...),
         bus.publish("db-changed", {"reason": "test-file-deleted",
                                    "id": test_project_id})
         return {"id": test_project_id, "rel_path": rel_path, "deleted": True}
+    return _guard(go)
+
+
+# ----------------------------------------------------------------------
+# The project folder, and the files changed for a test project
+# ----------------------------------------------------------------------
+def _project_folder(state: AppState, test_project_id: int) -> str:
+    """The folder a test project's builds run in: the source folder of its test
+    build for the active release, else of that release's Main build, else the
+    default source folder (Preferences → Paths). "" when none is on this PC."""
+    db = state.require_open()
+    active = state.require_releases().get_active_release()
+    builds = db.list_test_builds(active.id) if active else []
+    candidates = [b["source_dir"] for b in builds if b["test_project_id"] == test_project_id]
+    candidates += [b["source_dir"] for b in builds if b["is_main"]]
+    candidates.append(db.get_meta("inject_source_path", ""))
+    return next((c for c in candidates if c and os.path.isdir(c)), "")
+
+
+def _original(state: AppState, test_project_id: int, rel_path: str) -> tuple:
+    """``(bytes or None, where)`` of the file a changed file replaces: the
+    project folder's copy, else the release's imported source."""
+    folder = _project_folder(state, test_project_id)
+    if folder:
+        data = project_files.read_bytes(folder, rel_path)
+        if data is not None:
+            return data, "disk"
+    active = state.require_releases().get_active_release()
+    provider = release_source_provider(state.require_open(), active.id if active else None)
+    text = provider.read_file(rel_path) if provider is not None else None
+    return (text.encode("utf-8"), "source") if text is not None else (None, None)
+
+
+@router.get("/projects/{test_project_id}/tree")
+def project_tree(test_project_id: int, dir: str = Query(""),
+                 state: AppState = Depends(get_state)) -> dict:
+    """One folder of the project folder on disk. ``available`` is false when
+    this PC has no project folder; the view then lists the imported source."""
+    def go():
+        _require_test_project(state, test_project_id)
+        folder = _project_folder(state, test_project_id)
+        if not folder:
+            return {"folder": "", "available": False, "dir": "", "entries": []}
+        return {"folder": folder, "available": True, "dir": project_files.clean_rel(dir),
+                "entries": project_files.list_dir(folder, dir)}
+    return _guard(go)
+
+
+@router.get("/projects/{test_project_id}/disk/content")
+def disk_content(test_project_id: int, rel_path: str = Query(...),
+                 state: AppState = Depends(get_state)) -> dict:
+    """A file of the project folder, for reading. ``editable`` says whether it
+    can become a changed file (it must be UTF-8 text)."""
+    def go():
+        _require_test_project(state, test_project_id)
+        folder = _project_folder(state, test_project_id)
+        if not folder:
+            raise ProjectError("This PC has no project folder for the test project. Set "
+                               "the test build's source folder.")
+        return {"rel_path": project_files.clean_rel(rel_path),
+                **project_files.open_text(folder, rel_path)}
+    return _guard(go)
+
+
+class FileContentBody(BaseModel):
+    rel_path: str
+    content: str
+
+
+@router.put("/projects/{test_project_id}/files/content")
+def save_file(test_project_id: int, body: FileContentBody,
+              state: AppState = Depends(get_state),
+              bus: EventBus = Depends(get_bus)) -> dict:
+    """Save a file of the test project. The first save of a project file makes
+    it a changed file and remembers which original it was made from."""
+    def go():
+        db = state.require_edit()
+        _require_test_project(state, test_project_id)
+        rel_path = project_files.clean_rel(body.rel_path)
+        if not rel_path:
+            raise ProjectError("A file path is required.")
+        known = any(f["rel_path"] == rel_path
+                    for f in db.list_test_project_files(test_project_id))
+        base_hash = None
+        if not known:
+            data, _where = _original(state, test_project_id, rel_path)
+            if data is not None:
+                _text, editable, reason = project_files.as_text(data)
+                if not editable:
+                    raise ProjectError(reason)
+                base_hash = project_files.sha256_bytes(data)
+        db.save_test_project_file(test_project_id, rel_path, body.content, base_hash)
+        bus.publish("db-changed", {"reason": "test-file-saved", "id": test_project_id})
+        return {"id": test_project_id, "rel_path": rel_path, "created": not known}
+    return _guard(go)
+
+
+@router.get("/projects/{test_project_id}/files/original")
+def original_file(test_project_id: int, rel_path: str = Query(...),
+                  state: AppState = Depends(get_state)) -> dict:
+    """What a changed file replaces, to compare with. ``content`` is None for a
+    file the test project adds."""
+    def go():
+        _require_test_project(state, test_project_id)
+        data, where = _original(state, test_project_id, rel_path)
+        if data is None:
+            return {"rel_path": rel_path, "content": None, "source": None}
+        return {"rel_path": rel_path, "content": project_files.as_text(data)[0],
+                "source": where}
+    return _guard(go)
+
+
+@router.get("/projects/{test_project_id}/changes")
+def changes(test_project_id: int, state: AppState = Depends(get_state)) -> dict:
+    """Everything the test project changes in a build: its changed and added
+    files, and the files its hooks go into."""
+    def go():
+        db = state.require_open()
+        _require_test_project(state, test_project_id)
+        folder = _project_folder(state, test_project_id)
+        active = state.require_releases().get_active_release()
+        provider = release_source_provider(db, active.id if active else None)
+        loaded = {sf.rel_path for sf in provider.list_files()} if provider else set()
+        hooks: dict = {}
+        for h in db.list_injections(test_project_id):
+            hooks[h["src_file_path"]] = hooks.get(h["src_file_path"], 0) + 1
+        out = []
+        for f in db.list_test_project_files(test_project_id):
+            rel = f["rel_path"]
+            on_disk = bool(folder) and os.path.isfile(project_files.resolve(folder, rel))
+            replaces = on_disk or rel in loaded
+            out.append({
+                "rel_path": rel, "size": f["size"],
+                "status": "modified" if replaces or f["base_hash"] else "added",
+                "original_changed": project_files.original_changed(
+                    folder, rel, f["base_hash"]) is True,
+                # The file replaces the whole original, so hooks in it aren't applied.
+                "hooks_lost": hooks.pop(rel, 0)})
+        out += [{"rel_path": rel, "size": 0, "status": "hooks", "hooks": n,
+                 "original_changed": False, "hooks_lost": 0}
+                for rel, n in sorted(hooks.items())]
+        return {"folder": folder, "files": sorted(out, key=lambda x: x["rel_path"].casefold())}
     return _guard(go)
 
 

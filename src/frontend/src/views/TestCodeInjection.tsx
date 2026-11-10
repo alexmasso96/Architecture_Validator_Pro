@@ -1,4 +1,4 @@
-import Editor, { type OnMount } from "@monaco-editor/react";
+import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
 import {
   Fragment,
   useCallback,
@@ -11,8 +11,11 @@ import { api, ApiError } from "../api/client";
 import { useSSE } from "../api/useSSE";
 import type {
   BuildSettings,
+  ChangedFile,
   HelperImportPreview,
   InjectionHook,
+  ProjectTree as ProjectTreeData,
+  ProjectTreeEntry,
   SourceFileInfo,
   SourceFunction,
   TerminalKind,
@@ -100,6 +103,154 @@ function FileTree({
   return <>{renderNodes(tree, 0)}</>;
 }
 
+// ---------------------------------------------------------------------------
+// Project tree — the whole project folder on disk, one folder at a time. A
+// folder's entries are read when it is unfolded, so a big project costs nothing
+// until then. Files the test project changes are marked.
+// ---------------------------------------------------------------------------
+function ProjectTree({
+  projectId,
+  root,
+  changed,
+  hooked,
+  activeTab,
+  refreshKey,
+  onOpen,
+  onError,
+}: {
+  projectId: number;
+  root: ProjectTreeEntry[];
+  changed: Set<string>;
+  hooked: Map<string, number>;
+  activeTab: string | null;
+  refreshKey: number;
+  onOpen: (relPath: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [children, setChildren] = useState<Record<string, ProjectTreeEntry[]>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const load = useCallback(
+    async (dir: string) => {
+      try {
+        const r = await api.get<ProjectTreeData>(
+          `/injection/projects/${projectId}/tree?dir=${encodeURIComponent(dir)}`,
+        );
+        setChildren((prev) => ({ ...prev, [dir]: r.entries }));
+      } catch (e) {
+        onError(e instanceof ApiError ? e.detail : (e as Error).message);
+      }
+    },
+    [projectId, onError],
+  );
+
+  // A refresh reads the unfolded folders again; another project starts folded.
+  useEffect(() => {
+    setChildren({});
+    setExpanded(new Set());
+  }, [projectId]);
+  useEffect(() => {
+    expanded.forEach((dir) => load(dir));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
+
+  const toggle = (dir: string) => {
+    const next = new Set(expanded);
+    if (next.has(dir)) next.delete(dir);
+    else {
+      next.add(dir);
+      if (!children[dir]) load(dir);
+    }
+    setExpanded(next);
+  };
+
+  // A folder is marked when something under it is changed or hooked.
+  const marked = useMemo(() => {
+    const dirs = new Set<string>();
+    for (const path of [...changed, ...hooked.keys()]) {
+      const parts = path.split("/").slice(0, -1);
+      parts.forEach((_, i) => dirs.add(parts.slice(0, i + 1).join("/")));
+    }
+    return dirs;
+  }, [changed, hooked]);
+
+  const renderEntries = (entries: ProjectTreeEntry[], depth: number): React.ReactNode =>
+    entries.map((e) => {
+      const indent = 8 + depth * 12;
+      if (e.is_dir) {
+        const open = expanded.has(e.rel_path);
+        return (
+          <Fragment key={`d:${e.rel_path}`}>
+            <button
+              className="tci-tree-row dir"
+              style={{ paddingLeft: indent }}
+              onClick={() => toggle(e.rel_path)}
+            >
+              <span className="tci-tree-chev">{open ? "▾" : "▸"}</span>
+              <FolderIcon size={13} />
+              <span className="tci-tree-name">{e.name}</span>
+              {marked.has(e.rel_path) && <span className="tci-tree-mark dot" title="Has changes" />}
+            </button>
+            {open &&
+              (children[e.rel_path] ? (
+                renderEntries(children[e.rel_path], depth + 1)
+              ) : (
+                <div className="tci-empty" style={{ paddingLeft: indent + 26 }}>
+                  Reading…
+                </div>
+              ))}
+          </Fragment>
+        );
+      }
+      const isChanged = changed.has(e.rel_path);
+      const hooks = hooked.get(e.rel_path) ?? 0;
+      const sel =
+        activeTab === `test:${e.rel_path}` ||
+        activeTab === `src:${e.rel_path}` ||
+        activeTab === `disk:${e.rel_path}`;
+      return (
+        <button
+          key={`f:${e.rel_path}`}
+          className={"tci-tree-row file" + (sel ? " sel" : "") + (isChanged ? " changed" : "")}
+          style={{ paddingLeft: indent + 14 }}
+          title={e.rel_path}
+          onClick={() => onOpen(e.rel_path)}
+        >
+          <FileIcon size={13} />
+          <span className="tci-tree-name">{e.name}</span>
+          {isChanged && (
+            <span className="tci-tree-mark" title="Changed for this test project">
+              M
+            </span>
+          )}
+          {!isChanged && hooks > 0 && (
+            <span className="tci-tree-mark" title={`${hooks} hook${hooks === 1 ? "" : "s"}`}>
+              H
+            </span>
+          )}
+        </button>
+      );
+    });
+
+  return <>{renderEntries(root, 0)}</>;
+}
+
+// The editor's language for a file, by its name.
+function languageOf(relPath: string): string {
+  const name = relPath.split("/").pop()?.toLowerCase() ?? "";
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+  if (["c", "h"].includes(ext)) return "c";
+  if (["cpp", "hpp", "cc", "hh", "cxx"].includes(ext)) return "cpp";
+  if (["arxml", "xml", "xdm", "xsd", "epc"].includes(ext)) return "xml";
+  if (ext === "json") return "json";
+  if (["yml", "yaml"].includes(ext)) return "yaml";
+  if (ext === "py") return "python";
+  if (["bat", "cmd"].includes(ext)) return "bat";
+  if (["sh", "bash"].includes(ext)) return "shell";
+  if (["ini", "cfg", "properties"].includes(ext)) return "ini";
+  return "plaintext";
+}
+
 // Monaco's editor instance type, kept loose to avoid importing monaco's full
 // type surface (it ships its own .d.ts but we only touch a few members).
 type MonacoEditor = Parameters<OnMount>[0];
@@ -138,7 +289,10 @@ const SEARCH_LIMIT = 200;
 // Bus reasons after which the Production Source list can be out of date.
 const SOURCE_CHANGES = ["source-imported", "source-dropped", "release-activated"];
 
-type TabKind = "src" | "test";
+// "src": a C file imported into the release (hooks go here). "test": a file of
+// the test project (a changed or added file; it can be edited). "disk": any
+// other file of the project folder, read-only until it is changed.
+type TabKind = "src" | "test" | "disk";
 interface OpenTab {
   key: string;
   kind: TabKind;
@@ -255,6 +409,13 @@ export function TestCodeInjection({
   const [functions, setFunctions] = useState<SourceFunction[]>([]);
   const [query, setQuery] = useState("");
   const [testFiles, setTestFiles] = useState<TestProjectFile[]>([]);
+  const [changes, setChanges] = useState<ChangedFile[]>([]);
+  const [tree, setTree] = useState<ProjectTreeData | null>(null);
+  const [treeKey, setTreeKey] = useState(0);
+  // Unsaved text of test-project files, by tab key.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [diskInfo, setDiskInfo] = useState<{ key: string; editable: boolean; reason: string } | null>(null);
+  const [compare, setCompare] = useState<{ key: string; original: string | null } | null>(null);
   const [hooks, setHooks] = useState<InjectionHook[]>([]);
 
   // -- editor / tabs -------------------------------------------------------
@@ -339,9 +500,13 @@ export function TestCodeInjection({
   // The editor puts its cursor on line 1 whenever its text changes, so a position
   // only counts once the user has chosen it.
   const cursorChosen = useRef(false);
+  // The editor's save shortcut is bound once; this always holds the current save.
+  const saveRef = useRef<() => void>(() => {});
 
   const activeTabObj = tabs.find((t) => t.key === activeTab) ?? null;
   const isSrcTab = activeTabObj?.kind === "src";
+  const isTestTab = activeTabObj?.kind === "test";
+  const dirty = activeTab != null && drafts[activeTab] !== undefined;
 
   // -- loaders -------------------------------------------------------------
   const loadProjects = useCallback(async () => {
@@ -388,6 +553,16 @@ export function TestCodeInjection({
     setTestFiles(r.files);
   }, []);
 
+  // The project folder's top level. Its folders are read as they're unfolded.
+  const loadTree = useCallback(async (pid: number) => {
+    try {
+      setTree(await api.get<ProjectTreeData>(`/injection/projects/${pid}/tree`));
+      setTreeKey((n) => n + 1);
+    } catch {
+      setTree(null);
+    }
+  }, []);
+
   const loadHooks = useCallback(async (pid: number) => {
     const r = await api.get<{ injections: InjectionHook[] }>(
       `/injection/projects/${pid}/injections`,
@@ -416,14 +591,36 @@ export function TestCodeInjection({
   }, [loadSettings]);
 
   useEffect(() => {
+    setDrafts({});
+    setCompare(null);
     if (activeProject == null) {
       setTestFiles([]);
+      setChanges([]);
       setHooks([]);
+      setTree(null);
       return;
     }
     loadProjectFiles(activeProject);
     loadHooks(activeProject);
-  }, [activeProject, loadProjectFiles, loadHooks]);
+    loadTree(activeProject);
+  }, [activeProject, loadProjectFiles, loadHooks, loadTree]);
+
+  // What the test project changes in a build follows its files and its hooks.
+  useEffect(() => {
+    if (activeProject == null) return;
+    api
+      .get<{ files: ChangedFile[] }>(`/injection/projects/${activeProject}/changes`)
+      .then((c) => setChanges(c.files))
+      .catch(() => setChanges([]));
+  }, [activeProject, testFiles, hooks]);
+
+  const changedSet = useMemo(() => new Set(testFiles.map((f) => f.rel_path)), [testFiles]);
+  const loadedSet = useMemo(() => new Set(sourceFiles.map((f) => f.rel_path)), [sourceFiles]);
+  const hookedMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const h of hooks) m.set(h.src_file_path, (m.get(h.src_file_path) ?? 0) + 1);
+    return m;
+  }, [hooks]);
 
   // Hooks for the file currently open in the editor.
   const sourceFolders = useMemo(() => {
@@ -469,6 +666,14 @@ export function TestCodeInjection({
     [],
   );
 
+  // A file of the project tree: the test project's copy if it has one, else
+  // the imported source (where hooks go), else the file on disk.
+  const openPath = useCallback(
+    (relPath: string) =>
+      openFile(changedSet.has(relPath) ? "test" : loadedSet.has(relPath) ? "src" : "disk", relPath),
+    [openFile, changedSet, loadedSet],
+  );
+
   useEffect(() => {
     if (!activeTabObj) {
       setDocContent("");
@@ -478,12 +683,20 @@ export function TestCodeInjection({
     let cancelled = false;
     (async () => {
       try {
+        const path = encodeURIComponent(activeTabObj.relPath);
         const url =
           activeTabObj.kind === "src"
-            ? `/injection/source/content?rel_path=${encodeURIComponent(activeTabObj.relPath)}`
-            : `/injection/projects/${activeProject}/files/content?rel_path=${encodeURIComponent(activeTabObj.relPath)}`;
-        const r = await api.get<{ content: string }>(url);
+            ? `/injection/source/content?rel_path=${path}`
+            : activeTabObj.kind === "disk"
+              ? `/injection/projects/${activeProject}/disk/content?rel_path=${path}`
+              : `/injection/projects/${activeProject}/files/content?rel_path=${path}`;
+        const r = await api.get<{ content: string; editable?: boolean; reason?: string }>(url);
         if (!cancelled) {
+          setDiskInfo(
+            activeTabObj.kind === "disk"
+              ? { key: activeTabObj.key, editable: r.editable !== false, reason: r.reason ?? "" }
+              : null,
+          );
           setDocContent(r.content);
           setDocKey(activeTabObj.key);
           // Feed the autocomplete provider with identifiers from this file.
@@ -516,7 +729,12 @@ export function TestCodeInjection({
     return buildPreview(docContent, fileHooks);
   }, [docContent, fileHooks, isSrcTab]);
 
-  const editorValue = mode === "inject" && isSrcTab ? preview.value : docContent;
+  const editorValue =
+    mode === "inject" && isSrcTab
+      ? preview.value
+      : isTestTab && activeTab != null && drafts[activeTab] !== undefined
+        ? drafts[activeTab]
+        : docContent;
 
   // Apply inject-preview decorations directly in an effect. Parent effects run
   // after the child Editor has committed its controlled value, so the model line
@@ -651,6 +869,7 @@ export function TestCodeInjection({
       };
       monaco.languages.registerCompletionItemProvider("c", provider);
     }
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current());
     // Decorations are applied by the effect below once preview/model are ready.
     setEditorReady((n) => n + 1);
   };
@@ -713,6 +932,17 @@ export function TestCodeInjection({
 
   async function removeHelper(relPath: string) {
     if (activeProject == null) return;
+    const change = changes.find((c) => c.rel_path === relPath);
+    const ok = await confirm({
+      title: change?.status === "added" ? `Remove ${relPath}?` : `Discard the changes to ${relPath}?`,
+      message:
+        change?.status === "added"
+          ? "The file is removed from this test project."
+          : "This test project's copy is removed. Its builds use the original again.",
+      confirmLabel: change?.status === "added" ? "Remove" : "Discard changes",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.del(
         `/injection/projects/${activeProject}/files?rel_path=${encodeURIComponent(relPath)}`,
@@ -720,10 +950,67 @@ export function TestCodeInjection({
       const key = `test:${relPath}`;
       setTabs((prev) => prev.filter((t) => t.key !== key));
       if (activeTab === key) setActiveTab(null);
+      setDrafts(({ [key]: _gone, ...rest }) => rest);
       await loadProjectFiles(activeProject);
       await loadProjects();
     } catch (e) {
       toast(`Remove failed: ${(e as Error).message}`);
+    }
+  }
+
+  // Make the open file a file of the test project: a full copy that its
+  // builds use in place of the original. The original on disk isn't touched.
+  async function changeFile() {
+    if (activeProject == null || !activeTabObj || activeTabObj.kind === "test") return;
+    const { relPath, key } = activeTabObj;
+    try {
+      await api.put(`/injection/projects/${activeProject}/files/content`, {
+        rel_path: relPath,
+        content: docContent,
+      });
+      const next = `test:${relPath}`;
+      setTabs((prev) => prev.map((t) => (t.key === key ? { key: next, kind: "test", relPath } : t)));
+      setActiveTab(next);
+      await loadProjectFiles(activeProject);
+      await loadProjects();
+    } catch (e) {
+      toast(`Change failed: ${e instanceof ApiError ? e.detail : (e as Error).message}`);
+    }
+  }
+
+  async function saveFile() {
+    if (activeProject == null || !activeTabObj || activeTabObj.kind !== "test") return;
+    const { relPath, key } = activeTabObj;
+    const text = drafts[key];
+    if (text === undefined) return;
+    try {
+      await api.put(`/injection/projects/${activeProject}/files/content`, {
+        rel_path: relPath,
+        content: text,
+      });
+      setDocContent(text);
+      setDrafts(({ [key]: _saved, ...rest }) => rest);
+      await loadProjectFiles(activeProject);
+    } catch (e) {
+      toast(`Save failed: ${e instanceof ApiError ? e.detail : (e as Error).message}`);
+    }
+  }
+  saveRef.current = saveFile;
+
+  // Show the open test-project file next to what it replaces.
+  async function toggleCompare() {
+    if (activeProject == null || !activeTabObj) return;
+    if (compare?.key === activeTabObj.key) {
+      setCompare(null);
+      return;
+    }
+    try {
+      const r = await api.get<{ content: string | null }>(
+        `/injection/projects/${activeProject}/files/original?rel_path=${encodeURIComponent(activeTabObj.relPath)}`,
+      );
+      setCompare({ key: activeTabObj.key, original: r.content });
+    } catch (e) {
+      toast(`Compare failed: ${(e as Error).message}`);
     }
   }
 
@@ -974,7 +1261,18 @@ export function TestCodeInjection({
           style={{ flexGrow: paneFlex[1] }}
         >
           <div className="tci-sect-head">
-            <span>Production Source</span>
+            <span title={tree?.available ? tree.folder : undefined}>
+              {tree?.available ? "Project" : "Production Source"}
+            </span>
+            {tree?.available && activeProject != null && (
+              <button
+                className="tci-icon-btn"
+                title={`Read the project folder again\n${tree.folder}`}
+                onClick={() => loadTree(activeProject)}
+              >
+                ⟳
+              </button>
+            )}
           </div>
           {sourceFiles.length > 0 && (
             <input
@@ -986,9 +1284,15 @@ export function TestCodeInjection({
             />
           )}
           <div className="tci-pane-body">
-            {sourceErr && <div className="tci-empty err">{sourceErr}</div>}
-            {!sourceErr && sourceFiles.length === 0 && (
+            {sourceErr && !tree?.available && <div className="tci-empty err">{sourceErr}</div>}
+            {!sourceErr && !tree?.available && sourceFiles.length === 0 && (
               <div className="tci-empty">No source files.</div>
+            )}
+            {tree && !tree.available && activeProject != null && sourceFiles.length > 0 && (
+              <div className="tci-empty">
+                Only the imported C sources are listed: this PC has no project folder. Set
+                the test build's source folder to see every file.
+              </div>
             )}
             {search ? (
               <>
@@ -1023,6 +1327,17 @@ export function TestCodeInjection({
                   <div className="tci-empty">Nothing found.</div>
                 )}
               </>
+            ) : tree?.available && activeProject != null ? (
+              <ProjectTree
+                projectId={activeProject}
+                root={tree.entries}
+                changed={changedSet}
+                hooked={hookedMap}
+                activeTab={activeTab}
+                refreshKey={treeKey}
+                onOpen={openPath}
+                onError={(m) => toast(`Project folder: ${m}`)}
+              />
             ) : (
               <FileTree
                 files={sourceFiles.map((f) => f.rel_path)}
@@ -1046,7 +1361,9 @@ export function TestCodeInjection({
           style={{ flexGrow: paneFlex[2] }}
         >
           <div className="tci-sect-head">
-            <span>Test Files</span>
+            <span title="Everything this test project changes in a build">
+              Changed Files{changes.length ? ` (${changes.length})` : ""}
+            </span>
             <button
               className="tci-icon-btn"
               title="Import .c/.h helpers"
@@ -1057,16 +1374,50 @@ export function TestCodeInjection({
             </button>
           </div>
           <div className="tci-pane-body">
-            {testFiles.length === 0 && (
-              <div className="tci-empty">No helper files imported.</div>
+            {changes.length === 0 && (
+              <div className="tci-empty">
+                Nothing changed yet. Open a file and click “Change file”, or add a hook.
+              </div>
             )}
-            <FileTree
-              files={testFiles.map((f) => f.rel_path)}
-              kind="test"
-              activeTab={activeTab}
-              onOpen={openFile}
-              onDelete={canEdit ? removeHelper : undefined}
-            />
+            {changes.map((c) => {
+              const kind: TabKind = c.status === "hooks" ? "src" : "test";
+              const key = `${kind}:${c.rel_path}`;
+              const warn = c.original_changed
+                ? "The original has changed since this file was changed. A build still uses this copy."
+                : c.hooks_lost
+                  ? `This copy replaces the whole file, so its ${c.hooks_lost} hook(s) aren't applied.`
+                  : "";
+              return (
+                <div key={key} className="tci-tree-filerow">
+                  <button
+                    className={"tci-tree-row file" + (activeTab === key ? " sel" : "")}
+                    style={{ paddingLeft: 8 }}
+                    title={warn ? `${c.rel_path}\n${warn}` : c.rel_path}
+                    onClick={() => openFile(kind, c.rel_path)}
+                  >
+                    <span className={"tci-change " + c.status}>
+                      {c.status === "modified" ? "M" : c.status === "added" ? "A" : "H"}
+                    </span>
+                    <span className="tci-tree-name">{c.rel_path.split("/").pop()}</span>
+                    <span className="tci-change-dir">
+                      {c.status === "hooks"
+                        ? `${c.hooks} hook${c.hooks === 1 ? "" : "s"}`
+                        : c.rel_path.split("/").slice(0, -1).join("/")}
+                    </span>
+                    {warn && <span className="tci-change-warn">⚠</span>}
+                  </button>
+                  {canEdit && c.status !== "hooks" && (
+                    <button
+                      className="tci-icon-btn danger tci-tree-del"
+                      title={c.status === "added" ? "Remove from this test project" : "Discard the changes"}
+                      onClick={() => removeHelper(c.rel_path)}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       </aside>
@@ -1081,7 +1432,10 @@ export function TestCodeInjection({
               onClick={() => setActiveTab(t.key)}
             >
               <span className={"tci-tab-dot " + t.kind} />
-              <span className="tci-tab-label">{t.relPath.split("/").pop()}</span>
+              <span className="tci-tab-label">
+                {t.relPath.split("/").pop()}
+                {drafts[t.key] !== undefined && " ●"}
+              </span>
               <button
                 className="tci-tab-x"
                 onClick={(e) => {
@@ -1095,6 +1449,46 @@ export function TestCodeInjection({
             </div>
           ))}
           <div className="tci-tab-spacer" />
+          {activeTabObj && !isTestTab && activeProject != null && (
+            <button
+              className="tci-mini-btn"
+              disabled={
+                !canEdit ||
+                docKey !== activeTabObj.key ||
+                (activeTabObj.kind === "disk" && diskInfo?.key === activeTabObj.key && !diskInfo.editable)
+              }
+              title={
+                activeTabObj.kind === "disk" && diskInfo?.key === activeTabObj.key && !diskInfo.editable
+                  ? diskInfo.reason
+                  : "Keep a copy of this file in the test project and edit it. Its builds use the copy; the original isn't touched."
+              }
+              onClick={changeFile}
+            >
+              ✎ Change file
+            </button>
+          )}
+          {isTestTab && (
+            <>
+              <button
+                className={"tci-mini-btn" + (compare?.key === activeTab ? " on" : "")}
+                onClick={toggleCompare}
+                title="Show this file next to the original it replaces"
+              >
+                ⇄ Compare
+              </button>
+              <button className="tci-mini-btn" disabled={!canEdit || !dirty} onClick={saveFile}>
+                Save
+              </button>
+              <button
+                className="tci-mini-btn"
+                disabled={!canEdit}
+                onClick={() => activeTabObj && removeHelper(activeTabObj.relPath)}
+                title="Remove this test project's copy"
+              >
+                Discard
+              </button>
+            </>
+          )}
           {isSrcTab && (
             <div className="tci-modeswitch">
               <button
@@ -1121,17 +1515,46 @@ export function TestCodeInjection({
 
         <div className="tci-editor-wrap">
           <div className="tci-editor">
-            {activeTabObj ? (
+            {activeTabObj && isTestTab && compare?.key === activeTab ? (
+              compare.original === null ? (
+                <div className="center-msg">
+                  This file is added by the test project: there is no original to compare with.
+                </div>
+              ) : (
+                <DiffEditor
+                  language={languageOf(activeTabObj.relPath)}
+                  theme={theme}
+                  original={compare.original}
+                  modified={editorValue}
+                  options={{
+                    readOnly: true,
+                    renderSideBySide: true,
+                    minimap: { enabled: false },
+                    fontSize: 12,
+                    automaticLayout: true,
+                    scrollBeyondLastLine: false,
+                  }}
+                />
+              )
+            ) : activeTabObj ? (
               <Editor
-                language="c"
+                language={languageOf(activeTabObj.relPath)}
                 theme={theme}
                 value={editorValue}
                 onMount={onEditorMount}
+                onChange={(v) => {
+                  if (!isTestTab || activeTab == null || v === undefined) return;
+                  // Back to the saved text is not a change.
+                  setDrafts(({ [activeTab]: _old, ...rest }) =>
+                    v === docContent ? rest : { ...rest, [activeTab]: v },
+                  );
+                }}
                 options={{
-                  // Edit only picks a place: code goes in a hook's snippet, and
-                  // typing here would move the lines under the cursor.
-                  readOnly: true,
-                  domReadOnly: true,
+                  // A source file only shows where hooks go: code goes in a
+                  // hook's snippet, and typing there would move the lines under
+                  // the cursor. A test-project file is edited directly.
+                  readOnly: !(isTestTab && canEdit && docKey === activeTab),
+                  domReadOnly: !(isTestTab && canEdit && docKey === activeTab),
                   minimap: { enabled: false },
                   fontSize: 12,
                   lineNumbers: "on",
@@ -1150,7 +1573,7 @@ export function TestCodeInjection({
               />
             ) : (
               <div className="center-msg">
-                Select a source or test file to begin.
+                Select a file to begin.
               </div>
             )}
           </div>

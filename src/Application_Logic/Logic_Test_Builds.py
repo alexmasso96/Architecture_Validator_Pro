@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from . import Logic_Code_Injection as injection
+from . import Logic_Project_Files as project_files
 from .Logic_Binary_Store import BinaryStore, StoreError
 from .Logic_Source_Store import release_source_provider
 
@@ -134,6 +135,15 @@ def render_hooked_files(db, provider, test_project_id: int,
             conflicts.extend({"src_file_path": f["rel_path"], "injection_id": h["id"]}
                              for h in by_file.get(f["rel_path"], ()))
     return files, conflicts
+
+
+def changed_originals(db, test_project_id: int, source_dir: str) -> list:
+    """The test project's changed files whose original in ``source_dir`` is no
+    longer the one they were made from. The build still replaces it; the user
+    is told, the same way as for a hook that no longer fits."""
+    return [{"src_file_path": f["rel_path"], "injection_id": None, "kind": "changed_file"}
+            for f in db.list_test_project_files(test_project_id)
+            if project_files.original_changed(source_dir, f["rel_path"], f["base_hash"])]
 
 
 def write_source_file(out_dir: str, rel_path: str, text: str) -> str:
@@ -436,6 +446,14 @@ def preflight(db, store: BinaryStore, build_ids: list, overridden_releases: tupl
                 _, conflicts = render_hooked_files(db, provider, build["test_project_id"])
                 if conflicts:
                     problem(item, f"{len(conflicts)} hook(s) don't resolve on this release.")
+            stale = changed_originals(db, build["test_project_id"], build["source_dir"]) \
+                if build.get("test_project_id") else []
+            if stale:
+                names = ", ".join(c["src_file_path"] for c in stale)
+                warnings.append({"build_name": item["build_name"],
+                                 "warning": "The original changed since these files were "
+                                            f"changed for the test project: {names}. The "
+                                            "build replaces it with the test project's copy."})
         if scope_id:
             needed += db.get_build_manifest_size(scope_id)
 
@@ -644,6 +662,8 @@ def _build_one(ctx: RunContext, item: dict, snapshot: SourceSnapshot,
                                  "can't be applied.")
             return
         files, conflicts = render_hooked_files(db, provider, build["test_project_id"])
+        # Before the files are written: afterwards the folder holds the copies.
+        conflicts += changed_originals(db, build["test_project_id"], build["source_dir"])
         snapshot.apply(build["source_dir"], files)
 
     returncode = 0

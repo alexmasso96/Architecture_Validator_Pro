@@ -429,3 +429,48 @@ def test_run_command_stop_ends_the_child_processes():
     code = tb.run_command(["bash", "-c", "echo started; sleep 30 & wait"], None, "bash",
                           on_line, stop)
     assert code != 0
+
+
+# -- changed project files ----------------------------------------------------
+def test_a_changed_makefile_is_built_with_and_put_back(fx):
+    import hashlib as h
+    (fx.source / "Makefile").write_bytes(b"CFLAGS = -O2\n")
+    build_id = fx.test_build("NoOpt", hook=False)
+    tpid = fx.db.get_test_build(build_id)["test_project_id"]
+    fx.db.save_test_project_file(tpid, "Makefile", "CFLAGS = -O0\n",
+                                 h.sha256(b"CFLAGS = -O2\n").hexdigest())
+    seen = []
+
+    def runner(argv, cwd, terminal, on_line, stop):
+        seen.append((fx.source / "Makefile").read_text())
+        return fake_build(fx)(argv, cwd, terminal, on_line, stop)
+
+    run_id, _ = fx.run([build_id], runner)
+    items = {i["build_name"]: i for i in fx.db.get_build_run(run_id)["items"]}
+    assert items["NoOpt"]["status"] == "passed" and items["NoOpt"]["conflicts"] == []
+    assert "CFLAGS = -O0\n" in seen and seen[0] == "CFLAGS = -O2\n"     # Main is clean
+    assert (fx.source / "Makefile").read_text() == "CFLAGS = -O2\n"       # put back
+    # The changed file is saved with the build's source.
+    manifest = fx.db.get_build_manifest(build_id)
+    assert "source/Makefile" in {e["rel_path"] for e in manifest}
+
+
+def test_a_build_says_when_a_changed_files_original_has_changed(fx):
+    (fx.source / "Makefile").write_bytes(b"CFLAGS = -O3\n")
+    build_id = fx.test_build("NoOpt", hook=False)
+    tpid = fx.db.get_test_build(build_id)["test_project_id"]
+    fx.db.save_test_project_file(tpid, "Makefile", "CFLAGS = -O0\n", "0" * 64)
+    assert tb.changed_originals(fx.db, tpid, str(fx.source)) == [
+        {"src_file_path": "Makefile", "injection_id": None, "kind": "changed_file"}]
+
+    report = tb.preflight(fx.db, fx.store, [build_id])
+    assert any("Makefile" in w["warning"] for w in report["warnings"])
+
+    run_id, _ = fx.run([build_id], fake_build(fx))
+    item = next(i for i in fx.db.get_build_run(run_id)["items"] if i["build_name"] == "NoOpt")
+    assert item["status"] == "passed"
+    assert item["conflicts"] == [{"src_file_path": "Makefile", "injection_id": None,
+                                  "kind": "changed_file"}]
+    # A file the test project adds has no original to compare with.
+    fx.db.save_test_project_file(tpid, "stub.c", "int s;\n")
+    assert len(tb.changed_originals(fx.db, tpid, str(fx.source))) == 1
