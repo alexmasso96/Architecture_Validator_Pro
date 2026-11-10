@@ -494,3 +494,128 @@ def test_new_test_build_starts_from_the_project_settings(client):
     made = r.json()
     assert (made["build_command"], made["build_cwd"], made["terminal"],
             made["source_dir"]) == ("make 0", "/proj/make", "cmd", "/proj/src")
+
+
+# ----------------------------------------------------------------------
+# The project folder and changed files
+# ----------------------------------------------------------------------
+def _project_folder(client, tmp_path):
+    """A project folder on disk with a makefile, an ARXML, a binary and .git."""
+    root = tmp_path / "ecu"
+    (root / "src").mkdir(parents=True)
+    (root / "cfg").mkdir()
+    (root / ".git").mkdir()
+    (root / "src" / "main.c").write_text(MAIN_C)
+    (root / "Makefile").write_bytes(b"CFLAGS = -O2\r\nall:\r\n\tcc $(CFLAGS) src/main.c\r\n")
+    (root / "cfg" / "Os.arxml").write_text("<AUTOSAR><OS/></AUTOSAR>\n")
+    (root / "cfg" / "legacy.txt").write_bytes("Gr\xfc\xdfe".encode("latin-1"))
+    (root / "app.bin").write_bytes(b"\x00\x01\x02")
+    assert client.post("/api/injection/settings", json={"source_path": str(root)},
+                       headers=AUTH).status_code == 200
+    return root
+
+
+def _get(client, url, **params):
+    r = client.get(f"/api/injection/{url}", params=params, headers=AUTH)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_project_tree_lists_the_whole_folder_one_level_at_a_time(client, tmp_path):
+    pid = _new_project(client)
+    assert _get(client, f"projects/{pid}/tree") == {
+        "folder": "", "available": False, "dir": "", "entries": []}
+
+    root = _project_folder(client, tmp_path)
+    top = _get(client, f"projects/{pid}/tree")
+    assert top["available"] and top["folder"] == str(root)
+    # Folders first, .git left out, every kind of file listed.
+    assert [(e["name"], e["is_dir"]) for e in top["entries"]] == [
+        ("cfg", True), ("src", True), ("app.bin", False), ("Makefile", False)]
+    cfg = _get(client, f"projects/{pid}/tree", dir="cfg")
+    assert [e["rel_path"] for e in cfg["entries"]] == ["cfg/legacy.txt", "cfg/Os.arxml"]
+    r = client.get(f"/api/injection/projects/{pid}/tree", params={"dir": "../.."}, headers=AUTH)
+    assert r.status_code == 409
+
+
+def test_any_text_file_can_be_opened_and_binary_or_other_encodings_only_read(client, tmp_path):
+    pid = _new_project(client)
+    _project_folder(client, tmp_path)
+    mk = _get(client, f"projects/{pid}/disk/content", rel_path="Makefile")
+    assert mk["editable"] and mk["content"].startswith("CFLAGS = -O2\r\n")   # line ends kept
+    assert _get(client, f"projects/{pid}/disk/content", rel_path="cfg/Os.arxml")["editable"]
+    binary = _get(client, f"projects/{pid}/disk/content", rel_path="app.bin")
+    assert not binary["editable"] and "binary" in binary["reason"]
+    legacy = _get(client, f"projects/{pid}/disk/content", rel_path="cfg/legacy.txt")
+    assert not legacy["editable"] and "UTF-8" in legacy["reason"]
+    r = client.get(f"/api/injection/projects/{pid}/disk/content",
+                   params={"rel_path": "../outside.txt"}, headers=AUTH)
+    assert r.status_code == 409
+
+
+def test_changing_a_project_file_keeps_a_copy_in_the_test_project(client, tmp_path):
+    pid = _new_project(client)
+    root = _project_folder(client, tmp_path)
+    new_make = "CFLAGS = -O0 -g\r\nall:\r\n\tcc $(CFLAGS) src/main.c\r\n"
+    r = client.put(f"/api/injection/projects/{pid}/files/content", headers=AUTH,
+                   json={"rel_path": "Makefile", "content": new_make})
+    assert r.status_code == 200 and r.json()["created"] is True
+    # The file on disk is untouched: only a test build writes the copy over it.
+    assert b"-O2" in (root / "Makefile").read_bytes()
+
+    assert _get(client, f"projects/{pid}/files/content", rel_path="Makefile")["content"] == new_make
+    original = _get(client, f"projects/{pid}/files/original", rel_path="Makefile")
+    assert original["source"] == "disk" and "-O2" in original["content"]
+
+    client.put(f"/api/injection/projects/{pid}/files/content", headers=AUTH,
+               json={"rel_path": "tests/stub.c", "content": "int stub;\n"})
+    files = {f["rel_path"]: f for f in _get(client, f"projects/{pid}/changes")["files"]}
+    assert files["Makefile"]["status"] == "modified" and not files["Makefile"]["original_changed"]
+    assert files["tests/stub.c"]["status"] == "added"
+
+    # Someone changes the original: the copy says so, and saving again keeps
+    # the original it was made from.
+    (root / "Makefile").write_bytes(b"CFLAGS = -O3\r\n")
+    client.put(f"/api/injection/projects/{pid}/files/content", headers=AUTH,
+               json={"rel_path": "Makefile", "content": new_make + "# more\r\n"})
+    files = {f["rel_path"]: f for f in _get(client, f"projects/{pid}/changes")["files"]}
+    assert files["Makefile"]["original_changed"] is True
+
+    # A file that isn't UTF-8 text can't become a changed file.
+    r = client.put(f"/api/injection/projects/{pid}/files/content", headers=AUTH,
+                   json={"rel_path": "cfg/legacy.txt", "content": "x"})
+    assert r.status_code == 409
+    # Reverting is removing the copy.
+    client.delete(f"/api/injection/projects/{pid}/files", params={"rel_path": "Makefile"},
+                  headers=AUTH)
+    assert "Makefile" not in {f["rel_path"]
+                              for f in _get(client, f"projects/{pid}/changes")["files"]}
+
+
+def test_changes_list_hooked_files_and_hooks_a_changed_file_overrides(client, tmp_path):
+    pid = _new_project(client)
+    _project_folder(client, tmp_path)
+    client.post(f"/api/injection/projects/{pid}/injections", headers=AUTH,
+                json={"src_file_path": "src/main.c", "function_name": "main",
+                      "line_above_code": "int x = 1;", "line_below_code": "int y = 2;",
+                      "injected_code": "x++;"})
+    files = _get(client, f"projects/{pid}/changes")["files"]
+    assert files == [{"rel_path": "src/main.c", "size": 0, "status": "hooks", "hooks": 1,
+                      "original_changed": False, "hooks_lost": 0}]
+
+    client.put(f"/api/injection/projects/{pid}/files/content", headers=AUTH,
+               json={"rel_path": "src/main.c", "content": "int main(void) { return 1; }\n"})
+    files = _get(client, f"projects/{pid}/changes")["files"]
+    assert [(f["status"], f["hooks_lost"]) for f in files] == [("modified", 1)]
+
+
+def test_a_changed_makefile_is_exported_with_the_hooked_files(client, tmp_path):
+    pid = _new_project(client)
+    _project_folder(client, tmp_path)
+    client.put(f"/api/injection/projects/{pid}/files/content", headers=AUTH,
+               json={"rel_path": "Makefile", "content": "CFLAGS = -O0\n"})
+    out = tmp_path / "export"
+    r = client.post(f"/api/injection/projects/{pid}/export", headers=AUTH,
+                    json={"mode": "modified", "out_dir": str(out), "continue_anyway": True})
+    assert r.status_code == 200, r.text
+    assert (out / "Makefile").read_text() == "CFLAGS = -O0\n"

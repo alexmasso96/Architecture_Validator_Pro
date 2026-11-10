@@ -149,7 +149,7 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 | `ai.py` | `/api/ai/{providers,prompts,mindmap,chat,parse-hlt}` + Copilot device-flow login. |
 | `imports.py` | `/api/import/{analyze,read,interface-export}` — the legacy spreadsheet / interface export import (unchanged). |
 | `table_import.py` | Import Profiles: `/api/import/sample` (one-read in-memory sample sessions), `preview` + `preview/all` (pure in-memory), `profiles` CRUD (app-data JSON + built-in interface export profiles), and the two-step `diff` → `commit` import. |
-| `injection.py` | `/api/injection/*` — test projects, hooks (injections), files, build, export. |
+| `injection.py` | `/api/injection/*` — test projects, hooks (injections), files, build, export. Also the project folder on disk, listed one folder at a time (`tree`), and a test project's changed files (`files/content`, `files/original`, `changes`). |
 | `testdesign.py` | Test Case Design templates + preview + export. |
 | `fs.py` | Native folder/file picker bridge. |
 | `prefs.py` | App-data preference/recents store (mirrors UI prefs server-side). |
@@ -187,6 +187,7 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 **Test design, injection, history**
 - `Logic_TestCase_Design.py` — the Markdown template language (`[Column]` tokens + `#if` conditionals), live preview, operation grouping, and bulk/individual `.md` export.
 - `Logic_Code_Injection.py` — the injection matching engine: hooks anchor to the *text* of surrounding lines (not line numbers) so they re-find their spot when upstream source shifts.
+- `Logic_Project_Files.py` — the project folder for test builds: lists one folder per call, opens a file as text (refusing binary, non-UTF-8 and oversized files for editing), keeps paths inside the folder, and tells when the original of a changed file is no longer the one it was made from.
 - `Logic_History.py` — `HistoryManager`: release-scoped change history, obfuscated at rest and protected by an append-only HMAC hash-chain (`verify_history_chain()`).
 
 **AI subsystem**
@@ -272,7 +273,7 @@ MyProject.arch.elf_caches/    # exported ELF JSON caches for fast re-import
 | `release_object_config` / `release_objects` / `release_object_edges` / `release_object_data_refs` / `release_inlined_functions` | The per-release `.o` enrichment dataset: folder config + dataset hash, per-object status, compiler-verified call edges and data references, inlined records |
 | `release_source_files` | Release-keyed C source (DB-backed source provider) |
 | `ai_model_mindmaps` / `ai_code_diffs` / `ai_release_maps` | AI mind maps, computed source diffs, per-release code maps |
-| `test_projects` / `test_project_files` / `test_code_injections` | Test Injection projects, helper files, and hooks |
+| `test_projects` / `test_project_files` / `test_code_injections` | Test Injection projects, their own files (changed project files with the hash of the original they were made from, and added helper files), and hooks |
 | `test_case_design` | Test Case Design templates |
 | `history` | Release-scoped, HMAC-chained change log |
 

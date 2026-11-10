@@ -755,7 +755,8 @@ class ProjectDatabase:
                     created_at TEXT    NOT NULL DEFAULT ''
                 );
 
-                -- Imported .c/.h helper files (gzip-compressed; read lazily).
+                -- A test project's own files: imported helpers and the project
+                -- files the user changed (gzip-compressed; read lazily).
                 CREATE TABLE IF NOT EXISTS test_project_files (
                     test_project_id INTEGER NOT NULL
                                         REFERENCES test_projects(id) ON DELETE CASCADE,
@@ -899,6 +900,12 @@ class ProjectDatabase:
                     created_at TEXT    NOT NULL DEFAULT ''
                 );
             """)
+
+            # test_project_files.base_hash: the original a changed file was made from.
+            try:
+                self._conn.execute("ALTER TABLE test_project_files ADD COLUMN base_hash TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # Add parser_backend column to elf_index if missing (Phase 13 migration)
             try:
@@ -2039,12 +2046,31 @@ class ProjectDatabase:
         return count
 
     def list_test_project_files(self, test_project_id: int) -> list:
-        """[{rel_path, size, ext}] WITHOUT decompressing (cheap listing)."""
+        """[{rel_path, size, ext, base_hash}] WITHOUT decompressing (cheap listing)."""
         cur = self._conn.execute(
-            "SELECT rel_path, size, ext FROM test_project_files "
+            "SELECT rel_path, size, ext, base_hash FROM test_project_files "
             "WHERE test_project_id=? ORDER BY rel_path", (test_project_id,))
-        return [{"rel_path": r[0], "size": r[1], "ext": r[2]}
+        return [{"rel_path": r[0], "size": r[1], "ext": r[2], "base_hash": r[3]}
                 for r in cur.fetchall()]
+
+    def save_test_project_file(self, test_project_id: int, rel_path: str, text: str,
+                               base_hash: Optional[str] = None) -> None:
+        """Store one file's text. ``base_hash`` (the original it was made from)
+        is set when the file is new and kept when it's saved again."""
+        data = (text or "").encode("utf-8")
+        blob = self._enc_blob("D", gzip.compress(data))
+        ext = os.path.splitext(rel_path)[1].lower()
+        with self._conn:
+            cur = self._conn.execute(
+                "UPDATE test_project_files SET content_gzip=?, size=?, ext=? "
+                "WHERE test_project_id=? AND rel_path=?",
+                (blob, len(data), ext, test_project_id, rel_path))
+            if cur.rowcount == 0:
+                self._conn.execute(
+                    "INSERT INTO test_project_files "
+                    "(test_project_id, rel_path, content_gzip, size, ext, base_hash) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (test_project_id, rel_path, blob, len(data), ext, base_hash))
 
     def read_test_project_file(self, test_project_id: int,
                                rel_path: str) -> Optional[str]:

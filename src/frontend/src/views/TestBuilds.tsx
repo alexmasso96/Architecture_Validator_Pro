@@ -837,7 +837,7 @@ export function TestBuilds({
                     <td>
                       {item.message}
                       {item.conflicts.length
-                        ? ` ${item.conflicts.length} hook conflict(s).`
+                        ? ` ${item.conflicts.length} conflict(s): a hook that no longer fits, or a changed file whose original has changed.`
                         : ""}
                     </td>
                     <td className="tb-actions">

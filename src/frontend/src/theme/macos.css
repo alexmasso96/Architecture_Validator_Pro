@@ -4461,6 +4461,21 @@ button.update-pill:hover {
 .tci-tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .tci-tab-dot.src { background: var(--accent); }
 .tci-tab-dot.test { background: var(--green); }
+.tci-tab-dot.disk { background: var(--muted); }
+/* Project tree and Changed Files: what the test project changes. */
+.tci-tree-row.changed .tci-tree-name { color: var(--v-warn, #b8860b); }
+.tci-tree-row.file.sel.changed .tci-tree-name { color: #fff; }
+.tci-tree-mark { margin-left: auto; flex: none; font-size: 9.5px; font-weight: 700; color: var(--v-warn, #b8860b); }
+.tci-tree-mark.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--v-warn, #b8860b); }
+.tci-tree-row.sel .tci-tree-mark { color: #fff; }
+.tci-change { flex: none; width: 14px; text-align: center; font-size: 10px; font-weight: 700; }
+.tci-change.modified { color: var(--v-warn, #b8860b); }
+.tci-change.added { color: var(--green); }
+.tci-change.hooks { color: var(--accent); }
+.tci-tree-row.sel .tci-change, .tci-tree-row.sel .tci-change-dir { color: #fff; }
+.tci-change-dir { margin-left: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--muted); }
+.tci-change-warn { margin-left: auto; flex: none; color: var(--v-warn, #b8860b); }
+.tci-mini-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .tci-tab-x { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
 .tci-tab-x:hover { color: var(--red); }
 .tci-tab-spacer { flex: 1 1 auto; }
