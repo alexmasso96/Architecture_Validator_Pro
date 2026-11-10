@@ -71,8 +71,8 @@ datas = [
     (ICON_PNG, ICON_DIR),
 ]
 # Which build this is, for in-app updates (src/desktop/build_info.py). CI writes
-# it with scripts/write_build_info.py; a local build without it can't tell which
-# commit it is, so it always offers the newest build of its branch.
+# it with scripts/write_build_info.py; a local build without it only knows the
+# version in package.json, not its commit or whether it's a beta.
 if os.path.isfile('build_info.json'):
     datas.append(('build_info.json', '.'))
 # uvicorn/webview import their backends lazily — collect them so the frozen app

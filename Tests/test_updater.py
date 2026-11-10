@@ -102,13 +102,15 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def release_payload(asset_zip: bytes, digest: str | None = "auto", tag="V3.5.0"):
+def release_payload(asset_zip: bytes, digest: str | None = "auto", tag="V3.5.0",
+                    prerelease=False, body="## Notes"):
     asset = {"name": WIN.release_asset, "size": len(asset_zip),
-             "browser_download_url": "https://github.com/dl/win.zip"}
+             "browser_download_url": f"https://github.com/dl/{tag}/win.zip"}
     if digest:
         asset["digest"] = f"sha256:{sha(asset_zip) if digest == 'auto' else digest}"
-    return {"tag_name": tag, "body": "## Notes", "html_url": "https://github.com/rel",
-            "published_at": "2026-11-01T00:00:00Z", "assets": [asset]}
+    return {"tag_name": tag, "body": body, "html_url": f"https://github.com/rel/{tag}",
+            "published_at": "2026-11-01T00:00:00Z", "prerelease": prerelease,
+            "assets": [asset]}
 
 
 @pytest.fixture()
@@ -118,6 +120,13 @@ def as_windows_build(monkeypatch):
     monkeypatch.setattr(updates, "install_support", lambda: {"supported": True, "reason": ""})
     monkeypatch.setattr(build_info, "current", lambda: {
         "version": "3.4.0", "commit": "a" * 40, "branch": "main", "run_id": None,
+        "frozen": True})
+
+
+def running(monkeypatch, version, commit="a" * 40):
+    """Pretend the running build is ``version``."""
+    monkeypatch.setattr(build_info, "current", lambda: {
+        "version": version, "commit": commit, "branch": "main", "run_id": None,
         "frozen": True})
 
 
@@ -176,53 +185,122 @@ def test_release_check_same_version_is_latest(monkeypatch, as_windows_build):
     assert updates.check()["available"] is False
 
 
-def branch_routes(artifact_zip: bytes, head_sha="c" * 40, digest="auto", expired=False):
-    runs_url = f"{updates.API}/actions/workflows/{updates.WORKFLOW_FILE}/runs"
-    return {
-        runs_url: FakeResponse(payload={"workflow_runs": [
-            {"id": 11, "run_number": 7, "head_sha": head_sha, "head_branch": "feature",
-             "display_title": "Add the updater", "conclusion": "failure",
-             "created_at": "2026-11-04T10:00:00Z", "html_url": "https://github.com/run/11"},
-        ]}),
-        f"{updates.API}/actions/runs/11/artifacts": FakeResponse(payload={"artifacts": [
-            {"id": 99, "name": WIN.artifact, "size_in_bytes": len(artifact_zip),
-             "expired": expired,
-             "digest": f"sha256:{sha(artifact_zip)}" if digest == "auto" else digest,
-             "archive_download_url": f"{updates.API}/actions/artifacts/99/zip"},
-        ]}),
-        f"{updates.API}/actions/artifacts/99/zip": FakeResponse(content=artifact_zip),
-    }
+def beta_routes(betas: dict, stable: str | None = "V3.4.0", extra: list | None = None):
+    """GitHub with the beta versions ``{tag: zip}`` and a latest release.
+    ``extra``: more entries for the release list (drafts, releases)."""
+    listing = [release_payload(z, tag=t, prerelease=True, body=f"## {t} notes")
+               for t, z in betas.items()]
+    routes = {f"{updates.API}/releases": FakeResponse(payload=listing + (extra or [])),
+              # What GitHub answers for a tag with no release, and with no release at all.
+              f"{updates.API}/releases/tags/": FakeResponse(404),
+              f"{updates.API}/releases/latest": FakeResponse(404)}
+    for rel in listing:
+        routes[f"{updates.API}/releases/tags/{rel['tag_name']}"] = FakeResponse(payload=rel)
+        routes[rel["assets"][0]["browser_download_url"]] = FakeResponse(
+            content=betas[rel["tag_name"]])
+    if stable:
+        routes[f"{updates.API}/releases/latest"] = FakeResponse(
+            payload=release_payload(windows_build(), tag=stable))
+    return routes
 
 
-def test_branch_check_compares_commits(monkeypatch, as_windows_build):
-    updates.save_settings(channel="branch", branch="feature")
-    art = build_zip({WIN.release_asset: windows_build()})
-    fake_github(monkeypatch, branch_routes(art))
+@pytest.mark.parametrize("older, newer", [
+    ("3.4.0", "3.5.0-beta.1"),
+    ("3.5.0-beta.1", "3.5.0-beta.2"),
+    ("3.5.0-beta.2", "3.5.0-beta.10"),       # numbers, not text
+    ("3.5.0-beta", "3.5.0-beta.1"),
+    ("3.5.0-beta.10", "3.5.0-rc.1"),
+    ("3.5.0-rc.1", "3.5.0"),                 # a beta comes before its release
+    ("3.5.0", "3.5.1-beta.1"),
+    ("V3.5", "desktop-v3.5.1"),
+])
+def test_versions_are_ordered_the_semver_way(older, newer):
+    assert updates._compare_versions(older, newer) < 0
+    assert updates._compare_versions(newer, older) > 0
+
+
+def test_equal_versions_and_tag_forms():
+    assert updates._compare_versions("V3.5.0", "3.5") == 0
+    assert updates.version_of("desktop-v3.5.0-beta.1") == "3.5.0-beta.1"
+    assert updates.is_prerelease("V3.5.0-beta.1") and not updates.is_prerelease("V3.5.0")
+
+
+def test_beta_check_lists_the_beta_versions_newest_first(monkeypatch, as_windows_build):
+    updates.save_settings(channel="beta")
+    z = windows_build()
+    draft = release_payload(z, tag="V3.6.0-beta.1", prerelease=True) | {"draft": True}
+    release = release_payload(z, tag="V3.4.0")          # in the list, but not a beta
+    fake_github(monkeypatch, beta_routes(
+        {"V3.5.0-beta.1": z, "V3.5.0-beta.10": z, "V3.5.0-beta.2": z}, extra=[draft, release]))
     out = updates.check()
-    assert out["channel"] == "branch"
+    assert out["channel"] == "beta"
+    assert [v["label"] for v in out["versions"]] == [
+        "v3.5.0-beta.10", "v3.5.0-beta.2", "v3.5.0-beta.1"]
+    assert all(v["prerelease"] and v["relation"] == "newer" for v in out["versions"])
     assert out["available"] is True
-    assert out["latest"]["label"] == "feature@ccccccc"
-    # A build whose tests failed is still offered, and says so.
-    assert out["latest"]["conclusion"] == "failure"
+    assert out["latest"]["tag"] == "V3.5.0-beta.10"
+    # Each version comes with its own change log.
+    assert out["versions"][1]["body"] == "## V3.5.0-beta.2 notes"
+    assert out["current"]["prerelease"] is False
 
-    fake_github(monkeypatch, branch_routes(art, head_sha="a" * 40))
+
+def test_beta_check_knows_which_beta_is_installed(monkeypatch, as_windows_build):
+    updates.save_settings(channel="beta")
+    running(monkeypatch, "3.5.0-beta.2", commit=None)
+    z = windows_build()
+    fake_github(monkeypatch, beta_routes(
+        {"V3.5.0-beta.1": z, "V3.5.0-beta.2": z, "V3.5.0-beta.3": z}))
+    out = updates.check()
+    assert [v["relation"] for v in out["versions"]] == ["newer", "installed", "older"]
+    assert out["available"] is True and out["current"]["prerelease"] is True
+
+    running(monkeypatch, "3.5.0-beta.3", commit=None)
     assert updates.check()["available"] is False
 
 
-def test_branch_check_skips_expired_artifacts(monkeypatch, as_windows_build):
-    updates.save_settings(channel="branch", branch="feature")
-    fake_github(monkeypatch, branch_routes(b"x", expired=True))
-    with pytest.raises(updates.UpdateError, match="No recent build"):
+def test_a_release_newer_than_every_beta_heads_the_beta_list(monkeypatch, as_windows_build):
+    updates.save_settings(channel="beta")
+    running(monkeypatch, "3.5.0-beta.2", commit=None)
+    z = windows_build()
+    fake_github(monkeypatch, beta_routes({"V3.5.0-beta.1": z, "V3.5.0-beta.2": z},
+                                         stable="V3.5.0"))
+    out = updates.check()
+    assert [v["label"] for v in out["versions"]] == ["v3.5.0", "v3.5.0-beta.2", "v3.5.0-beta.1"]
+    assert out["latest"]["prerelease"] is False and out["available"] is True
+
+    # An older release isn't listed: only the beta versions are.
+    fake_github(monkeypatch, beta_routes({"V3.5.0-beta.1": z, "V3.5.0-beta.2": z}))
+    assert [v["label"] for v in updates.check()["versions"]] == ["v3.5.0-beta.2", "v3.5.0-beta.1"]
+
+
+def test_beta_check_without_beta_versions(monkeypatch, as_windows_build):
+    updates.save_settings(channel="beta")
+    fake_github(monkeypatch, beta_routes({}, stable="V3.5.0"))
+    out = updates.check()
+    assert [v["label"] for v in out["versions"]] == ["v3.5.0"]
+
+    fake_github(monkeypatch, beta_routes({}, stable=None))
+    with pytest.raises(updates.UpdateError, match="No beta versions"):
         updates.check()
 
 
-def test_token_is_sent_when_configured(monkeypatch, as_windows_build):
-    updates.save_settings(token="ghp_secret")
+def test_release_channel_never_offers_a_beta(monkeypatch, as_windows_build):
+    running(monkeypatch, "3.5.0-beta.2", commit=None)
+    calls = []
+    fake_github(monkeypatch, beta_routes({"V3.5.0-beta.3": windows_build()}), calls)
+    out = updates.check()
+    # Only the latest release is asked for, and it's older than this beta.
+    assert [c["url"] for c in calls] == [f"{updates.API}/releases/latest"]
+    assert out["available"] is False and out["latest"]["relation"] == "older"
+    assert out["current"]["prerelease"] is True
+
+
+def test_no_token_is_sent(monkeypatch, as_windows_build):
     calls = []
     fake_github(monkeypatch, {f"{updates.API}/releases/latest":
                               FakeResponse(payload=release_payload(windows_build()))}, calls)
     updates.check()
-    assert calls[0]["headers"]["Authorization"] == "Bearer ghp_secret"
+    assert "Authorization" not in calls[0]["headers"]
 
 
 def test_rate_limit_message(monkeypatch, as_windows_build):
@@ -236,10 +314,10 @@ def test_rate_limit_message(monkeypatch, as_windows_build):
 # Downloading and staging
 # ---------------------------------------------------------------------------
 
-def run_download():
+def run_download(tag=None):
     messages = []
     result = updates.download_and_stage(lambda m, p=None: messages.append((m, p)),
-                                        threading.Event())
+                                        threading.Event(), tag=tag)
     return result, messages
 
 
@@ -247,10 +325,10 @@ def test_release_download_is_verified_and_staged(monkeypatch, as_windows_build):
     z = windows_build()
     fake_github(monkeypatch, {
         f"{updates.API}/releases/latest": FakeResponse(payload=release_payload(z)),
-        "https://github.com/dl/win.zip": FakeResponse(content=z),
+        "https://github.com/dl/V3.5.0/win.zip": FakeResponse(content=z),
     })
     result, messages = run_download()
-    assert result["version"] == "3.5.0"
+    assert result["version"] == "3.5.0" and result["channel"] == "release"
     stage = updates.staged()
     assert stage is not None
     assert stage["sha256"] == sha(z)
@@ -263,7 +341,7 @@ def test_checksum_mismatch_is_rejected(monkeypatch, as_windows_build):
     z = windows_build()
     fake_github(monkeypatch, {
         f"{updates.API}/releases/latest": FakeResponse(payload=release_payload(z, digest="0" * 64)),
-        "https://github.com/dl/win.zip": FakeResponse(content=z),
+        "https://github.com/dl/V3.5.0/win.zip": FakeResponse(content=z),
     })
     with pytest.raises(updates.UpdateError, match="SHA-256"):
         run_download()
@@ -284,7 +362,7 @@ def test_unsafe_zip_paths_are_rejected(monkeypatch, as_windows_build):
     z = build_zip({"../evil.txt": b"x", "ArchitectureValidator/ArchitectureValidator.exe": b"e"})
     fake_github(monkeypatch, {
         f"{updates.API}/releases/latest": FakeResponse(payload=release_payload(z)),
-        "https://github.com/dl/win.zip": FakeResponse(content=z),
+        "https://github.com/dl/V3.5.0/win.zip": FakeResponse(content=z),
     })
     with pytest.raises(updates.UpdateError, match="unsafe"):
         run_download()
@@ -295,29 +373,55 @@ def test_build_without_updater_is_refused(monkeypatch, as_windows_build):
     z = windows_build(updater_protocol=0)
     fake_github(monkeypatch, {
         f"{updates.API}/releases/latest": FakeResponse(payload=release_payload(z)),
-        "https://github.com/dl/win.zip": FakeResponse(content=z),
+        "https://github.com/dl/V3.5.0/win.zip": FakeResponse(content=z),
     })
     with pytest.raises(updates.UpdateError, match="before in-app updates"):
         run_download()
 
 
-def test_branch_download_unwraps_the_artifact(monkeypatch, as_windows_build):
-    updates.save_settings(channel="branch", branch="feature", token="ghp_x")
-    art = build_zip({WIN.release_asset: windows_build(commit="c" * 40)})
-    calls = []
-    fake_github(monkeypatch, branch_routes(art), calls)
+def test_beta_download_takes_the_newest_or_the_picked_version(monkeypatch, as_windows_build):
+    updates.save_settings(channel="beta")
+    old, new = windows_build("3.5.0-beta.1", "c" * 40), windows_build("3.5.0-beta.2", "d" * 40)
+    fake_github(monkeypatch, beta_routes({"V3.5.0-beta.1": old, "V3.5.0-beta.2": new}))
+
     result, _ = run_download()
-    assert result["label"] == "feature@ccccccc"
-    assert result["commit"] == "c" * 40
-    assert Path(updates.staged()["executable"]).read_bytes() == b"new-exe"
-    download = [c for c in calls if c["url"].endswith("/zip")][0]
-    assert download["headers"]["Authorization"] == "Bearer ghp_x"
+    assert result == {"channel": "beta", "version": "3.5.0-beta.2", "tag": "V3.5.0-beta.2",
+                      "label": "v3.5.0-beta.2", "commit": "d" * 40}
+    assert updates.staged()["sha256"] == sha(new)
+
+    # The version the user picked replaces what was downloaded.
+    result, _ = run_download(tag="V3.5.0-beta.1")
+    assert result["label"] == "v3.5.0-beta.1"
+    assert updates.staged()["sha256"] == sha(old)
 
 
-def test_branch_download_needs_a_token(monkeypatch, as_windows_build):
-    updates.save_settings(channel="branch", branch="feature")
-    with pytest.raises(updates.UpdateError, match="token"):
-        run_download()
+def test_only_a_published_version_can_be_picked(monkeypatch, as_windows_build):
+    calls = []
+    fake_github(monkeypatch, beta_routes({"V3.5.0-beta.1": windows_build()}), calls)
+    with pytest.raises(updates.UpdateError, match="isn't a published version"):
+        run_download(tag="V9.9.9-beta.1")
+    for bad in ("../../latest", "V3.5.0/../x", "https://evil.example/x.zip", " "):
+        n = len(calls)
+        with pytest.raises(updates.UpdateError, match="isn't a version tag"):
+            run_download(tag=bad)
+        assert len(calls) == n          # GitHub isn't even asked
+    assert updates.staged() is None
+
+
+def test_download_job_passes_the_picked_tag(client, monkeypatch):
+    seen = {}
+
+    def fake(progress, cancel, tag=None):
+        seen["tag"] = tag
+        return {"label": "v3.5.0-beta.1"}
+    monkeypatch.setattr(updates, "download_and_stage", fake)
+    job = client.post("/api/jobs/update_download", headers=AUTH,
+                      json={"tag": "V3.5.0-beta.1"}).json()["job_id"]
+    for _ in range(100):
+        if client.get(f"/api/jobs/{job}", headers=AUTH).json()["status"] == "done":
+            break
+        threading.Event().wait(0.02)
+    assert seen == {"tag": "V3.5.0-beta.1"}
 
 
 # ---------------------------------------------------------------------------
@@ -534,18 +638,23 @@ def client():
 
 def test_settings_roundtrip(client):
     r = client.get("/api/update/settings", headers=AUTH)
-    assert r.json() == {"channel": "release", "branch": "main", "token_configured": False}
-    r = client.put("/api/update/settings", headers=AUTH,
-                   json={"channel": "branch", "branch": "feature", "token": "ghp_x"})
-    assert r.json() == {"channel": "branch", "branch": "feature", "token_configured": True}
-    # The token is never returned, and "" clears it.
-    r = client.put("/api/update/settings", headers=AUTH, json={"token": ""})
-    assert r.json()["token_configured"] is False
+    assert r.json() == {"channel": "release"}
+    r = client.put("/api/update/settings", headers=AUTH, json={"channel": "beta"})
+    assert r.json() == {"channel": "beta"}
+    assert client.get("/api/update/settings", headers=AUTH).json() == {"channel": "beta"}
 
 
 def test_bad_channel_is_rejected(client):
-    r = client.put("/api/update/settings", headers=AUTH, json={"channel": "nightly"})
-    assert r.status_code == 422
+    for channel in ("nightly", "branch"):
+        r = client.put("/api/update/settings", headers=AUTH, json={"channel": channel})
+        assert r.status_code == 422
+
+
+def test_a_channel_saved_by_an_older_build_means_releases(client):
+    from backend.routers.prefs import write_pref
+    write_pref(updates.PREF_CHANNEL, "branch")
+    assert client.get("/api/update/settings", headers=AUTH).json() == {"channel": "release"}
+    assert client.get("/api/update/branches", headers=AUTH).status_code == 404
 
 
 def test_check_reports_install_support(client, monkeypatch):
@@ -588,6 +697,21 @@ def test_result_is_read_once(client):
     updater.result_path().write_text(json.dumps({"ok": True, "to": {"label": "v3.5.0"}}))
     assert client.get("/api/update/result", headers=AUTH).json()["result"]["ok"] is True
     assert client.get("/api/update/result", headers=AUTH).json() == {"result": None}
+
+
+def test_build_info_takes_a_release_builds_version_from_its_tag():
+    sys.path.insert(0, os.path.abspath("scripts"))
+    import write_build_info as w
+
+    assert w.release_tag({"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "V3.5.0-beta.1"}) \
+        == "V3.5.0-beta.1"
+    # A manual run names its tag; a branch build has none.
+    assert w.release_tag({"BUILD_TAG": "V3.5.0", "GITHUB_REF_NAME": "main"}) == "V3.5.0"
+    assert w.release_tag({"GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "main"}) is None
+    assert w.release_tag({"BUILD_TAG": "nightly"}) is None
+    assert w.tag_version("V3.5.0-beta.1") == "3.5.0-beta.1"
+    assert w.tag_version("desktop-v3.5.0") == "3.5.0"
+    assert updates._compare_versions(w.tag_version("V3.5.0-beta.1"), "3.5.0") < 0
 
 
 def test_release_offered_to_branch_build_of_same_version(monkeypatch, as_windows_build):

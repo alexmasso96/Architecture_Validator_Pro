@@ -1,6 +1,7 @@
 """
 What this build is: its version, the commit and branch it was built from, and
-whether it can install updates.
+whether it can install updates. A beta's version says so (``3.5.0-beta.1``,
+taken from its release tag); ``tag`` is that tag, None for a branch build.
 
 CI writes ``build_info.json`` (scripts/write_build_info.py) before PyInstaller
 runs, and the spec bundles it, so a frozen build reads it from its bundle
@@ -55,6 +56,7 @@ def current() -> dict:
     data = read_file(bundle_dir() / FILE_NAME) if frozen else None
     data = dict(data or {})
     data.setdefault("version", _source_version())
+    data.setdefault("tag", None)
     data.setdefault("commit", None)
     data.setdefault("branch", None)
     data.setdefault("run_id", None)

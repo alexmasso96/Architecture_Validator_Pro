@@ -885,10 +885,11 @@ def _make_mapped_switch(state: AppState):
 
 def _update_download(params: dict, progress: Callable[..., None],
                      cancel: threading.Event):
-    """Downloads, checks and unpacks the chosen channel's build (backend/updates.py)."""
+    """Downloads, checks and unpacks a version's build: the one ``tag`` names,
+    else the chosen channel's newest (backend/updates.py)."""
     from . import updates
 
     try:
-        return updates.download_and_stage(progress, cancel)
+        return updates.download_and_stage(progress, cancel, tag=params.get("tag") or None)
     except updates.UpdateError as exc:
         raise RuntimeError(str(exc)) from None

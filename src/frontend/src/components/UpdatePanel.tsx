@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 
+import { renderMarkdown } from "../markdown";
 import {
   APP_VERSION,
   compareUrl,
-  listBranches,
-  saveUpdateSettings,
+  saveUpdateChannel,
   useUpdateInstaller,
   type UpdateChannel,
   type UpdateInfo,
+  type UpdateVersion,
 } from "../update";
 import { useConfirm } from "./ConfirmDialog";
 
@@ -29,9 +30,21 @@ function shortSha(sha?: string | null) {
   return sha ? sha.slice(0, 7) : "";
 }
 
-// The download → restart controls for an available update. Shared by
-// Preferences → Updates and the changelog opened from the launcher pill.
-export function UpdateActions({ update }: { update: UpdateInfo }) {
+function shortDate(iso?: string | null) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime())
+    ? ""
+    : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+// The download → restart controls for a version. Shared by Preferences →
+// Updates and the changelog opened from the launcher pill.
+//
+// Without `version` they are for the channel's newest version and only show
+// when it's newer than this build. With `version` (one picked from the beta
+// list) they show for any version that isn't the one installed.
+export function UpdateActions({ update, version }: { update: UpdateInfo; version?: UpdateVersion }) {
   const { state, download, cancelDownload, install, busyJobs, adoptStaged, reset } =
     useUpdateInstaller();
   const { confirm, confirmNode } = useConfirm();
@@ -39,26 +52,40 @@ export function UpdateActions({ update }: { update: UpdateInfo }) {
   // A build downloaded before the app was restarted can still be installed.
   useEffect(() => {
     if (update.status === "update-available" || update.status === "latest") {
-      adoptStaged(update.staged, update.label);
+      adoptStaged(update.staged, update.checkedAt);
     }
-  }, [update.status, update.staged, update.label, adoptStaged]);
+  }, [update.status, update.staged, update.checkedAt, adoptStaged]);
 
-  if (update.status !== "update-available") return null;
+  if (version ? version.relation === "installed" : update.status !== "update-available") return null;
+
+  const label = version?.label ?? update.label ?? "the update";
+  const older = version?.relation === "older";
 
   if (!update.canInstall) {
     return update.installReason ? (
       <span className="update-detail">{update.installReason}</span>
     ) : null;
   }
-  if (!update.downloadable) {
-    return <span className="update-detail">This build has no download for your system yet.</span>;
+  if (!(version ? version.downloadable : update.downloadable)) {
+    return <span className="update-detail">{label} has no download for your system.</span>;
   }
-  if (update.channel === "branch" && !update.tokenConfigured) {
-    return (
-      <span className="update-detail">
-        Add a GitHub token in Preferences → Updates to download branch builds.
-      </span>
-    );
+
+  async function start() {
+    if (older) {
+      const ok = await confirm({
+        title: `Go back to ${label}?`,
+        message: (
+          <>
+            {label} is older than the version you're running. A project saved with the
+            newer version may not open in it.
+          </>
+        ),
+        confirmLabel: `Download ${label}`,
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    await download(version?.tag, label);
   }
 
   async function restart() {
@@ -68,7 +95,7 @@ export function UpdateActions({ update }: { update: UpdateInfo }) {
       title: "Restart to update?",
       message: (
         <>
-          Architecture Validator closes, installs {state.label ?? update.label} and opens
+          Architecture Validator closes, installs {state.label ?? label} and opens
           again. Your project is saved as you work, and its lock is released.
           {busy.length > 0 && (
             <>
@@ -85,11 +112,14 @@ export function UpdateActions({ update }: { update: UpdateInfo }) {
     if (ok) await install();
   }
 
+  // What's downloaded is another version than the one these controls are for.
+  const other = state.phase === "ready" && state.label !== label;
+
   return (
     <div className="update-install">
-      {state.phase === "idle" && (
-        <button className="save-btn" onClick={() => download()}>
-          ⤓ Download update
+      {(state.phase === "idle" || other) && (
+        <button className="save-btn" onClick={start}>
+          ⤓ Download {version ? label : "update"}
         </button>
       )}
       {state.phase === "downloading" && (
@@ -106,10 +136,15 @@ export function UpdateActions({ update }: { update: UpdateInfo }) {
           </button>
         </>
       )}
-      {state.phase === "ready" && (
+      {state.phase === "ready" && !other && (
         <button className="save-btn" onClick={restart}>
           ↻ Restart to install {state.label}
         </button>
+      )}
+      {other && (
+        <span className="update-detail">
+          {state.label} is downloaded. Downloading {label} replaces it.
+        </span>
       )}
       {state.phase === "installing" && (
         <span className="update-detail">
@@ -129,6 +164,66 @@ export function UpdateActions({ update }: { update: UpdateInfo }) {
   );
 }
 
+// The beta versions to pick from: the list, then the picked one's change log
+// and its download.
+function BetaVersions({ update, locked }: { update: UpdateInfo; locked: boolean }) {
+  const versions = update.versions ?? [];
+  const [picked, setPicked] = useState<string | null>(null);
+  const version = versions.find((v) => v.tag === picked) ?? versions[0];
+  if (!version) return null;
+
+  return (
+    <div className="prefs-field">
+      <div className="prefs-label">Beta versions</div>
+      <div className="update-versions" role="listbox" aria-label="Beta versions">
+        {versions.map((v, i) => (
+          <button
+            key={v.tag}
+            role="option"
+            aria-selected={v.tag === version.tag}
+            className={"update-version-row" + (v.tag === version.tag ? " sel" : "")}
+            disabled={locked}
+            onClick={() => setPicked(v.tag)}
+          >
+            <span className="update-version-name">{v.label}</span>
+            <span className="update-version-date">{shortDate(v.published_at)}</span>
+            <span className="update-version-tags">
+              {!v.prerelease && <span className="update-badge ok">Release</span>}
+              {v.relation === "installed" && <span className="update-badge ok">Installed</span>}
+              {i === 0 && v.relation === "newer" && <span className="update-badge warn">Newest</span>}
+              {v.relation === "older" && <span className="update-version-date">Older</span>}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div className="update-notes-head">
+        <span className="prefs-label">What's new in {version.label}</span>
+        {version.url && (
+          <a className="update-compare" href={version.url} target="_blank" rel="noreferrer">
+            View on GitHub →
+          </a>
+        )}
+      </div>
+      {version.body ? (
+        <div
+          className="changelog-body md update-notes"
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(version.body) }}
+        />
+      ) : (
+        <div className="update-detail">This version has no change log.</div>
+      )}
+      <div className="update-row">
+        {version.relation === "installed" ? (
+          <span className="update-detail">This is the version you're running.</span>
+        ) : (
+          <UpdateActions update={update} version={version} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Preferences → Updates.
 export function UpdatesSettings({
   update,
@@ -140,76 +235,44 @@ export function UpdatesSettings({
   onShowChangelog: () => void;
 }) {
   const [channel, setChannel] = useState<UpdateChannel>(update.channel ?? "release");
-  const [branch, setBranch] = useState(update.branch ?? "main");
-  const [branches, setBranches] = useState<string[] | null>(null);
-  const [branchError, setBranchError] = useState<string | null>(null);
-  const [token, setToken] = useState("");
-  const [tokenSet, setTokenSet] = useState(Boolean(update.tokenConfigured));
   const [note, setNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const { state: installer } = useUpdateInstaller();
   const locked = installer.phase === "downloading" || installer.phase === "installing";
 
-  // Follow the check once it has reported the stored settings.
+  // Follow the check once it has reported the stored channel.
   useEffect(() => {
     if (update.channel) setChannel(update.channel);
-    if (update.branch) setBranch(update.branch);
-    if (update.tokenConfigured !== undefined) setTokenSet(update.tokenConfigured);
-  }, [update.channel, update.branch, update.tokenConfigured]);
+  }, [update.channel]);
 
-  useEffect(() => {
-    if (channel !== "branch" || branches) return;
-    listBranches()
-      .then((b) => {
-        setBranches(b);
-        setBranchError(null);
-      })
-      .catch((e) => setBranchError((e as Error).message));
-  }, [channel, branches]);
-
-  async function save(patch: Parameters<typeof saveUpdateSettings>[0], recheck = true) {
+  async function pickChannel(c: UpdateChannel) {
+    if (c === channel) return;
+    setChannel(c);
     setSaving(true);
     setNote(null);
     try {
-      const s = await saveUpdateSettings(patch);
-      setTokenSet(s.token_configured);
-      if (recheck) onRecheck();
-      return true;
+      await saveUpdateChannel(c);
+      onRecheck();
     } catch (e) {
       setNote((e as Error).message);
-      return false;
     } finally {
       setSaving(false);
     }
   }
 
-  async function pickChannel(c: UpdateChannel) {
-    setChannel(c);
-    await save({ channel: c, ...(c === "branch" ? { branch } : {}) });
-  }
-
-  async function pickBranch(b: string) {
-    setBranch(b);
-    await save({ branch: b });
-  }
-
-  async function saveToken(value: string) {
-    if (await save({ token: value })) {
-      setToken("");
-      setNote(value ? "Token saved." : "Token removed.");
-    }
-  }
-
   const current = update.current;
   const currentVersion = current?.version ?? APP_VERSION;
-  const branchOptions = branches ?? [branch];
-  if (!branchOptions.includes(branch)) branchOptions.unshift(branch);
+  const latest = update.versions?.[0];
+  const listed = update.channel === channel && (update.status === "update-available" || update.status === "latest");
 
   return (
     <div className="prefs-body">
       <div className="prefs-field">
         <div className="prefs-label">Current version</div>
-        <div className="update-version">v{currentVersion}</div>
+        <div className="update-version">
+          v{currentVersion}
+          {current?.prerelease && <span className="update-badge warn update-beta">Beta</span>}
+        </div>
         {current?.commit && (
           <div className="update-detail">
             Built from {current.branch ? `${current.branch}@` : ""}
@@ -221,8 +284,8 @@ export function UpdatesSettings({
       <div className="prefs-field">
         <div className="prefs-label">Update from</div>
         <div className="prefs-hint">
-          Releases are the published versions. Branch builds are the latest CI build
-          of a branch, for trying out work before it's released.
+          Releases are the published versions. Beta versions come out before a release,
+          for trying changes early. Each one has its own change log.
         </div>
         <div className="prefs-row update-channel">
           <div className="seg">
@@ -234,66 +297,18 @@ export function UpdatesSettings({
               Releases
             </button>
             <button
-              className={channel === "branch" ? "active" : ""}
+              className={channel === "beta" ? "active" : ""}
               disabled={saving || locked}
-              onClick={() => pickChannel("branch")}
+              onClick={() => pickChannel("beta")}
             >
-              Branch builds
+              Beta versions
             </button>
           </div>
-          {channel === "branch" && (
-            <select
-              className="prefs-input"
-              value={branch}
-              disabled={saving || locked}
-              onChange={(e) => pickBranch(e.target.value)}
-            >
-              {branchOptions.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          )}
         </div>
-        {channel === "branch" && branchError && (
-          <div className="update-detail">⚠ Couldn't list branches: {branchError}</div>
-        )}
+        {note && <div className="update-detail">{note}</div>}
       </div>
 
-      {channel === "branch" && (
-        <div className="prefs-field">
-          <div className="prefs-label">GitHub token</div>
-          <div className="prefs-hint">
-            GitHub only hands out CI builds to a signed-in user. Any token that can
-            read this repository works — a fine-grained token with read-only access
-            to public repositories is enough. Stored encrypted, per user.
-          </div>
-          <div className="prefs-row">
-            <input
-              className="prefs-input"
-              type="password"
-              placeholder={tokenSet ? "•••••••• (saved)" : "github_pat_…"}
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              disabled={saving}
-            />
-            <button
-              className="save-btn"
-              disabled={saving || !token.trim()}
-              onClick={() => saveToken(token.trim())}
-            >
-              Save
-            </button>
-            {tokenSet && (
-              <button className="prefs-prefill" disabled={saving} onClick={() => saveToken("")}>
-                Remove
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-      {note && <div className="update-detail">{note}</div>}
+      {channel === "beta" && listed && <BetaVersions update={update} locked={locked} />}
 
       <div className="prefs-field">
         <div className="prefs-row">
@@ -311,52 +326,49 @@ export function UpdatesSettings({
           <div className="update-row available">
             <span className="update-badge warn">⤓ Update available</span>
             <span className="update-detail">
-              {update.channel === "branch" ? (
-                <>
-                  {update.label}
-                  {update.title ? ` — ${update.title}` : ""}
-                  {update.conclusion && update.conclusion !== "success"
-                    ? ` (CI: ${update.conclusion})`
-                    : ""}
-                </>
-              ) : (
-                <>{update.label} is the latest release.</>
-              )}
+              {update.label} is the{" "}
+              {update.channel === "beta" && latest?.prerelease ? "newest beta version" : "latest release"}.
             </span>
-            <UpdateActions update={update} />
-            <div className="update-actions">
-              {update.body && (
-                <button className="prefs-prefill" onClick={onShowChangelog}>
-                  View changelog
-                </button>
-              )}
-              {update.channel === "branch" && update.url ? (
-                <a className="update-compare" href={update.url} target="_blank" rel="noreferrer">
-                  View the CI run →
-                </a>
-              ) : (
-                update.latestVersion && (
-                  <a
-                    className="update-compare"
-                    href={compareUrl(update.latestVersion, currentVersion)}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Compare on GitHub →
-                  </a>
-                )
-              )}
-            </div>
+            {/* On the beta channel the list above has the download and the change log. */}
+            {update.channel !== "beta" && (
+              <>
+                <UpdateActions update={update} />
+                <div className="update-actions">
+                  {update.body && (
+                    <button className="prefs-prefill" onClick={onShowChangelog}>
+                      View changelog
+                    </button>
+                  )}
+                  {update.latestVersion && (
+                    <a
+                      className="update-compare"
+                      href={compareUrl(update.latestVersion, currentVersion)}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Compare on GitHub →
+                    </a>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         )}
         {update.status === "latest" && (
           <div className="update-row">
             <span className="update-badge ok">✓ Up to date</span>
             <span className="update-detail">
-              {update.channel === "branch"
-                ? `You're running the latest build of ${update.branch}.`
-                : "You're running the latest published release."}
+              {update.channel === "beta"
+                ? latest?.prerelease
+                  ? "You're running the newest beta version."
+                  : `No beta version is newer than ${latest?.label ?? "the latest release"}.`
+                : latest?.relation === "older"
+                  ? `You're running a beta version that's newer than the latest release, ${latest.label}.`
+                  : "You're running the latest published release."}
             </span>
+            {update.channel === "release" && latest?.relation === "older" && (
+              <UpdateActions update={update} version={latest} />
+            )}
           </div>
         )}
         {update.status === "error" && (

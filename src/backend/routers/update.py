@@ -2,17 +2,18 @@
 
     GET  /api/update/latest    → {tag_name, body} of the newest release (kept for
                                  the plain-browser fallback and older callers)
-    GET  /api/update/check     → this build, the chosen channel's newest build,
-                                 whether it's newer and whether it can be installed
-    GET  /api/update/settings  → {channel, branch, token_configured}
-    PUT  /api/update/settings  → change any of them (token "" clears it)
-    GET  /api/update/branches  → the repository's branches, main first
+    GET  /api/update/check     → this build, the versions the chosen channel
+                                 offers (the newest release, or the beta versions
+                                 with their change logs), whether the newest is
+                                 newer and whether it can be installed
+    GET  /api/update/settings  → {channel}: "release" or "beta"
+    PUT  /api/update/settings  → change it
     GET  /api/update/staged    → the downloaded update waiting to be installed
     GET  /api/update/result    → how the last install went (read once)
     GET  /api/update/busy      → jobs a restart would cut short
 
-The download is the ``update_download`` job (POST /api/jobs/update_download);
-installing is the desktop shell's ``install_update`` bridge call, since the app
+The download is the ``update_download`` job (POST /api/jobs/update_download,
+with ``{tag}`` for a version picked from the list); installing is the desktop shell's ``install_update`` bridge call, since the app
 has to close for it.
 
 GitHub is reached from here, not the webview: the shell runs WebView2 with
@@ -68,8 +69,6 @@ def check() -> dict:
 
 class SettingsPatch(BaseModel):
     channel: Optional[str] = None
-    branch: Optional[str] = None
-    token: Optional[str] = None
 
 
 @router.get("/settings")
@@ -80,21 +79,16 @@ def get_settings() -> dict:
 @router.put("/settings")
 def put_settings(patch: SettingsPatch) -> dict:
     try:
-        return updates.save_settings(patch.channel, patch.branch, patch.token)
+        return updates.save_settings(patch.channel)
     except updates.UpdateError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-
-
-@router.get("/branches")
-def branches() -> dict:
-    return {"branches": _guard(updates.list_branches)}
 
 
 def _staged_public() -> dict | None:
     stage = updates.staged()
     if not stage:
         return None
-    return {k: stage.get(k) for k in ("channel", "version", "label", "commit")}
+    return {k: stage.get(k) for k in ("channel", "version", "tag", "label", "commit")}
 
 
 @router.get("/staged")

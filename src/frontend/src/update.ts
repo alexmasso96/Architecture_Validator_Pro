@@ -1,10 +1,11 @@
 // In-app updates. Two parts:
 //
-// * useUpdateCheck — asks the worker (/api/update/check) what's newest on the
-//   chosen channel: the latest GitHub release, or the latest CI build of a
-//   branch. App mounts it once and threads the result to the launcher pill,
-//   Preferences and the changelog.
-// * useUpdateInstaller — downloads that build (the update_download job: SHA-256
+// * useUpdateCheck — asks the worker (/api/update/check) what the chosen
+//   channel offers: the latest GitHub release, or the beta versions
+//   (pre-releases, one per beta tag, each with its change log). App mounts it
+//   once and threads the result to the launcher pill, Preferences and the
+//   changelog.
+// * useUpdateInstaller — downloads a version (the update_download job: SHA-256
 //   checked, unpacked into the app-data folder) and then asks the desktop shell
 //   to install it, which closes the app and starts the new one. A shared store,
 //   so the pill, the changelog and Preferences show the same progress.
@@ -27,8 +28,8 @@ export const APP_VERSION = "3.4.0";
 export const GITHUB_REPO = "alexmasso96/Architecture_Validator_Pro";
 export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 
-// The worker gives up on GitHub after 15 s per call; a branch check makes a few.
-const RELAY_TIMEOUT_MS = 45_000;
+// The worker gives up on GitHub after 15 s per call; a beta check makes two.
+const RELAY_TIMEOUT_MS = 35_000;
 // A network that isn't up yet at launch shouldn't leave the pill failed all session.
 const RETRY_DELAY_MS = 30_000;
 const JOB_POLL_MS = 500;
@@ -40,52 +41,65 @@ export type UpdateStatus =
   | "update-available"
   | "error";
 
-export type UpdateChannel = "release" | "branch";
+// "release": the published versions. "beta": the beta versions, which are
+// GitHub pre-releases published from a beta tag (V3.5.0-beta.1).
+export type UpdateChannel = "release" | "beta";
+
+// A version the channel offers. On the beta channel there are several, and the
+// user picks one after reading its change log.
+export interface UpdateVersion {
+  version: string; // "3.5.0-beta.1", no leading "v"
+  tag: string; // the release's tag on GitHub
+  label: string; // "v3.5.0-beta.1"
+  prerelease: boolean; // a beta version
+  body: string; // its change log (markdown)
+  url: string; // the release on GitHub
+  published_at: string | null;
+  relation: "newer" | "installed" | "older"; // compared with the running build
+  downloadable: boolean; // it has a download for this OS
+}
 
 export interface UpdateInfo {
   status: UpdateStatus;
   channel?: UpdateChannel;
-  branch?: string;
-  latestVersion?: string; // releases: normalised, no leading "v"
-  label?: string; // "v3.5.0" or "main@1a2b3c4"
-  body?: string; // release notes markdown (releases only)
-  url?: string; // the release / Actions run on GitHub
-  title?: string; // branch builds: the commit's title
-  conclusion?: string | null; // branch builds: the run's result
+  latestVersion?: string; // normalised, no leading "v"
+  label?: string; // "v3.5.0" or "v3.5.0-beta.1"
+  body?: string; // the newest version's release notes (markdown)
+  url?: string; // the release on GitHub
   publishedAt?: string | null;
-  current?: { version: string; commit: string | null; branch: string | null; frozen: boolean };
+  // Everything the channel offers, the default choice first: one release, or
+  // the beta versions.
+  versions?: UpdateVersion[];
+  current?: {
+    version: string;
+    commit: string | null;
+    branch: string | null;
+    frozen: boolean;
+    prerelease: boolean; // this build is a beta
+  };
   canInstall?: boolean; // this build can update itself
   installReason?: string; // why not, when it can't
-  downloadable?: boolean; // the newest build has a download for this OS
-  tokenConfigured?: boolean;
+  downloadable?: boolean; // the newest version has a download for this OS
   staged?: StagedUpdate | null;
+  checkedAt?: number; // when the worker answered (ms)
   errorMsg?: string;
 }
 
 export interface StagedUpdate {
   channel: UpdateChannel;
   version: string | null;
+  tag?: string | null;
   label: string;
   commit: string | null;
 }
 
 interface CheckResponse {
   channel: UpdateChannel;
-  branch: string;
-  token_configured: boolean;
-  current: { version: string; commit: string | null; branch: string | null; frozen: boolean };
+  current: NonNullable<UpdateInfo["current"]>;
   install: { supported: boolean; reason: string };
   available: boolean;
-  latest: null | {
-    version: string | null;
-    label: string;
-    body: string;
-    url: string;
-    title?: string;
-    conclusion?: string | null;
-    published_at?: string | null;
-    downloadable: boolean;
-  };
+  latest: UpdateVersion;
+  versions: UpdateVersion[];
   staged: StagedUpdate | null;
 }
 
@@ -94,20 +108,40 @@ export function compareUrl(latestVersion: string, current = APP_VERSION): string
   return `https://github.com/${GITHUB_REPO}/compare/V${current}...V${latestVersion}`;
 }
 
-// "v2.1.1" / "2.1.1-rc1" → [2, 1, 1] (pre-release suffix dropped for ordering).
-function parseVersion(v: string): number[] {
-  return v.trim().replace(/^v/i, "").split("-")[0].split(".").map((n) => parseInt(n, 10) || 0);
+// Orders two versions the semver way (the worker's updates.py does the same):
+// 3.5.0-beta.2 < 3.5.0-beta.10 < 3.5.0 < 3.5.1-beta.1. Negative when a < b.
+export function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => {
+    const [core, ...rest] = v.trim().replace(/^v/i, "").split("+")[0].split("-");
+    return { nums: core.split(".").map((n) => parseInt(n, 10) || 0), pre: rest.join("-") };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < Math.max(x.nums.length, y.nums.length); i++) {
+    const diff = (x.nums[i] ?? 0) - (y.nums[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  // A version with a suffix comes before the same version without one.
+  if (!x.pre || !y.pre) return (x.pre ? 0 : 1) - (y.pre ? 0 : 1);
+  const p = x.pre.split(".");
+  const q = y.pre.split(".");
+  for (let i = 0; i < Math.max(p.length, q.length); i++) {
+    if (p[i] === undefined || q[i] === undefined) return p[i] === undefined ? -1 : 1;
+    const [m, n] = [/^\d+$/.test(p[i]), /^\d+$/.test(q[i])];
+    if (m && n) {
+      if (+p[i] !== +q[i]) return +p[i] - +q[i];
+    } else if (m !== n) {
+      return m ? -1 : 1; // a number comes before a word
+    } else if (p[i].toLowerCase() !== q[i].toLowerCase()) {
+      return p[i].toLowerCase() < q[i].toLowerCase() ? -1 : 1;
+    }
+  }
+  return 0;
 }
 
-// Is `latest` strictly newer than `current`? Component-wise numeric compare.
+// Is `latest` strictly newer than `current`?
 export function isNewer(latest: string, current: string): boolean {
-  const a = parseVersion(latest);
-  const b = parseVersion(current);
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const diff = (a[i] ?? 0) - (b[i] ?? 0);
-    if (diff !== 0) return diff > 0;
-  }
-  return false;
+  return compareVersions(latest, current) > 0;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
@@ -158,20 +192,18 @@ function fromCheck(r: CheckResponse): UpdateInfo {
   return {
     status: r.available ? "update-available" : "latest",
     channel: r.channel,
-    branch: r.branch,
-    latestVersion: l?.version ?? undefined,
-    label: l?.label,
-    body: l?.body || undefined,
-    url: l?.url,
-    title: l?.title,
-    conclusion: l?.conclusion,
-    publishedAt: l?.published_at,
+    latestVersion: l.version,
+    label: l.label,
+    body: l.body || undefined,
+    url: l.url,
+    publishedAt: l.published_at,
+    versions: r.versions,
     current: r.current,
     canInstall: r.install.supported,
     installReason: r.install.reason,
-    downloadable: l?.downloadable ?? false,
-    tokenConfigured: r.token_configured,
+    downloadable: l.downloadable,
     staged: r.staged,
+    checkedAt: Date.now(),
   };
 }
 
@@ -207,7 +239,7 @@ export function useUpdateCheck(): { update: UpdateInfo; check: () => Promise<boo
       setUpdate(await fetchUpdate());
       return true;
     } catch (e) {
-      setUpdate((u) => ({ channel: u.channel, branch: u.branch, status: "error",
+      setUpdate((u) => ({ channel: u.channel, current: u.current, status: "error",
         errorMsg: (e as Error).message }));
       return false;
     }
@@ -229,18 +261,8 @@ export function useUpdateCheck(): { update: UpdateInfo; check: () => Promise<boo
 // Settings
 // ---------------------------------------------------------------------------
 
-export interface UpdateSettings {
-  channel: UpdateChannel;
-  branch: string;
-  token_configured: boolean;
-}
-
-export function saveUpdateSettings(patch: Partial<{ channel: UpdateChannel; branch: string; token: string }>) {
-  return api.put<UpdateSettings>("/update/settings", patch);
-}
-
-export async function listBranches(): Promise<string[]> {
-  return (await api.get<{ branches: string[] }>("/update/branches")).branches;
+export function saveUpdateChannel(channel: UpdateChannel) {
+  return api.put<{ channel: UpdateChannel }>("/update/settings", { channel });
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +282,9 @@ export interface InstallerState {
 let state: InstallerState = { phase: "idle", progress: null, message: "" };
 const listeners = new Set<() => void>();
 let activeJob: string | null = null;
+// A download replaces whatever was staged, so a check from before it started
+// no longer says what's on disk.
+let lastDownloadAt = 0;
 
 function set(next: Partial<InstallerState>) {
   state = { ...state, ...next };
@@ -279,11 +304,14 @@ interface JobSnapshot {
   error?: string;
 }
 
-async function download(): Promise<boolean> {
+// `tag` is the version the user picked from the list; without it, the newest
+// version of the chosen channel. Whatever was downloaded before is replaced.
+async function download(tag?: string, label?: string): Promise<boolean> {
   if (state.phase === "downloading") return false;
-  set({ phase: "downloading", progress: null, message: "Starting download…", error: undefined });
+  lastDownloadAt = Date.now();
+  set({ phase: "downloading", progress: null, message: "Starting download…", error: undefined, label });
   try {
-    const job = await api.post<{ job_id: string }>("/jobs/update_download", {});
+    const job = await api.post<{ job_id: string }>("/jobs/update_download", tag ? { tag } : {});
     activeJob = job.job_id;
     for (;;) {
       await new Promise((r) => setTimeout(r, JOB_POLL_MS));
@@ -334,16 +362,12 @@ async function install(): Promise<void> {
   }
 }
 
-// Called when the check finds a build already downloaded, so a restart of the
-// app still offers "Restart to install".
-function adoptStaged(staged: StagedUpdate | null | undefined, latestLabel?: string) {
-  if (state.phase === "downloading" || state.phase === "installing") return;
-  if (staged && staged.label === latestLabel) {
-    set({ phase: "ready", progress: 100, message: "Ready to install", label: staged.label });
-  } else if (state.phase === "ready" && latestLabel && state.label !== latestLabel) {
-    // A newer build appeared since this one was downloaded.
-    set({ phase: "idle", progress: null, message: "", label: undefined });
-  }
+// Called when a check finds a version already downloaded, so a restart of the
+// app still offers "Restart to install". It may be any version: on the beta
+// channel the user picks which one to download.
+function adoptStaged(staged: StagedUpdate | null | undefined, checkedAt = 0) {
+  if (state.phase !== "idle" || !staged || checkedAt < lastDownloadAt) return;
+  set({ phase: "ready", progress: 100, message: "Ready to install", label: staged.label });
 }
 
 function reset() {

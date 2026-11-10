@@ -2,19 +2,20 @@
 In-app updates: find the build this machine should run, download it, check it
 and unpack it ready for desktop/updater.py to install.
 
-Two channels:
+Two channels, both GitHub releases of this repository:
 
-* ``release`` — the newest published GitHub release. Its asset for this OS is
-  downloaded and checked against the SHA-256 digest GitHub records for it.
-* ``branch`` — the newest CI build of a branch (an Actions artifact of the
-  "Build Desktop App" workflow). Handy while developing: no need to download
-  artifacts by hand. GitHub only serves artifacts to a signed-in client, so this
-  needs a GitHub token (Preferences → Updates), stored encrypted. Each artifact
-  also carries a SHA-256 digest, checked the same way.
+* ``release`` — the newest published release.
+* ``beta`` — the beta versions: releases published as a pre-release, each from
+  its own tag (``V3.5.0-beta.1``) and each with its own change log. The user
+  sees the list and picks one; the newest is offered by default. A release
+  newer than every beta heads the list, so a beta user gets the final version.
+
+A build is the release's asset for this OS, downloaded and checked against the
+SHA-256 digest GitHub records for it.
 
 Everything runs in the worker so ``requests`` uses the system proxy (see net.py).
 Only URLs that come back from the GitHub API for this repository are fetched;
-the SPA never passes one in.
+the SPA passes at most a tag name, which GitHub is asked about.
 
 Only the Windows and macOS builds are updated in place for now. Linux packages
 and runs from source report why they can't be.
@@ -26,6 +27,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -34,10 +36,10 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import quote
 
 import requests
 
-from Application_Logic import Logic_AI_Credentials as credentials
 from Application_Logic.Logic_App_Data import app_data_dir
 from desktop import build_info
 
@@ -45,19 +47,19 @@ logger = logging.getLogger(__name__)
 
 GITHUB_REPO = "alexmasso96/Architecture_Validator_Pro"
 API = f"https://api.github.com/repos/{GITHUB_REPO}"
-WORKFLOW_FILE = "build-desktop.yml"
 
 CHANNEL_RELEASE = "release"
-CHANNEL_BRANCH = "branch"
-CHANNELS = (CHANNEL_RELEASE, CHANNEL_BRANCH)
+CHANNEL_BETA = "beta"
+CHANNELS = (CHANNEL_RELEASE, CHANNEL_BETA)
 
 PREF_CHANNEL = "update.channel"
-PREF_BRANCH = "update.branch"
 
 TIMEOUT = 15
 CHUNK = 1 << 20
-# How many recent runs of a branch to look through for one with this OS's build.
-RUNS_TO_SEARCH = 10
+# How many of the newest releases to look through for beta versions.
+RELEASES_TO_LIST = 50
+# What a tag the SPA names may look like, before GitHub is asked about it.
+_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,79}")
 
 STAGED_FILE = "staged.json"
 
@@ -72,21 +74,20 @@ class UpdateError(Exception):
 
 @dataclass(frozen=True)
 class Target:
-    """Which build this machine runs: the release asset and the CI artifact that
-    hold it, and the program inside."""
+    """Which build this machine runs: the release asset that holds it and the
+    program inside."""
     key: str
     release_asset: str
-    artifact: str
     exe_name: str
 
 
 TARGETS = {
     "windows-x64": Target("windows-x64", "architecture-validator-desktop-windows-x64.zip",
-                          "desktop-windows-artifact-windows-latest", "ArchitectureValidator.exe"),
+                          "ArchitectureValidator.exe"),
     "windows-arm64": Target("windows-arm64", "architecture-validator-desktop-windows-arm64.zip",
-                            "desktop-windows-artifact-windows-11-arm", "ArchitectureValidator.exe"),
+                            "ArchitectureValidator.exe"),
     "macos": Target("macos", "architecture-validator-desktop-macos.zip",
-                    "desktop-macos-artifact", "ArchitectureValidator.app"),
+                    "ArchitectureValidator.app"),
 }
 
 
@@ -141,30 +142,17 @@ def get_settings() -> dict:
     from .routers.prefs import read_pref
 
     channel = read_pref(PREF_CHANNEL) or CHANNEL_RELEASE
-    if channel not in CHANNELS:
-        channel = CHANNEL_RELEASE
-    return {
-        "channel": channel,
-        "branch": read_pref(PREF_BRANCH) or "main",
-        "token_configured": bool(credentials.get_github_token()),
-    }
+    # Anything else (a channel from an older build) means releases.
+    return {"channel": channel if channel in CHANNELS else CHANNEL_RELEASE}
 
 
-def save_settings(channel: str | None = None, branch: str | None = None,
-                  token: str | None = None) -> dict:
+def save_settings(channel: str | None = None) -> dict:
     from .routers.prefs import write_pref
 
     if channel is not None:
         if channel not in CHANNELS:
             raise UpdateError(f"Unknown update channel: {channel}")
         write_pref(PREF_CHANNEL, channel)
-    if branch is not None:
-        branch = branch.strip()
-        if not branch:
-            raise UpdateError("Choose a branch.")
-        write_pref(PREF_BRANCH, branch)
-    if token is not None:
-        credentials.set_github_token(token.strip())
     return get_settings()
 
 
@@ -172,23 +160,16 @@ def save_settings(channel: str | None = None, branch: str | None = None,
 # GitHub
 # ---------------------------------------------------------------------------
 
-def _headers(auth: bool = True) -> dict:
-    h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    token = credentials.get_github_token() if auth else None
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
+_HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
 
 
 def _get_json(url: str, params: dict | None = None):
     try:
-        res = requests.get(url, headers=_headers(), params=params, timeout=TIMEOUT)
+        res = requests.get(url, headers=dict(_HEADERS), params=params, timeout=TIMEOUT)
     except requests.RequestException as exc:
         raise UpdateError(f"GitHub unreachable ({exc.__class__.__name__}).") from exc
-    if res.status_code == 401:
-        raise UpdateError("GitHub rejected the token. Check it in Preferences → Updates.")
     if res.status_code == 403 and res.headers.get("X-RateLimit-Remaining") == "0":
-        raise UpdateError("GitHub's rate limit was reached. Add a GitHub token, or try later.")
+        raise UpdateError("GitHub's rate limit was reached. Try again later.")
     if res.status_code == 404:
         raise UpdateError("Not found on GitHub.")
     if not res.ok:
@@ -205,140 +186,165 @@ def _digest(value) -> str | None:
     return None
 
 
-def latest_release() -> dict:
-    """The newest published release: ``{tag_name, body, assets, html_url, published_at}``."""
-    data = _get_json(f"{API}/releases/latest")
-    return {
-        "tag_name": str(data.get("tag_name") or ""),
-        "body": str(data.get("body") or ""),
-        "html_url": str(data.get("html_url") or ""),
-        "published_at": data.get("published_at"),
-        "assets": list(data.get("assets") or []),
-        # CI publishes with target_commitish = the commit it built.
-        "commit": _commit_sha(data.get("target_commitish")),
-    }
-
-
 def _commit_sha(value) -> str | None:
     if isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdef" for c in value.lower()):
         return value.lower()
     return None
 
 
-def list_branches() -> list[str]:
-    names: list[str] = []
-    for page in range(1, 4):
-        batch = _get_json(f"{API}/branches", {"per_page": 100, "page": page})
-        names += [str(b.get("name")) for b in batch if b.get("name")]
-        if len(batch) < 100:
-            break
-    # main first, the rest alphabetical.
-    return sorted(set(names), key=lambda n: (n != "main", n.lower()))
+# ---------------------------------------------------------------------------
+# Versions
+# ---------------------------------------------------------------------------
+
+def version_of(tag: str) -> str:
+    """``V3.5.0-beta.1`` / ``desktop-v3.5.0`` → ``3.5.0-beta.1`` / ``3.5.0``."""
+    v = (tag or "").strip()
+    if v.lower().startswith("desktop-"):
+        v = v[len("desktop-"):]
+    return v.lstrip("vV")
 
 
-def latest_branch_build(branch: str, target: Target) -> dict:
-    """The newest run of the desktop workflow on ``branch`` that still has this
-    OS's build. A run whose tests failed still counts if its build finished,
-    since the build is what's installed; its conclusion is reported."""
-    runs = _get_json(f"{API}/actions/workflows/{WORKFLOW_FILE}/runs",
-                     {"branch": branch, "status": "completed", "per_page": RUNS_TO_SEARCH})
-    for run in runs.get("workflow_runs") or []:
-        arts = _get_json(f"{API}/actions/runs/{run['id']}/artifacts",
-                         {"name": target.artifact, "per_page": 5})
-        artifact = next((a for a in arts.get("artifacts") or [] if not a.get("expired")), None)
-        if artifact is None:
-            continue
-        return {
-            "run_id": run["id"],
-            "run_number": run.get("run_number"),
-            "commit": run.get("head_sha"),
-            "branch": run.get("head_branch") or branch,
-            "title": run.get("display_title") or "",
-            "conclusion": run.get("conclusion"),
-            "created_at": run.get("created_at"),
-            "html_url": run.get("html_url"),
-            "artifact": {
-                "id": artifact["id"],
-                "name": artifact.get("name"),
-                "size": artifact.get("size_in_bytes"),
-                "sha256": _digest(artifact.get("digest")),
-                "url": artifact.get("archive_download_url"),
-            },
-        }
-    raise UpdateError(f"No recent build of '{branch}' has a {target.key} build.")
+def is_prerelease(version: str) -> bool:
+    """A version with a suffix (``3.5.0-beta.1``) comes before ``3.5.0``."""
+    return "-" in version_of(version)
+
+
+def _version_key(version: str):
+    """Orders versions the semver way: ``3.5.0-beta.2`` < ``3.5.0-beta.10`` <
+    ``3.5.0`` < ``3.5.1-beta.1``."""
+    core, _, pre = version_of(version).split("+")[0].partition("-")
+    nums = [int(p) if p.isdigit() else 0 for p in core.split(".")]
+    while len(nums) > 1 and nums[-1] == 0:      # 3.5 is 3.5.0
+        nums.pop()
+    ids = tuple((0, int(p), "") if p.isdigit() else (1, 0, p.lower())
+                for p in pre.split(".")) if pre else ()
+    return (tuple(nums), 0 if pre else 1, ids)
 
 
 def _compare_versions(a: str, b: str) -> int:
-    def parse(v: str) -> list[int]:
-        parts = v.strip().lstrip("vV").split("-")[0].split(".")
-        return [int(p) if p.isdigit() else 0 for p in parts]
-    pa, pb = parse(a), parse(b)
-    n = max(len(pa), len(pb))
-    pa += [0] * (n - len(pa))
-    pb += [0] * (n - len(pb))
-    return (pa > pb) - (pa < pb)
+    ka, kb = _version_key(a), _version_key(b)
+    return (ka > kb) - (ka < kb)
 
 
-def check() -> dict:
-    """What's available on the chosen channel, compared with this build."""
-    settings = get_settings()
-    info = build_info.current()
-    target = current_target()
-    out = {
-        "channel": settings["channel"],
-        "branch": settings["branch"],
-        "token_configured": settings["token_configured"],
-        "current": {k: info.get(k) for k in ("version", "commit", "branch", "run_id", "frozen")},
-        "install": install_support(),
-        "available": False,
-        "latest": None,
+# ---------------------------------------------------------------------------
+# Releases
+# ---------------------------------------------------------------------------
+
+def _release(data: dict) -> dict:
+    tag = str(data.get("tag_name") or "")
+    return {
+        "tag_name": tag,
+        "version": version_of(tag),
+        "body": str(data.get("body") or ""),
+        "html_url": str(data.get("html_url") or ""),
+        "published_at": data.get("published_at"),
+        "prerelease": bool(data.get("prerelease")),
+        "assets": list(data.get("assets") or []),
+        # CI publishes with target_commitish = the commit it built.
+        "commit": _commit_sha(data.get("target_commitish")),
     }
 
-    if settings["channel"] == CHANNEL_RELEASE:
+
+def latest_release() -> dict:
+    """The newest published release (GitHub never names a pre-release here)."""
+    return _release(_get_json(f"{API}/releases/latest"))
+
+
+def list_betas() -> list[dict]:
+    """The published beta versions, newest version first."""
+    data = _get_json(f"{API}/releases", {"per_page": RELEASES_TO_LIST})
+    betas = [_release(r) for r in data or []
+             if r.get("prerelease") and not r.get("draft") and r.get("tag_name")]
+    return sorted(betas, key=lambda r: _version_key(r["version"]), reverse=True)
+
+
+def release_by_tag(tag: str) -> dict:
+    """The release published from ``tag``. The tag comes from the SPA, so it is
+    checked and then looked up: only a release GitHub returns is ever fetched."""
+    if not _TAG_RE.fullmatch(tag or ""):
+        raise UpdateError("That isn't a version tag.")
+    try:
+        return _release(_get_json(f"{API}/releases/tags/{quote(tag, safe='')}"))
+    except UpdateError as exc:
+        if str(exc) == "Not found on GitHub.":
+            raise UpdateError(f"{tag} isn't a published version.") from None
+        raise
+
+
+def offered_versions(channel: str) -> list[dict]:
+    """What the channel offers, the default choice first.
+
+    ``release``: the newest release. ``beta``: the beta versions, newest first,
+    headed by the newest release when that is newer than every beta (the beta
+    series it belongs to is over)."""
+    if channel == CHANNEL_RELEASE:
         rel = latest_release()
         if not rel["tag_name"]:
             raise UpdateError("The latest release has no version tag.")
-        version = rel["tag_name"].lstrip("vV")
-        asset = next((a for a in rel["assets"] if target and a.get("name") == target.release_asset), None)
-        out["latest"] = {
-            "version": version,
-            "tag": rel["tag_name"],
-            "label": f"v{version}",
-            "body": rel["body"],
-            "url": rel["html_url"],
-            "published_at": rel["published_at"],
-            "downloadable": asset is not None,
-            "size": asset.get("size") if asset else None,
-        }
-        newer = _compare_versions(version, str(info["version"]))
-        # Same version, different commit: this is a branch build, and the user
-        # has switched back to releases, so the release is offered.
-        mine = (info.get("commit") or "").lower()
-        out["available"] = newer > 0 or (
-            newer == 0 and bool(mine) and bool(rel["commit"]) and rel["commit"] != mine)
-        return out
+        return [rel]
+    betas = list_betas()
+    try:
+        stable = latest_release()
+    except UpdateError as exc:
+        if str(exc) != "Not found on GitHub.":
+            raise
+        stable = None                            # only beta versions so far
+    if stable and stable["tag_name"] and (
+            not betas or _compare_versions(stable["version"], betas[0]["version"]) > 0):
+        return [stable] + betas
+    if not betas:
+        raise UpdateError("No beta versions have been published yet.")
+    return betas
 
-    if target is None:
-        raise UpdateError("Branch builds are installed in place only on Windows and macOS.")
-    build = latest_branch_build(settings["branch"], target)
-    commit = build["commit"] or ""
-    out["latest"] = {
-        "version": None,
-        "label": f"{build['branch']}@{commit[:7]}",
-        "commit": commit,
-        "title": build["title"],
-        "run_number": build["run_number"],
-        "conclusion": build["conclusion"],
-        "published_at": build["created_at"],
-        "url": build["html_url"],
-        "downloadable": True,
-        "size": build["artifact"]["size"],
-        "body": "",
+
+def _relation(rel: dict, info: dict) -> str:
+    """``newer`` / ``installed`` / ``older`` than the build that's running.
+
+    The same version from another commit counts as newer: this build isn't the
+    published one (a CI or local build), so the published one is offered."""
+    order = _compare_versions(rel["version"], str(info["version"]))
+    if order:
+        return "newer" if order > 0 else "older"
+    mine = (info.get("commit") or "").lower()
+    return "newer" if mine and rel["commit"] and rel["commit"] != mine else "installed"
+
+
+def _entry(rel: dict, info: dict, target: Target | None) -> dict:
+    asset = next((a for a in rel["assets"] if target and a.get("name") == target.release_asset), None)
+    return {
+        "version": rel["version"],
+        "tag": rel["tag_name"],
+        "label": f"v{rel['version']}",
+        "prerelease": rel["prerelease"],
+        "body": rel["body"],
+        "url": rel["html_url"],
+        "published_at": rel["published_at"],
+        "relation": _relation(rel, info),
+        "downloadable": asset is not None,
+        "size": asset.get("size") if asset else None,
     }
-    # A build is "newer" when it's a different commit, or this build doesn't
-    # know its own (a release from before build_info existed).
-    out["available"] = bool(commit) and commit != (info.get("commit") or "")
-    return out
+
+
+def check() -> dict:
+    """What's available on the chosen channel, compared with this build.
+
+    ``latest`` is the version offered by default and ``available`` says whether
+    it's newer than this build. ``versions`` is everything the channel lists:
+    one release, or the beta versions to pick from."""
+    settings = get_settings()
+    info = build_info.current()
+    target = current_target()
+    versions = [_entry(rel, info, target) for rel in offered_versions(settings["channel"])]
+    current = {k: info.get(k) for k in ("version", "commit", "branch", "run_id", "frozen")}
+    current["prerelease"] = is_prerelease(str(info["version"]))
+    return {
+        "channel": settings["channel"],
+        "current": current,
+        "install": install_support(),
+        "available": versions[0]["relation"] == "newer",
+        "latest": versions[0],
+        "versions": versions,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -349,19 +355,13 @@ def updates_dir() -> Path:
     return app_data_dir() / "updates"
 
 
-def _download(url: str, dest: Path, size: int | None, auth: bool,
+def _download(url: str, dest: Path, size: int | None,
               progress: Callable[..., None], cancel: threading.Event, label: str) -> str:
-    """Streams ``url`` to ``dest`` and returns its SHA-256 hex digest.
-
-    ``requests`` drops the Authorization header when GitHub redirects to its
-    storage host, which is what that host expects."""
+    """Streams ``url`` to ``dest`` and returns its SHA-256 hex digest."""
     sha = hashlib.sha256()
     try:
-        with requests.get(url, headers=_headers(auth) | {"Accept": "application/octet-stream"},
+        with requests.get(url, headers=_HEADERS | {"Accept": "application/octet-stream"},
                           stream=True, timeout=TIMEOUT) as res:
-            if res.status_code in (401, 403) and auth:
-                raise UpdateError("GitHub needs a token with access to this repository's "
-                                  "Actions to download branch builds (Preferences → Updates).")
             if not res.ok:
                 raise UpdateError(f"Download failed: GitHub responded {res.status_code}.")
             total = size or int(res.headers.get("Content-Length") or 0) or None
@@ -438,9 +438,13 @@ def staged() -> dict | None:
     return data
 
 
-def download_and_stage(progress: Callable[..., None], cancel: threading.Event) -> dict:
-    """The ``update_download`` job: fetch the chosen channel's build for this
-    machine, check its SHA-256, unpack it and record it as ready to install."""
+def download_and_stage(progress: Callable[..., None], cancel: threading.Event,
+                       tag: str | None = None) -> dict:
+    """The ``update_download`` job: fetch a version's build for this machine,
+    check its SHA-256, unpack it and record it as ready to install.
+
+    ``tag`` names the version the user picked; without it, it's the one the
+    chosen channel offers by default."""
     support = install_support()
     if not support["supported"]:
         raise UpdateError(support["reason"])
@@ -449,28 +453,17 @@ def download_and_stage(progress: Callable[..., None], cancel: threading.Event) -
     settings = get_settings()
 
     progress("Asking GitHub for the update…", None)
-    if settings["channel"] == CHANNEL_RELEASE:
-        rel = latest_release()
-        asset = next((a for a in rel["assets"] if a.get("name") == target.release_asset), None)
-        if asset is None:
-            raise UpdateError(f"The latest release has no {target.key} build.")
-        url = asset.get("browser_download_url")
-        size = asset.get("size")
-        expected = _digest(asset.get("digest"))
-        auth = False
-        label = rel["tag_name"]
-        meta = {"channel": CHANNEL_RELEASE, "version": rel["tag_name"].lstrip("vV"),
-                "label": f"v{rel['tag_name'].lstrip('vV')}", "commit": None}
-    else:
-        if not credentials.get_github_token():
-            raise UpdateError("Downloading a branch build needs a GitHub token "
-                              "(Preferences → Updates).")
-        build = latest_branch_build(settings["branch"], target)
-        art = build["artifact"]
-        url, size, expected, auth = art["url"], art["size"], art["sha256"], True
-        label = f"{build['branch']}@{(build['commit'] or '')[:7]}"
-        meta = {"channel": CHANNEL_BRANCH, "version": None, "label": label,
-                "commit": build["commit"], "run_id": build["run_id"]}
+    rel = release_by_tag(tag) if tag else offered_versions(settings["channel"])[0]
+    label = f"v{rel['version']}"
+    asset = next((a for a in rel["assets"] if a.get("name") == target.release_asset), None)
+    if asset is None:
+        raise UpdateError(f"{label} has no {target.key} build.")
+    url = asset.get("browser_download_url")
+    size = asset.get("size")
+    expected = _digest(asset.get("digest"))
+    meta = {"channel": CHANNEL_BETA if rel["prerelease"] else CHANNEL_RELEASE,
+            "version": rel["version"], "tag": rel["tag_name"], "label": label,
+            "commit": rel["commit"]}
     if not url:
         raise UpdateError("GitHub didn't give a download address for the build.")
     if not expected:
@@ -481,7 +474,7 @@ def download_and_stage(progress: Callable[..., None], cancel: threading.Event) -
     work = updates_dir() / "download"
     work.mkdir(parents=True, exist_ok=True)
     archive = work / "download.zip"
-    actual = _download(url, archive, size, auth, progress, cancel, label)
+    actual = _download(url, archive, size, progress, cancel, label)
     if actual != expected:
         clear_staging()
         raise UpdateError("The download doesn't match GitHub's SHA-256 checksum; it was "
@@ -491,12 +484,6 @@ def download_and_stage(progress: Callable[..., None], cancel: threading.Event) -
     unpacked = work / "unpacked"
     _safe_extract(archive, unpacked)
     archive.unlink(missing_ok=True)
-    # An Actions artifact is a zip around the release zip: unpack that too.
-    inner = unpacked / target.release_asset
-    if inner.is_file():
-        _safe_extract(inner, unpacked / "inner")
-        inner.unlink()
-        unpacked = unpacked / "inner"
 
     bundle = find_bundle(unpacked, target)
     if bundle is None:
@@ -518,13 +505,12 @@ def download_and_stage(progress: Callable[..., None], cancel: threading.Event) -
         "bundle": str(bundle),
         "executable": str(exe),
         "sha256": actual,
-        "version": meta["version"] or info.get("version"),
         "commit": meta["commit"] or info.get("commit"),
         "build_info": info,
     })
     (updates_dir() / STAGED_FILE).write_text(json.dumps(meta, indent=2), encoding="utf-8")
     progress("Ready to install", 100)
-    return {k: meta[k] for k in ("channel", "version", "label", "commit")}
+    return {k: meta[k] for k in ("channel", "version", "tag", "label", "commit")}
 
 
 def last_result(consume: bool = True) -> Optional[dict]:

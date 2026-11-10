@@ -240,12 +240,7 @@ export default function App() {
     changelogOpen && (update.body || update.status === "update-available") ? (
       <ChangelogModal
         version={update.label}
-        body={
-          update.body ||
-          (update.channel === "branch"
-            ? `**${update.label}**${update.title ? ` — ${update.title}` : ""}\n\nBranch builds have no release notes.`
-            : "")
-        }
+        body={update.body || "This version has no change log."}
         update={update}
         onClose={() => setChangelogOpen(false)}
       />

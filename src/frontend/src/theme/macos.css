@@ -6895,8 +6895,85 @@ a.code-ref code { color: var(--accent); }
 .update-channel {
   justify-content: flex-start;
 }
-.update-channel select.prefs-input {
-  max-width: 280px;
+/* Beta versions: the list to pick from, then the picked one's change log. */
+.update-beta {
+  margin-left: 8px;
+  vertical-align: 2px;
+}
+.update-versions {
+  display: flex;
+  flex-direction: column;
+  max-height: 168px;
+  overflow-y: auto;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.update-version-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding: 7px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--sep);
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.update-version-row:last-child {
+  border-bottom: 0;
+}
+.update-version-row:hover:not(:disabled) {
+  background: var(--hover);
+}
+.update-version-row.sel {
+  background: var(--v-raised);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.update-version-name {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.update-version-date {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.update-version-tags {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.update-version-tags .update-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+}
+.update-notes-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+}
+.update-notes {
+  max-height: 220px;
+  margin-top: 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.update-notes h1 {
+  font-size: 15px;
+}
+.update-notes h2,
+.update-notes h3 {
+  font-size: 13px;
+  margin: 12px 0 6px;
 }
 .changelog-foot {
   border-top: 1px solid var(--border);
