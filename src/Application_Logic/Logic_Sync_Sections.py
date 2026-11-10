@@ -89,6 +89,8 @@ SECTIONS = (
         Table("tracked_artifacts", "{a}.test_build_id IS NULL",
               "NEW_OR_OLD.test_build_id IS NULL"),
         Table("build_run_items"), Table("build_runs"))),
+    Section(SCOPE_PROJECT, "Target Tests", (
+        Table("target_test_results"), Table("target_test_versions"), Table("target_tests"))),
     Section(SCOPE_PROJECT, "History", (Table("history"),)),
 )
 

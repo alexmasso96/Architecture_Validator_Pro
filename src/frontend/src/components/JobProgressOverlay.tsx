@@ -8,6 +8,7 @@ const JOB_NAMES: Record<string, string> = {
   import_source: "Importing Source",
   share_project: "Sharing Project",
   sync: "Shared Project",
+  target_test_run: "Running Target Tests",
 };
 
 // Stopping these halfway would leave a share half set up, so they run to the end.

@@ -15,6 +15,7 @@ import { ChangeLog } from "./views/ChangeLog";
 import { CodeMap } from "./views/CodeMap";
 import { SyncPanel } from "./components/SyncPanel";
 import { TestBuilds } from "./views/TestBuilds";
+import { TargetTests } from "./views/TargetTests";
 import { TestCodeInjection } from "./views/TestCodeInjection";
 import { TestDesign } from "./views/TestDesign";
 import { Workspace } from "./views/Workspace";
@@ -363,6 +364,8 @@ export default function App() {
             <TestBuilds toast={toast} canEdit={canEdit} />
           )}
         </div>
+      ) : activeTab === "Target Tests" ? (
+        <TargetTests toast={toast} canEdit={canEdit} />
       ) : activeTab === "Change Log" ? (
         <ChangeLog toast={toast} />
       ) : (
@@ -388,7 +391,7 @@ export default function App() {
       <JobProgressOverlay
         // A build run lasts all night and shows its progress on its own page.
         jobs={[
-          ...Object.values(activeJobs).filter((j) => j.kind !== "test_build_run"),
+          ...Object.values(activeJobs).filter((j) => j.kind !== "test_build_run" && j.kind !== "target_test_debug"),
           ...syncJobs,
         ]}
         onCancel={(id) => {

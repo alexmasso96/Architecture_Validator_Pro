@@ -889,6 +889,55 @@ class ProjectDatabase:
                     rows_changed INTEGER NOT NULL DEFAULT 0
                 );
 
+                -- Target Tests: architecture tests on the real ECU. The code
+                -- of each version is kept; approved_version names the version
+                -- that counts. pending_* is an AI proposal not yet accepted.
+                CREATE TABLE IF NOT EXISTS target_tests (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    test_key          TEXT    NOT NULL DEFAULT '',
+                    title             TEXT    NOT NULL DEFAULT '',
+                    port              TEXT    NOT NULL DEFAULT '',
+                    requirement       TEXT    NOT NULL DEFAULT '',
+                    model_id          INTEGER,
+                    release_id        INTEGER,
+                    rationale         TEXT    NOT NULL DEFAULT '',
+                    approved_version  INTEGER,
+                    approved_by       TEXT    NOT NULL DEFAULT '',
+                    approved_at       TEXT    NOT NULL DEFAULT '',
+                    pending_code      TEXT    NOT NULL DEFAULT '',
+                    pending_rationale TEXT    NOT NULL DEFAULT '',
+                    created_at        TEXT    NOT NULL DEFAULT '',
+                    updated_at        TEXT    NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS target_test_versions (
+                    test_id    INTEGER NOT NULL
+                                   REFERENCES target_tests(id) ON DELETE CASCADE,
+                    version    INTEGER NOT NULL,
+                    code       TEXT    NOT NULL DEFAULT '',
+                    origin     TEXT    NOT NULL DEFAULT 'user',
+                    author     TEXT    NOT NULL DEFAULT '',
+                    note       TEXT    NOT NULL DEFAULT '',
+                    created_at TEXT    NOT NULL DEFAULT '',
+                    PRIMARY KEY (test_id, version)
+                );
+                CREATE TABLE IF NOT EXISTS target_test_results (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    test_id     INTEGER NOT NULL
+                                    REFERENCES target_tests(id) ON DELETE CASCADE,
+                    version     INTEGER NOT NULL DEFAULT 0,
+                    approved    INTEGER NOT NULL DEFAULT 0,
+                    release_id  INTEGER,
+                    verdict     TEXT    NOT NULL DEFAULT '',
+                    message     TEXT    NOT NULL DEFAULT '',
+                    started_at  TEXT    NOT NULL DEFAULT '',
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    username    TEXT    NOT NULL DEFAULT '',
+                    target_info TEXT    NOT NULL DEFAULT '{}',
+                    evidence    TEXT    NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_target_test_results
+                    ON target_test_results(test_id);
+
                 -- "Continue anyway" answers to the clean-release lock.
                 CREATE TABLE IF NOT EXISTS clean_lock_overrides (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2927,3 +2976,149 @@ class ProjectDatabase:
                     return False
             prev = stored_hmac or ""     # matches _history_chain_head() NULL->'' coalescing
         return True
+
+    # ------------------------------------------------------------------
+    # Target Tests
+    # ------------------------------------------------------------------
+    _TT_TEXT = ("rationale", "pending_code", "pending_rationale")
+    _TT_PLAIN = ("test_key", "title", "port", "requirement", "model_id", "release_id",
+                 "approved_version", "approved_by", "approved_at")
+    _TT_SELECT = (
+        "SELECT t.id, t.test_key, t.title, t.port, t.requirement, t.model_id, "
+        "t.release_id, t.rationale, t.approved_version, t.approved_by, t.approved_at, "
+        "t.pending_code, t.pending_rationale, t.created_at, t.updated_at, "
+        "(SELECT MAX(version) FROM target_test_versions v WHERE v.test_id = t.id) "
+        "FROM target_tests t ")
+
+    def _tt_row(self, r) -> dict:
+        return {"id": r[0], "test_key": r[1], "title": r[2], "port": r[3],
+                "requirement": r[4], "model_id": r[5], "release_id": r[6],
+                "rationale": self._dec_text("D", r[7]), "approved_version": r[8],
+                "approved_by": r[9], "approved_at": r[10],
+                "pending_code": self._dec_text("D", r[11]),
+                "pending_rationale": self._dec_text("D", r[12]),
+                "created_at": r[13], "updated_at": r[14], "version": r[15] or 0}
+
+    def create_target_test(self, **fields) -> int:
+        now = self._now_iso()
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO target_tests (created_at, updated_at) VALUES (?, ?)", (now, now))
+            test_id = cur.lastrowid
+        if fields:
+            self.update_target_test(test_id, **fields)
+        return test_id
+
+    def update_target_test(self, test_id: int, **fields) -> None:
+        sets, params = [], []
+        for key, value in fields.items():
+            if key in self._TT_TEXT:
+                value = self._enc_text("D", value or "")
+            elif key not in self._TT_PLAIN:
+                raise ValueError(f"Unknown target test field: {key}")
+            sets.append(f"{key}=?")
+            params.append(value)
+        if not sets:
+            return
+        sets.append("updated_at=?")
+        params.append(self._now_iso())
+        with self._conn:
+            self._conn.execute(f"UPDATE target_tests SET {', '.join(sets)} WHERE id=?",
+                               (*params, test_id))
+
+    def get_target_test(self, test_id: int, with_code: bool = True):
+        row = self._conn.execute(self._TT_SELECT + "WHERE t.id=?", (test_id,)).fetchone()
+        if row is None:
+            return None
+        t = self._tt_row(row)
+        if with_code:
+            v = self.get_target_test_version(test_id, t["version"]) if t["version"] else None
+            t["code"] = v["code"] if v else ""
+            t["origin"] = v["origin"] if v else ""
+        return t
+
+    def list_target_tests(self) -> list:
+        rows = self._conn.execute(self._TT_SELECT + "ORDER BY t.test_key, t.id").fetchall()
+        return [self._tt_row(r) for r in rows]
+
+    def delete_target_test(self, test_id: int) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM target_tests WHERE id=?", (test_id,))
+
+    def add_target_test_version(self, test_id: int, code: str, origin: str = "user",
+                                author: str = "", note: str = "") -> int:
+        with self._conn:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM target_test_versions WHERE test_id=?",
+                (test_id,)).fetchone()
+            version = int(row[0]) + 1
+            self._conn.execute(
+                "INSERT INTO target_test_versions (test_id, version, code, origin, author, "
+                "note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (test_id, version, self._enc_text("D", code or ""), origin, author, note,
+                 self._now_iso()))
+            self._conn.execute("UPDATE target_tests SET updated_at=? WHERE id=?",
+                               (self._now_iso(), test_id))
+        return version
+
+    def get_target_test_version(self, test_id: int, version: int):
+        r = self._conn.execute(
+            "SELECT version, code, origin, author, note, created_at FROM "
+            "target_test_versions WHERE test_id=? AND version=?", (test_id, version)).fetchone()
+        if r is None:
+            return None
+        return {"version": r[0], "code": self._dec_text("D", r[1]), "origin": r[2],
+                "author": r[3], "note": r[4], "created_at": r[5]}
+
+    def list_target_test_versions(self, test_id: int) -> list:
+        rows = self._conn.execute(
+            "SELECT version, origin, author, note, created_at FROM target_test_versions "
+            "WHERE test_id=? ORDER BY version DESC", (test_id,)).fetchall()
+        return [{"version": r[0], "origin": r[1], "author": r[2], "note": r[3],
+                 "created_at": r[4]} for r in rows]
+
+    def add_target_test_result(self, test_id: int, version: int, approved: bool,
+                               release_id, verdict: str, message: str, started_at: str,
+                               duration_ms: int, username: str, target_info: dict,
+                               evidence: dict) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO target_test_results (test_id, version, approved, release_id, "
+                "verdict, message, started_at, duration_ms, username, target_info, evidence) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (test_id, version, 1 if approved else 0, release_id, verdict, message,
+                 started_at, int(duration_ms or 0), username,
+                 json.dumps(target_info or {}),
+                 self._enc_text("D", json.dumps(evidence or {}))))
+            return cur.lastrowid
+
+    def _tt_result_row(self, r, with_evidence: bool) -> dict:
+        out = {"id": r[0], "test_id": r[1], "version": r[2], "approved": bool(r[3]),
+               "release_id": r[4], "verdict": r[5], "message": r[6], "started_at": r[7],
+               "duration_ms": r[8], "username": r[9],
+               "target_info": json.loads(r[10] or "{}")}
+        if with_evidence:
+            raw = self._dec_text("D", r[11])
+            out["evidence"] = json.loads(raw) if raw else {}
+        return out
+
+    _TT_RESULT_SELECT = (
+        "SELECT id, test_id, version, approved, release_id, verdict, message, started_at, "
+        "duration_ms, username, target_info, evidence FROM target_test_results ")
+
+    def list_target_test_results(self, test_id: int, limit: int = 20) -> list:
+        rows = self._conn.execute(
+            self._TT_RESULT_SELECT + "WHERE test_id=? ORDER BY id DESC LIMIT ?",
+            (test_id, limit)).fetchall()
+        return [self._tt_result_row(r, False) for r in rows]
+
+    def get_target_test_result(self, result_id: int):
+        r = self._conn.execute(self._TT_RESULT_SELECT + "WHERE id=?", (result_id,)).fetchone()
+        return self._tt_result_row(r, True) if r else None
+
+    def latest_target_test_results(self) -> dict:
+        """{test_id: latest result (no evidence)}."""
+        rows = self._conn.execute(
+            self._TT_RESULT_SELECT + "WHERE id IN (SELECT MAX(id) FROM target_test_results "
+            "GROUP BY test_id)").fetchall()
+        return {r[1]: self._tt_result_row(r, False) for r in rows}

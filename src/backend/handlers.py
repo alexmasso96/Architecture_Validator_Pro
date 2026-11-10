@@ -41,6 +41,8 @@ def register_handlers(jobs: JobManager, state: AppState) -> None:
     jobs.register("mapped_switch", _make_mapped_switch(state))
     jobs.register("share_project", _make_share_project(state))
     jobs.register("update_download", _update_download)
+    jobs.register("target_test_run", _make_target_test_run(state))
+    jobs.register("target_test_debug", _make_target_test_debug(state))
 
 
 # ----------------------------------------------------------------------
@@ -893,3 +895,20 @@ def _update_download(params: dict, progress: Callable[..., None],
         return updates.download_and_stage(progress, cancel, tag=params.get("tag") or None)
     except updates.UpdateError as exc:
         raise RuntimeError(str(exc)) from None
+
+
+# ----------------------------------------------------------------------
+# Target Tests: run approved/draft tests on the ECU, or debug one.
+# ----------------------------------------------------------------------
+def _make_target_test_run(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        from . import target_session
+        return target_session.run_job(state, params, progress, cancel, _worker_db)
+    return handler
+
+
+def _make_target_test_debug(state: AppState):
+    def handler(params: dict, progress: Callable[..., None], cancel: threading.Event):
+        from . import target_session
+        return target_session.debug_job(state, params, progress, cancel)
+    return handler

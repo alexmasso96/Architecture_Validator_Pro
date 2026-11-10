@@ -6979,3 +6979,118 @@ a.code-ref code { color: var(--accent); }
   border-top: 1px solid var(--border);
   padding: 12px 18px;
 }
+
+/* ===========================================================================
+   Target Tests — tests on the real ECU: list | script | AI
+   =========================================================================== */
+.tt-root { flex: 1 1 auto; display: grid; grid-template-columns: 270px minmax(0, 1fr) 380px; min-height: 0; background: var(--v-bg); }
+.tt-root > div { min-height: 0; }
+.tt-spacer { flex: 1 1 auto; }
+.tt-muted { color: var(--muted); font-size: 11px; }
+.tt-pane-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-weight: 600; font-size: 12px; border-bottom: 1px solid var(--border); background: var(--bar); }
+/* The view's own controls follow the theme (a bare button or field keeps the
+   browser's light look, which is unreadable in dark mode). Scoped to the three
+   panes' chrome so the script editor's own widgets aren't touched. */
+.tt-list button, .tt-toolbar button, .tt-proposal-bar button, .tt-bottom button, .tt-chat button { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); cursor: pointer; }
+.tt-list button:hover:not(:disabled), .tt-toolbar button:hover:not(:disabled), .tt-proposal-bar button:hover:not(:disabled), .tt-bottom button:hover:not(:disabled), .tt-chat button:hover:not(:disabled) { background: var(--hover); }
+.tt-root button:disabled { opacity: 0.45; cursor: default; }
+.tt-root button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.tt-list input:not([type="checkbox"]), .tt-list select, .tt-toolbar select, .tt-bottom input, .tt-chat select, .tt-chat textarea { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.tt-root button.tt-mini { padding: 1px 7px; font-size: 12px; }
+.tt-badge { display: inline-block; padding: 0 6px; margin-left: 4px; border-radius: 8px; font-size: 10.5px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+.tt-badge.ok { background: var(--v-ok-bg); color: var(--v-ok); }
+.tt-badge.err { background: var(--v-err-bg); color: var(--v-err); }
+.tt-badge.warn { background: var(--v-warn-bg); color: var(--v-warn); }
+.tt-badge.purple { background: var(--v-purple-bg); color: var(--v-purple); }
+.tt-badge.grey { background: var(--tone-grey-bg); color: var(--muted); }
+.tt-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--grey); flex: none; }
+.tt-dot.ok { background: var(--green); }
+.tt-dot.err { background: var(--red); }
+.tt-dot.warn { background: var(--yellow); }
+
+/* left */
+.tt-list { display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--v-panel); }
+.tt-filter { margin: 6px 8px; }
+.tt-items { flex: 1 1 auto; overflow-y: auto; }
+.tt-empty { padding: 12px; color: var(--muted); font-size: 12px; }
+.tt-item { display: flex; gap: 6px; align-items: flex-start; padding: 6px 8px; border-bottom: 1px solid var(--sep); cursor: pointer; font-size: 12px; }
+.tt-item:hover { background: var(--hover); }
+.tt-item.sel { background: var(--v-raised); box-shadow: inset 3px 0 0 var(--accent); }
+.tt-item-main { min-width: 0; flex: 1 1 auto; }
+.tt-item-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tt-item-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-top: 2px; }
+.tt-suite-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 5px; padding: 4px 8px 4px 6px; font-size: 12px; font-weight: 600; background: var(--bar); border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; }
+.tt-suite-head.empty .tt-suite-name { color: var(--muted); font-weight: 500; }
+.tt-suite-caret { width: 10px; flex: none; color: var(--muted); font-size: 10px; }
+.tt-suite-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tt-suite-count { flex: none; color: var(--muted); font-size: 11px; font-weight: 500; }
+.tt-suite-sum { padding: 4px 8px 4px 4px; border-bottom: 1px solid var(--sep); }
+.tt-suite .tt-item { padding-left: 22px; }
+.tt-suite-pick { flex: 0 1 150px; min-width: 70px; font-size: 12px; }
+.tt-list-foot { display: flex; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); }
+.tt-list-foot button { flex: 1 1 auto; font-size: 11.5px; }
+.tt-conn { border-top: 1px solid var(--border); font-size: 12px; }
+.tt-conn-head { display: flex; align-items: center; gap: 6px; padding: 7px 10px; cursor: pointer; }
+.tt-conn-title { font-weight: 500; }
+.tt-conn-body { display: flex; flex-direction: column; gap: 6px; padding: 0 10px 10px; }
+.tt-conn-body label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); font-size: 11px; }
+.tt-checks { list-style: none; margin: 0; padding: 0; font-size: 11.5px; }
+.tt-checks li { padding: 1px 0; overflow-wrap: anywhere; }
+.tt-checks li.ok { color: var(--v-ok); }
+.tt-checks li.err { color: var(--v-err); }
+.tt-checks li.grey { color: var(--muted); }
+
+/* middle */
+.tt-main { display: flex; flex-direction: column; min-width: 0; }
+.tt-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bar); font-size: 12px; }
+.tt-toolbar button { flex: none; white-space: nowrap; }
+.tt-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tt-rationale { padding: 6px 10px; font-size: 12px; background: var(--v-purple-bg); border-bottom: 1px solid var(--border); }
+.tt-proposal { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; }
+.tt-proposal-bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: var(--v-warn-bg); font-size: 12px; border-bottom: 1px solid var(--border); }
+.tt-editor { flex: 1 1 0; min-height: 160px; }
+.tt-issues { padding: 4px 10px; font-size: 11.5px; color: var(--v-warn); background: var(--v-warn-bg); border-top: 1px solid var(--border); max-height: 80px; overflow-y: auto; }
+.tt-bp-glyph { background: var(--red); border-radius: 50%; width: 10px !important; height: 10px !important; margin-left: 5px; margin-top: 4px; }
+.tt-paused-glyph::before { content: "➜"; color: var(--yellow); font-weight: 700; margin-left: 3px; }
+.tt-paused-line { background: var(--v-warn-bg); }
+.tt-issue-line { background: var(--v-err-bg); }
+.tt-bottom { flex: 0 0 34%; display: flex; flex-direction: column; min-height: 140px; border-top: 1px solid var(--border); background: var(--v-panel); }
+.tt-tabs { display: flex; align-items: center; gap: 2px; padding: 3px 8px; border-bottom: 1px solid var(--sep); }
+.tt-tabs button { border: none; background: none; padding: 3px 10px; font-size: 12px; border-radius: 5px; }
+.tt-tabs button.active { background: var(--v-raised); font-weight: 600; }
+.tt-bottom-body { flex: 1 1 auto; overflow: auto; padding: 6px 10px; font-size: 12px; }
+.tt-result-head { margin-bottom: 6px; }
+.tt-table { width: 100%; border-collapse: collapse; font-size: 11.5px; margin-bottom: 8px; }
+.tt-table th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 6px; border-bottom: 1px solid var(--border); }
+.tt-table td { padding: 3px 6px; border-bottom: 1px solid var(--sep); vertical-align: top; overflow-wrap: anywhere; }
+.tt-table tr { cursor: default; }
+.tt-table tr.ok td:last-child { color: var(--v-ok); }
+.tt-table tr.err td:last-child { color: var(--v-err); }
+.tt-table code { font-family: var(--v-mono); font-size: 11px; }
+.tt-sub { font-weight: 600; font-size: 11px; color: var(--muted); margin: 6px 0 3px; text-transform: uppercase; letter-spacing: 0.03em; }
+.tt-debug-bar { display: flex; align-items: center; gap: 6px; }
+.tt-debug-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.tt-stack { margin: 0; padding-left: 18px; font-family: var(--v-mono); font-size: 11.5px; }
+.tt-stack li:first-child { font-weight: 700; }
+.tt-watch { display: flex; align-items: center; gap: 6px; font-family: var(--v-mono); font-size: 11.5px; }
+.tt-debug-log { margin-top: 8px; color: var(--muted); font-size: 11px; }
+
+/* right */
+.tt-chat { display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--v-panel); min-width: 0; }
+.tt-chat .tt-pane-head select { max-width: 220px; }
+.tt-writes { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 11.5px; color: var(--muted); border-bottom: 1px solid var(--sep); }
+.tt-writes.on { color: var(--v-warn); background: var(--v-warn-bg); font-weight: 500; }
+.tt-chat-msgs { flex: 1 1 auto; overflow-y: auto; padding: 8px 10px; font-size: 12.5px; display: flex; flex-direction: column; gap: 8px; }
+.tt-chat-empty { color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+.tt-suggest { text-align: left; font-size: 12px; white-space: normal; }
+.tt-msg { padding: 6px 8px; border-radius: 8px; overflow-wrap: anywhere; }
+.tt-msg.user { background: var(--v-raised); align-self: flex-end; max-width: 90%; }
+.tt-msg.assistant .md p { margin: 4px 0; }
+.tt-msg .md pre { overflow-x: auto; font-size: 11px; }
+.tt-tools { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+.tt-tool { font-family: var(--v-mono); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tt-tool.err { color: var(--v-err); }
+.tt-err { color: var(--v-err); font-size: 12px; }
+.tt-thinking { padding: 0 8px; }
+.tt-chat-input { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--border); align-items: flex-end; }
+.tt-chat-input textarea { flex: 1 1 auto; min-height: 54px; max-height: 160px; resize: vertical; font: inherit; font-size: 12.5px; }

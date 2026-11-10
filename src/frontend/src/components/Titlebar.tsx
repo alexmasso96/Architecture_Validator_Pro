@@ -7,6 +7,7 @@ export const TABS = [
   "AI Chat",
   "Code Map",
   "Test Injection",
+  "Target Tests",
   "Change Log",
 ] as const;
 export type Tab = (typeof TABS)[number];

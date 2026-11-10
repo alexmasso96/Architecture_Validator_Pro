@@ -26,6 +26,7 @@ If you're new, read it top to bottom. If you're looking for one thing, jump stra
 | 12 | [Test Builds](12-test-builds.md) | Building test code overnight and switching it into the folder your debugger uses |
 | 13 | [Shared Projects & Sync](13-shared-projects-and-sync.md) | Sharing a project on a NAS with the Sync Worker |
 | 14 | [Pipeline CLI](14-pipeline-cli.md) | Running the full validation in a GitLab or GitHub build pipeline |
+| 15 | [Target Tests](15-target-tests.md) | AI-written, user-approved architecture tests that run on the real ECU through winIDEA |
 
 ---
 
@@ -35,7 +36,7 @@ Embedded teams maintain an architecture — ports, interfaces, operations — th
 
 ## How the app is laid out
 
-The window has a **title bar** along the top with the document name, a **segmented control** to switch between the seven views, toolbar icons for **Import** and **Columns**, a **Save** button, and a ⚙ gear for **Preferences**. The seven views are: **Workspace**, **Test Design**, **AI Generation**, **AI Chat**, **Code Map**, **Test Injection**, and **Change Log**.
+The window has a **title bar** along the top with the document name, a **segmented control** to switch between the eight views, toolbar icons for **Import** and **Columns**, a **Save** button, and a ⚙ gear for **Preferences**. The eight views are: **Workspace**, **Test Design**, **AI Generation**, **AI Chat**, **Code Map**, **Test Injection**, **Target Tests**, and **Change Log**.
 
 ---
 

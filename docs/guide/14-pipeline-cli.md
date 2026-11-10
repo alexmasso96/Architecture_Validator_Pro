@@ -1,6 +1,6 @@
 # 14. Pipeline CLI
 
-[← Shared Projects & Sync](13-shared-projects-and-sync.md) · **Pipeline CLI** · [Guide home](README.md)
+[← Shared Projects & Sync](13-shared-projects-and-sync.md) · **Pipeline CLI** · [Next: Target Tests →](15-target-tests.md)
 
 ---
 

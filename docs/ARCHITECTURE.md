@@ -8,7 +8,7 @@ Architecture Validator Pro is a cross-platform **desktop application** for valid
 
 The app is built as a **React single-page app running inside a native [pywebview](https://pywebview.flowrl.com/) window**, talking to a **local FastAPI worker** over `http://127.0.0.1`. The worker owns all project state and reuses a Qt-free **pure-logic layer** (`Application_Logic/Logic_*`) plus a native **Rust ELF parser**. A project is persisted as a **single SQLite file** (`MyProject.arch`) with selective per-block content encryption.
 
-The UI is organised as a seven-view workbench:
+The UI is organised as an eight-view workbench:
 
 | View | Purpose |
 | :--- | :--- |
@@ -19,6 +19,7 @@ The UI is organised as a seven-view workbench:
 | **Code Map** | Visual call-graph + read-only IDE joining ELF facts to C source |
 | **Change Log** | Side-by-side release diff with an optional AI summary |
 | **Test Injection** | Splice test code into production source without editing the originals |
+| **Target Tests** | AI-written, user-approved architecture tests that run on the real ECU through winIDEA |
 
 > This is the **v3** architecture. Earlier versions (v2.x) were a PyQt6 desktop app driven by a `QTableWidget` and a god-object `main_window`. That UI layer and the Qt-coupled controllers have been removed; the business logic that survived was already extracted into the Qt-free `Application_Logic/` package, which the FastAPI worker now drives directly.
 
@@ -151,6 +152,7 @@ ELF data is parsed **once**, flushed to SQLite keyed by `elf_hash`, and then ser
 | `table_import.py` | Import Profiles: `/api/import/sample` (one-read in-memory sample sessions), `preview` + `preview/all` (pure in-memory), `profiles` CRUD (app-data JSON + built-in interface export profiles), and the two-step `diff` → `commit` import. |
 | `injection.py` | `/api/injection/*` — test projects, hooks (injections), files, build, export. |
 | `testdesign.py` | Test Case Design templates + preview + export. |
+| `target_tests.py` | `/api/target-tests` — tests, versions, results, approval actions (approve, revert, accept/reject an AI proposal), script validation, the per-user connection settings and check, and starting `target_test_run` / `target_test_debug` jobs. `backend/target_session.py` holds the one-user-at-a-time target lease, the AI chat's live connection and the two jobs. |
 | `fs.py` | Native folder/file picker bridge. |
 | `prefs.py` | App-data preference/recents store (mirrors UI prefs server-side). |
 | `jobs.py` | Generic job submit/poll/cancel + `/api/events` SSE. |
@@ -175,6 +177,11 @@ Qt-free modules that hold the actual business logic. The worker (and the test su
 - `Logic_Release_Results.py` — per-release validation result derivation (Pass / Block / No Result / Not Run).
 - `Logic_CallTree_Test.py` — call-tree Test columns: bindings (`{column: {release_id, match_col, strict}}` in project meta `calltree_test_columns`, reconciled on every layout save so renames are followed and dangling bindings rejected), the merged caller index (code-map edges ∪ the release's `.o` relocation/inline edges), the verdict rules (Passed / Entry point / Failed / Not Matched / No Data / No Result), the parameter-port check for Variable Match columns (direction from the search column's title, following the function's callees, with `.o` data references as evidence that can't show a direction), and manual overrides that survive re-runs. Results are recorded in the row cells with their evidence and the code-map `built_at` stamp (stale detection). Run by the `run_calltree_tests` job; per-model status at `GET /api/models/{id}/calltree-tests`.
 - `Logic_Release_Source_Picker.py` — shared release-dropdown helper for the source pickers (every "pick a folder" became a release dropdown).
+
+**Target Tests (real ECU)**
+- `Logic_WinIdea_Bridge.py` — `TargetBackend`, the one interface to a debugger. `WinIdeaBridge` wraps winIDEA's `isystem.connect` SDK, loading it from the selected winIDEA installation first so the SDK matches winIDEA. Version differences stay inside the class, and the connection check lives here too. `SimulatedTarget` is a small program model (functions, variables, `if` branches) for the tests and for trying the view without an ECU.
+- `Logic_Target_Tests.py` — test scripts written against the `target_tests` API (restricted Python, checked against an AST allow-list), the `target`/`expect` runtime that records every step as evidence, and `run_in_process`. That function opens its own connection in a child process, runs the connection check first, resets before every test, applies a per-test timeout and relays debug pauses and commands over a pipe. `Approvals` holds the approval rules: the AI's tests and changes are drafts, a manual edit is approved, and accepting an AI proposal and approving it are two steps. Tests are grouped into test suites, one per architecture model (`target_tests.model_id`): `suites` lists them and `resolve_suite` picks a new test's suite from the model that was named, then the model of the test's port, then the model the user is working on.
+- `Logic_AI_Target_Tools.py` — the chat's live-target tools: breakpoints and data breakpoints, run with a timeout, step, read (also in a caller's frame), symbol info, registers, memory, an image check, a write and a function call gated by the user's "Allow memory writes" switch, flashing gated by "Allow flashing", trying a script, saving a draft and proposing a change. Also the system prompt for the explore → change → confirm loop. Added to a chat with `live_target`.
 
 **Source, code map, change log**
 - `Logic_Source_Store.py` — source-provider abstraction (`FilesystemSourceProvider` for a local folder; a DB-backed provider for release-keyed source) so parsing/diff/AI context are decoupled from where source bytes live.
@@ -211,7 +218,7 @@ A Vite + React + TypeScript SPA; Monaco for code editing.
 
 | Area | Contents |
 |------|----------|
-| `views/` | The 7 workbench views: `Workspace`, `TestDesign`, `AIGeneration`, `AIChat`, `CodeMap`, `ChangeLog`, `TestCodeInjection`. |
+| `views/` | The 8 workbench views: `Workspace`, `TestDesign`, `AIGeneration`, `AIChat`, `CodeMap`, `ChangeLog`, `TestCodeInjection` (+ `TestBuilds`), `TargetTests`. |
 | `components/` | Shared UI — `Titlebar`, `Sidebar`, `PortsTable`, `Inspector`, `Preferences`, import/column/release dialogs (incl. `ImportProfilesSettings` and `ProfileImportDialog`), and `tutorial/` (the in-app interactive guides + `TutorialShell`). |
 | `api/` | The typed `/api/*` client; attaches the bearer token and exposes the SSE subscription. |
 | `native.ts` | Reads the session token from the URL fragment (`#token=…`) or `VITE_API_TOKEN`, and bridges native file pickers. |
@@ -274,6 +281,7 @@ MyProject.arch.elf_caches/    # exported ELF JSON caches for fast re-import
 | `ai_model_mindmaps` / `ai_code_diffs` / `ai_release_maps` | AI mind maps, computed source diffs, per-release code maps |
 | `test_projects` / `test_project_files` / `test_code_injections` | Test Injection projects, helper files, and hooks |
 | `test_case_design` | Test Case Design templates |
+| `target_tests` / `target_test_versions` / `target_test_results` | Target Tests: each test's metadata, approved version and pending AI proposal; every version's script; every run with its verdict and evidence |
 | `history` | Release-scoped, HMAC-chained change log |
 
 ---
