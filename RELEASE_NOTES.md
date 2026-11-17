@@ -1,3 +1,22 @@
+# v3.5.0-beta.2 — Test Builds use the project's paths
+
+This beta fixes what came up when Test Builds was tried on a real release. It has been tested on macOS only, not yet on Windows with a mapped drive.
+
+## 🏗️ Test Builds: set the paths once
+- **Builds use the project's paths.** Set the source folder, build folder, build output folder, terminal, build command and clean command once in **Preferences → Paths**. Every build uses them, and follows them when they change.
+- **New in Preferences → Paths:** **Build output folder** and **Clean command**.
+- **A build only keeps what's different.** An empty field shows the project's value. A field you fill is marked **this build only**, and **Use project** empties it again.
+- **Builds made with beta.1 follow the project's paths too.** Settings that only repeated the project's are emptied the first time you open the project for editing. Settings you changed are kept.
+- **The check before a run says when the build folder can't be found,** and where each missing setting is set.
+
+## 🐞 Fixed
+- **Fixed: the in-app file browser replaced a mapped drive with the folder behind it.** A folder chosen on a mapped drive now keeps its drive letter.
+- **Fixed: Add build stayed disabled.** The test project is now chosen for you, and the button says what's missing when it's disabled.
+- **Fixed: tracked files seemed to disappear after visiting Test Code.** The list you were looking at stays shown, and the list menu shows how many entries each list holds. Opening a build's settings no longer switches the list.
+- **Tracked files are kept relative to the right folder:** files in the build output folder relative to it, and files in the source folder as **Source**.
+- **Fixed: Build in Test Code seemed to do nothing.** When a build can't start, the reason is now shown in the build console. Build runs your command without hooks; Test Builds applies them.
+- **The build console no longer saves the project on every key you type,** only once you stop typing.
+
 # v3.5.0-beta.1 — Target Tests on the ECU, in-app updates, any project file in a test build
 
 This is a beta version. Target Tests has been run on the built-in simulator only, not yet on an ECU, and installing an update in place has not been tried on a packaged build. Install this beta by hand from the files below; later versions can be installed from inside the app.
