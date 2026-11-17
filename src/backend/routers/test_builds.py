@@ -79,11 +79,14 @@ def list_builds(release_id: Optional[int] = None,
     def go():
         db = state.require_open()
         rid = _selected_release(state, release_id)
+        project = tb.project_build_settings(db)
         builds = []
         for b in db.list_test_builds(rid):
+            effective = tb.effective_build(db, b, project)
             builds.append({**b, "files": len(db.get_build_manifest(b["id"])),
-                           "size": db.get_build_manifest_size(b["id"])})
-        return {"release_id": rid, "builds": builds}
+                           "size": db.get_build_manifest_size(b["id"]),
+                           "effective": {k: effective[k] for k in tb.BUILD_SETTINGS}})
+        return {"release_id": rid, "builds": builds, "project": project}
     return _guard(go)
 
 
@@ -100,8 +103,7 @@ class BuildBody(BaseModel):
     output_dir: Optional[str] = None
 
 
-_SETTINGS = ("build_command", "build_cwd", "clean_command", "terminal", "wsl_distro",
-             "source_dir", "output_dir")
+_SETTINGS = tb.BUILD_SETTINGS
 
 
 def _settings(body: BuildBody) -> dict:
@@ -126,8 +128,8 @@ def create_build(body: BuildBody, state: AppState = Depends(get_state),
             raise ProjectError(f"This release already has a test build called {name}.")
         if not any(p["id"] == body.test_project_id for p in db.list_test_projects()):
             raise ProjectError("Choose a test project for this build.")
-        settings = {**tb.build_defaults(db), **_settings(body)}
-        build_id = db.create_test_build(rid, name, body.test_project_id, **settings)
+        # Settings left empty follow the project's (Preferences → Paths).
+        build_id = db.create_test_build(rid, name, body.test_project_id, **_settings(body))
         bus.publish("db-changed", {"reason": "test-build-created", "id": build_id})
         return db.get_test_build(build_id)
     return _guard(go)
@@ -187,7 +189,8 @@ def list_artifacts(test_build_id: Optional[int] = None,
     def go():
         db = state.require_open()
         return {"test_build_id": test_build_id,
-                "artifacts": db.list_tracked_artifacts(test_build_id)}
+                "artifacts": db.list_tracked_artifacts(test_build_id),
+                "counts": db.count_tracked_artifacts()}
     return _guard(go)
 
 

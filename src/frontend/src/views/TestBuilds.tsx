@@ -9,6 +9,7 @@ import type {
   PreflightReport,
   TerminalKind,
   TestBuild,
+  TestBuildSettings,
   TestProject,
   TrackedArtifact,
 } from "../api/types";
@@ -20,11 +21,74 @@ import { FolderPicker } from "../components/FolderPicker";
 // the release selected in the table.
 
 const ROLES = ["Flash", "Symbols", "Source", "Objects"];
+const SETTING_FIELDS = [
+  "build_command",
+  "build_cwd",
+  "clean_command",
+  "terminal",
+  "wsl_distro",
+  "source_dir",
+  "output_dir",
+] as const;
+
+function fromProject(value: string | undefined): string {
+  return value ? `Project: ${value}` : "Not set in Preferences → Paths";
+}
+
+// A setting's label, marked when the build sets its own value.
+function SettingLabel({
+  label,
+  own,
+  canEdit,
+  onReset,
+}: {
+  label: string;
+  own: boolean;
+  canEdit: boolean;
+  onReset: () => void;
+}) {
+  return (
+    <span className="tb-setting-label">
+      {label}
+      {own && (
+        <>
+          <span className="tb-own"> · this build only</span>
+          <button
+            type="button"
+            className="tb-link"
+            disabled={!canEdit}
+            onClick={(e) => {
+              e.preventDefault();
+              onReset();
+            }}
+          >
+            Use project
+          </button>
+        </>
+      )}
+    </span>
+  );
+}
 const TERMINALS: TerminalKind[] = ["bash", "cmd", "powershell", "wsl"];
 const MAX_LOG_LINES = 2000;
 const ARTIFACT_EXTS = [
   ".hex", ".s19", ".srec", ".mot", ".bin", ".elf", ".out", ".abs", ".axf", ".map", ".sym", ".c", ".h",
 ];
+
+// The tracked-files list being shown. Kept outside the component so it survives
+// switching to Test Code and back, which unmounts this view.
+let shownArtifactScope: number | null = null;
+
+// Inside ``base``: the path relative to it, else null.
+function relativeTo(base: string, path: string): string | null {
+  const trimmed = base.replace(/[/\\]+$/, "");
+  if (!trimmed) return null;
+  const sep = path.charAt(trimmed.length);
+  if (!path.toLowerCase().startsWith(trimmed.toLowerCase()) || (sep !== "/" && sep !== "\\")) {
+    return null;
+  }
+  return path.slice(trimmed.length).replace(/^[/\\]+/, "").replace(/\\/g, "/");
+}
 
 type Picking =
   | { what: "mapped" }
@@ -70,8 +134,10 @@ export function TestBuilds({
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState<Partial<TestBuild>>({});
-  const [artifactScope, setArtifactScope] = useState<number | null>(null);
+  const [artifactScope, setArtifactScopeState] = useState<number | null>(shownArtifactScope);
   const [artifacts, setArtifacts] = useState<TrackedArtifact[]>([]);
+  const [artifactCounts, setArtifactCounts] = useState<Record<string, number>>({});
+  const [project, setProject] = useState<TestBuildSettings | null>(null);
   const [newName, setNewName] = useState("");
   const [newProject, setNewProject] = useState<number | null>(null);
   const [mapTarget, setMapTarget] = useState<number | null>(null);
@@ -91,10 +157,20 @@ export function TestBuilds({
 
   const reload = useCallback(async () => {
     try {
-      const listed = await api.get<{ release_id: number; builds: TestBuild[] }>("/test-builds");
+      const listed = await api.get<{
+        release_id: number;
+        builds: TestBuild[];
+        project: TestBuildSettings;
+      }>("/test-builds");
       setBuilds(listed.builds);
       setReleaseId(listed.release_id);
-      setProjects((await api.get<{ projects: TestProject[] }>("/injection/projects")).projects);
+      setProject(listed.project);
+      const loaded = (await api.get<{ projects: TestProject[] }>("/injection/projects")).projects;
+      setProjects(loaded);
+      // Preselect a test project: an unchosen dropdown kept "Add build" disabled.
+      setNewProject((cur) =>
+        cur != null && loaded.some((p) => p.id === cur) ? cur : (loaded[0]?.id ?? null),
+      );
       setLock(await api.get<CleanLockStatus>("/test-builds/clean-lock/status"));
       setMapped(await api.get<MappedStatus>("/test-builds/mapped/status"));
       const history = await api.get<{ runs: BuildRun[]; unfinished: BuildRun | null }>(
@@ -113,17 +189,30 @@ export function TestBuilds({
     reload();
   }, [reload]);
 
+  function setArtifactScope(scope: number | null) {
+    shownArtifactScope = scope;
+    setArtifactScopeState(scope);
+  }
+
   const loadArtifacts = useCallback(async (scope: number | null) => {
     const query = scope == null ? "" : `?test_build_id=${scope}`;
-    const r = await api.get<{ artifacts: TrackedArtifact[] }>(
-      `/test-builds/artifacts/list${query}`,
-    );
+    const r = await api.get<{
+      artifacts: TrackedArtifact[];
+      counts: Record<string, number>;
+    }>(`/test-builds/artifacts/list${query}`);
     setArtifacts(r.artifacts);
+    setArtifactCounts(r.counts ?? {});
   }, []);
 
   useEffect(() => {
     loadArtifacts(artifactScope).catch(() => setArtifacts([]));
   }, [artifactScope, loadArtifacts]);
+
+  useEffect(() => {
+    if (releaseId != null && artifactScope != null && !builds.some((b) => b.id === artifactScope)) {
+      setArtifactScope(null);
+    }
+  }, [builds, releaseId, artifactScope]);
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -188,9 +277,10 @@ export function TestBuilds({
   }
 
   function startEdit(build: TestBuild) {
+    // The tracked-files list stays where it is: switching it here quietly showed
+    // another list, and entries added to it seemed lost after leaving the page.
     setEditing(build.id);
     setDraft(build);
-    setArtifactScope(build.id);
   }
 
   async function saveDraft() {
@@ -198,13 +288,7 @@ export function TestBuilds({
     await act(async () => {
       await api.patch(`/test-builds/${editing}`, {
         name: draft.name,
-        build_command: draft.build_command,
-        build_cwd: draft.build_cwd,
-        clean_command: draft.clean_command,
-        terminal: draft.terminal,
-        wsl_distro: draft.wsl_distro,
-        source_dir: draft.source_dir,
-        output_dir: draft.output_dir,
+        ...Object.fromEntries(SETTING_FIELDS.map((f) => [f, draft[f] ?? ""])),
       });
       toast("Saved.");
     });
@@ -244,6 +328,7 @@ export function TestBuilds({
         artifacts: next,
       }),
     );
+    await loadArtifacts(artifactScope).catch(() => {});
   }
 
   function patchArtifact(index: number, patch: Partial<TrackedArtifact>) {
@@ -377,18 +462,20 @@ export function TestBuilds({
           : api.post("/jobs/import_objects", { release_id: releaseId, obj_dir: path }),
       );
     } else if (pick.what === "artifact") {
-      const owner = builds.find((b) => b.id === artifactScope);
-      const base = owner?.output_dir;
-      const relative =
-        base && path.startsWith(base) ? path.slice(base.length).replace(/^[/\\]+/, "") : path;
+      // Output files are kept relative to the build output folder, and source
+      // files relative to the source folder, so the list works on every PC.
+      const settings = builds.find((b) => b.id === artifactScope)?.effective ?? project;
+      const inSource = relativeTo(settings?.source_dir ?? "", path);
+      const inOutput = relativeTo(settings?.output_dir ?? "", path);
+      const isSource = inSource != null && inOutput == null;
       await saveArtifacts([
         ...artifacts,
         {
-          path: relative,
+          path: (isSource ? inSource : inOutput) ?? path,
           is_folder: pick.isFolder,
           include_patterns: pick.isFolder ? "**/*" : "",
           exclude_patterns: "",
-          role: "Flash",
+          role: isSource ? "Source" : "Flash",
         },
       ]);
     }
@@ -397,6 +484,15 @@ export function TestBuilds({
   const main = builds.find((b) => b.is_main);
   const tests = builds.filter((b) => !b.is_main);
   const editingBuild = builds.find((b) => b.id === editing);
+  const addBuildBlocker = !canEdit
+    ? "Open the project for editing to add builds."
+    : projects.length === 0
+      ? "Create a test project under Test Code first."
+      : !newName.trim()
+        ? "Type a name for the build."
+        : newProject == null
+          ? "Choose a test project."
+          : null;
   const blockingProblems = (report?.problems ?? []).filter(
     (p) => p.test_build_id == null || !dropped.has(p.test_build_id),
   );
@@ -578,7 +674,9 @@ export function TestBuilds({
             disabled={!canEdit}
             onChange={(e) => setNewProject(Number(e.target.value) || null)}
           >
-            <option value="">Test project…</option>
+            <option value="">
+              {projects.length ? "Test project…" : "No test projects yet"}
+            </option>
             {projects.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -587,7 +685,8 @@ export function TestBuilds({
           </select>
           <button
             className="tci-mini-btn"
-            disabled={!canEdit || !newName.trim() || newProject == null}
+            disabled={addBuildBlocker != null}
+            title={addBuildBlocker ?? "Add this build to the selected release"}
             onClick={createBuild}
           >
             Add build
@@ -615,6 +714,10 @@ export function TestBuilds({
       {editingBuild && (
         <section className="tb-card">
           <div className="tci-panel-head">{editingBuild.name} settings</div>
+          <div className="tb-hint">
+            Empty fields use the project&apos;s settings from Preferences → Paths, and follow
+            them when they change. Fill a field only where this build differs.
+          </div>
           <div className="tb-form">
             {!editingBuild.is_main && (
               <label>
@@ -626,31 +729,42 @@ export function TestBuilds({
                 />
               </label>
             )}
+            {(
+              [
+                ["build_command", "Build command"],
+                ["clean_command", "Clean command"],
+              ] as const
+            ).map(([field, label]) => (
+              <label key={field}>
+                <SettingLabel
+                  label={label}
+                  own={!!draft[field]}
+                  canEdit={canEdit}
+                  onReset={() => setDraft({ ...draft, [field]: "" })}
+                />
+                <input
+                  value={draft[field] ?? ""}
+                  placeholder={fromProject(project?.[field])}
+                  disabled={!canEdit}
+                  onChange={(e) => setDraft({ ...draft, [field]: e.target.value })}
+                />
+              </label>
+            ))}
             <label>
-              Build command
-              <input
-                value={draft.build_command ?? ""}
-                disabled={!canEdit}
-                onChange={(e) => setDraft({ ...draft, build_command: e.target.value })}
+              <SettingLabel
+                label="Terminal"
+                own={!!draft.terminal}
+                canEdit={canEdit}
+                onReset={() => setDraft({ ...draft, terminal: "" })}
               />
-            </label>
-            <label>
-              Clean command
-              <input
-                value={draft.clean_command ?? ""}
-                disabled={!canEdit}
-                onChange={(e) => setDraft({ ...draft, clean_command: e.target.value })}
-              />
-            </label>
-            <label>
-              Terminal
               <select
-                value={draft.terminal ?? "bash"}
+                value={draft.terminal ?? ""}
                 disabled={!canEdit}
                 onChange={(e) =>
-                  setDraft({ ...draft, terminal: e.target.value as TerminalKind })
+                  setDraft({ ...draft, terminal: e.target.value as TerminalKind | "" })
                 }
               >
+                <option value="">Project&apos;s ({project?.terminal ?? "default"})</option>
                 {TERMINALS.map((t) => (
                   <option key={t}>{t}</option>
                 ))}
@@ -658,16 +772,22 @@ export function TestBuilds({
             </label>
             {(
               [
-                ["build_cwd", "Working directory"],
+                ["build_cwd", "Build folder"],
                 ["source_dir", "Source folder"],
                 ["output_dir", "Build output folder"],
               ] as const
             ).map(([field, label]) => (
               <label key={field}>
-                {label}
+                <SettingLabel
+                  label={label}
+                  own={!!draft[field]}
+                  canEdit={canEdit}
+                  onReset={() => setDraft({ ...draft, [field]: "" })}
+                />
                 <span className="tb-pickfield">
                   <input
-                    value={(draft[field] as string) ?? ""}
+                    value={draft[field] ?? ""}
+                    placeholder={fromProject(project?.[field])}
                     disabled={!canEdit}
                     onChange={(e) => setDraft({ ...draft, [field]: e.target.value })}
                   />
@@ -686,6 +806,16 @@ export function TestBuilds({
             <button className="tci-mini-btn" disabled={!canEdit} onClick={saveDraft}>
               Save settings
             </button>
+            <button
+              className="tci-mini-btn"
+              disabled={!canEdit || !SETTING_FIELDS.some((f) => draft[f])}
+              title="Empty every field, so this build follows Preferences → Paths"
+              onClick={() =>
+                setDraft({ ...draft, ...Object.fromEntries(SETTING_FIELDS.map((f) => [f, ""])) })
+              }
+            >
+              Use project settings
+            </button>
           </div>
         </section>
       )}
@@ -697,18 +827,23 @@ export function TestBuilds({
             value={artifactScope ?? ""}
             onChange={(e) => setArtifactScope(Number(e.target.value) || null)}
           >
-            <option value="">Project-wide list</option>
+            <option value="">Project-wide list ({artifactCounts.project ?? 0})</option>
             {builds.map((b) => (
               <option key={b.id} value={b.id}>
-                {b.name} only
+                {b.name} only ({artifactCounts[String(b.id)] ?? 0})
               </option>
             ))}
           </select>
           <span className="tb-hint">
-            A build with its own list uses only that list. Paths are relative to the build
-            output folder.
+            Builds without their own list use the project-wide list. Output files are kept
+            relative to the build output folder, source files to the source folder.
           </span>
         </div>
+        {artifacts.length === 0 && artifactScope != null && (
+          <div className="tci-empty">
+            This build has no list of its own, so it uses the project-wide list.
+          </div>
+        )}
         {artifacts.length > 0 && (
           <table className="tb-table">
             <thead>

@@ -149,7 +149,7 @@ class _TxnSerializedConnection:
 ENCRYPTED_META_KEYS = frozenset({
     "ai_prompt", "ai_rules_md", "mind_map_prompt", "mind_map_rules",
     "chat_rules", "ai_requirements_context",
-    "inject_build_command", "inject_build_cwd",
+    "inject_build_command", "inject_build_cwd", "inject_clean_command",
 })
 
 # --- Finding F: WAL vs DELETE journal mode -------------------------------
@@ -2166,8 +2166,9 @@ class ProjectDatabase:
                           is_main: bool = False, **fields) -> int:
         with self._conn:
             cur = self._conn.execute(
+                # An empty terminal follows the project's, like every other setting.
                 "INSERT INTO test_builds (release_id, test_project_id, name, is_main, "
-                "created_at) VALUES (?, ?, ?, ?, ?)",
+                "terminal, created_at) VALUES (?, ?, ?, ?, '', ?)",
                 (release_id, test_project_id, name, 1 if is_main else 0,
                  self._now_iso()))
             build_id = cur.lastrowid
@@ -2230,6 +2231,12 @@ class ProjectDatabase:
         if test_build_id is None:
             return self._artifact_rows("test_build_id IS NULL", ())
         return self._artifact_rows("test_build_id=?", (test_build_id,))
+
+    def count_tracked_artifacts(self) -> dict:
+        """Entries per list: ``{"project": n, "<build id>": n}``."""
+        rows = self._conn.execute(
+            "SELECT test_build_id, COUNT(*) FROM tracked_artifacts GROUP BY test_build_id")
+        return {("project" if r[0] is None else str(r[0])): r[1] for r in rows.fetchall()}
 
     def tracked_artifacts_for_build(self, test_build_id: int) -> list:
         return (self.list_tracked_artifacts(test_build_id)

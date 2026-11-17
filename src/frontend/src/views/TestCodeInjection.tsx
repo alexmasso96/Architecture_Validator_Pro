@@ -442,7 +442,11 @@ export function TestCodeInjection({
     build_command: "",
     build_cwd: "",
     source_path: "",
+    clean_command: "",
+    output_path: "",
   });
+  const pendingSettings = useRef<Partial<BuildSettings>>({});
+  const settingsTimer = useRef<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [importing, setImporting] = useState<{
     folder: string;
@@ -1113,9 +1117,16 @@ export function TestCodeInjection({
     }
   }
 
-  async function saveSettings(patch: Partial<BuildSettings>) {
-    const next = { ...settings, ...patch };
-    setSettings(next);
+  // Typed settings are saved once typing pauses: a save per keystroke wrote to
+  // the project, and to a shared project's NAS copy, on every key.
+  async function flushSettings() {
+    if (settingsTimer.current != null) {
+      window.clearTimeout(settingsTimer.current);
+      settingsTimer.current = null;
+    }
+    const patch = pendingSettings.current;
+    pendingSettings.current = {};
+    if (Object.keys(patch).length === 0) return;
     try {
       await api.post("/injection/settings", patch);
     } catch (e) {
@@ -1123,21 +1134,37 @@ export function TestCodeInjection({
     }
   }
 
+  function saveSettings(patch: Partial<BuildSettings>, delay = 0) {
+    setSettings((s) => ({ ...s, ...patch }));
+    pendingSettings.current = { ...pendingSettings.current, ...patch };
+    if (settingsTimer.current != null) window.clearTimeout(settingsTimer.current);
+    settingsTimer.current = window.setTimeout(() => void flushSettings(), delay);
+  }
+
   async function runBuild() {
     if (activeProject == null) return;
+    void flushSettings();
     try {
-      // Sent as shown: a save from the last keystroke may still be on its way.
+      // Sent as shown, so a save still waiting for typing to pause doesn't matter.
       await api.post(`/injection/projects/${activeProject}/build`, {
         command: settings.build_command,
         cwd: settings.build_cwd,
         terminal: settings.terminal,
       });
     } catch (e) {
-      toast(
-        e instanceof ApiError ? e.detail : `Build failed: ${(e as Error).message}`,
-      );
+      const message =
+        e instanceof ApiError ? e.detail : `Build failed: ${(e as Error).message}`;
+      // In the console too: a toast alone made the button seem to do nothing.
+      setConsoleOpen(true);
+      setBuildLogs((p) => [...p, `Build didn't start: ${message}`]);
+      toast(message);
     }
   }
+
+  // Settings still waiting for typing to pause are saved when the view closes.
+  const flushRef = useRef(flushSettings);
+  flushRef.current = flushSettings;
+  useEffect(() => () => void flushRef.current(), []);
 
   async function openTerminal() {
     try {
@@ -1748,7 +1775,7 @@ export function TestCodeInjection({
                 placeholder="distro"
                 value={settings.wsl_distro}
                 disabled={!canEdit}
-                onChange={(e) => saveSettings({ wsl_distro: e.target.value })}
+                onChange={(e) => saveSettings({ wsl_distro: e.target.value }, 700)}
               />
             )}
             <input
@@ -1756,7 +1783,7 @@ export function TestCodeInjection({
               placeholder="build command (e.g. make 0)"
               value={settings.build_command}
               disabled={!canEdit}
-              onChange={(e) => saveSettings({ build_command: e.target.value })}
+              onChange={(e) => saveSettings({ build_command: e.target.value }, 700)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !building && activeProject != null) runBuild();
               }}
@@ -1766,11 +1793,16 @@ export function TestCodeInjection({
               placeholder="build folder"
               value={settings.build_cwd}
               disabled={!canEdit}
-              onChange={(e) => saveSettings({ build_cwd: e.target.value })}
+              onChange={(e) => saveSettings({ build_cwd: e.target.value }, 700)}
             />
             <button
               className="save-btn"
               disabled={building || activeProject == null}
+              title={
+                activeProject == null
+                  ? "Create or select a test project first"
+                  : "Run the build command in the build folder. Hooks aren't applied: use Test Builds for that."
+              }
               onClick={runBuild}
             >
               {building ? "Building…" : "Build"}

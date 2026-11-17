@@ -56,7 +56,7 @@ def test_list_surfaces_dirs_and_arch_only(client, tree):
     assert "Project.arch" in names and names["Project.arch"]["is_arch"]
     assert "notes.txt" not in names   # non-.arch file hidden
     assert ".hidden" not in names     # dotfiles hidden
-    assert body["parent"] == os.path.dirname(os.path.realpath(tree))
+    assert body["parent"] == os.path.dirname(tree)  # as given, links not followed
 
 
 def test_list_defaults_to_home(client):
@@ -102,3 +102,18 @@ def test_list_exts_filter_surfaces_elf_and_json(client):
         names = {e["name"] for e in r.json()["entries"]}
         assert "fw.elf" in names and "cache.json" in names
         assert "Project.arch" not in names   # not in the allow-list
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32",
+                    reason="symlinks need privileges on Windows")
+def test_list_keeps_the_path_it_was_given(client, tree):
+    # A mapped or subst drive on Windows is resolved like a link: the picker
+    # must keep the path the user reached it by, not the folder behind it.
+    link = os.path.join(tree, "mapped")
+    os.symlink(os.path.join(tree, "subdir"), link)
+    r = client.get("/api/fs/list", params={"path": link}, headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["path"] == link
+    inside = client.get("/api/fs/list", params={"path": os.path.join(link, "..", "mapped")},
+                        headers=AUTH)
+    assert inside.json()["path"] == link

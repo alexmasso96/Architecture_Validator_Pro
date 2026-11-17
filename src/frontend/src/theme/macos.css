@@ -6625,6 +6625,12 @@ button.update-pill:hover {
 .tb-form label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); }
 .tb-pickfield { display: flex; gap: 4px; }
 .tb-pickfield input { flex: 1 1 auto; min-width: 0; }
+.tb-card > .tb-hint { padding: 6px 12px 0; }
+.tb-setting-label { display: flex; align-items: baseline; gap: 4px; }
+.tb-own { color: var(--accent); }
+.tb-link { margin-left: auto; padding: 0; border: 0; background: none; color: var(--accent); font-size: 11px; cursor: pointer; }
+.tb-link:hover { text-decoration: underline; }
+.tb-link:disabled { color: var(--muted); cursor: default; text-decoration: none; }
 .tb-log { margin: 0; padding: 8px 12px; max-height: 240px; overflow: auto; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--border); }
 .tb-log.tall { max-height: 60vh; }
 .tb-run { padding: 4px 12px; font-size: 12px; }

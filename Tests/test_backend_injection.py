@@ -483,17 +483,50 @@ def test_build_runs_command_in_the_working_folder(client, tmp_path):
     assert code == 0 and lines[0].startswith("ran-0-in-")
 
 
-def test_new_test_build_starts_from_the_project_settings(client):
+def test_new_test_build_follows_the_project_settings(client):
     pid = _new_project(client)
     client.post("/api/injection/settings",
                 json={"build_command": "make 0", "build_cwd": "/proj/make",
-                      "terminal": "cmd", "source_path": "/proj/src"}, headers=AUTH)
+                      "terminal": "cmd", "source_path": "/proj/src",
+                      "clean_command": "make clean", "output_path": "/proj/out"},
+                headers=AUTH)
     r = client.post("/api/test-builds", json={"name": "Wd", "test_project_id": pid},
                     headers=AUTH)
     assert r.status_code == 200, r.text
     made = r.json()
-    assert (made["build_command"], made["build_cwd"], made["terminal"],
-            made["source_dir"]) == ("make 0", "/proj/make", "cmd", "/proj/src")
+    # Nothing is copied: an empty setting means the project's.
+    assert (made["build_command"], made["terminal"], made["output_dir"]) == ("", "", "")
+
+    def effective():
+        listed = client.get("/api/test-builds", headers=AUTH).json()
+        return next(b for b in listed["builds"] if b["id"] == made["id"])["effective"]
+
+    assert effective() == {"build_command": "make 0", "build_cwd": "/proj/make",
+                           "clean_command": "make clean", "terminal": "cmd",
+                           "wsl_distro": "", "source_dir": "/proj/src",
+                           "output_dir": "/proj/out"}
+    # A later change in Preferences reaches the build, but not what it sets itself.
+    client.patch(f"/api/test-builds/{made['id']}", json={"build_command": "make wd"},
+                 headers=AUTH)
+    client.post("/api/injection/settings", json={"output_path": "/proj/out2"}, headers=AUTH)
+    after = effective()
+    assert (after["build_command"], after["output_dir"]) == ("make wd", "/proj/out2")
+    # Emptying the build's own value goes back to the project's.
+    client.patch(f"/api/test-builds/{made['id']}", json={"build_command": ""}, headers=AUTH)
+    assert effective()["build_command"] == "make 0"
+
+
+def test_tracked_lists_are_counted_per_scope(client):
+    pid = _new_project(client)
+    made = client.post("/api/test-builds", json={"name": "Wd", "test_project_id": pid},
+                       headers=AUTH).json()
+    entry = {"path": "app.hex", "role": "Flash"}
+    client.put("/api/test-builds/artifacts/list", headers=AUTH,
+               json={"test_build_id": None, "artifacts": [entry]})
+    client.put("/api/test-builds/artifacts/list", headers=AUTH,
+               json={"test_build_id": made["id"], "artifacts": [entry, entry]})
+    counts = client.get("/api/test-builds/artifacts/list", headers=AUTH).json()["counts"]
+    assert counts == {"project": 1, str(made["id"]): 2}
 
 
 # ----------------------------------------------------------------------

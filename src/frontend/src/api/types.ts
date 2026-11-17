@@ -412,6 +412,8 @@ export interface BuildSettings {
   build_command: string;
   build_cwd: string;
   source_path: string;
+  clean_command: string;
+  output_path: string;
 }
 
 export interface SourceFunction {
@@ -426,23 +428,29 @@ export interface HelperImportPreview {
 }
 
 // Test Builds (#15) — mirrors backend/routers/test_builds.py.
-export interface TestBuild {
+// A build's settings. Empty means "use the project's" (Preferences → Paths).
+export interface TestBuildSettings {
+  build_command: string;
+  build_cwd: string;
+  clean_command: string;
+  terminal: TerminalKind | "";
+  wsl_distro: string;
+  source_dir: string;
+  output_dir: string;
+}
+
+export interface TestBuild extends TestBuildSettings {
   id: number;
   release_id: number;
   test_project_id: number | null;
   name: string;
   is_main: boolean;
-  build_command: string;
-  build_cwd: string;
-  clean_command: string;
-  terminal: TerminalKind;
-  wsl_distro: string;
-  source_dir: string;
-  output_dir: string;
   capture_status: string;
   captured_at: string;
   files: number;
   size: number;
+  // What the build actually uses: its own settings, else the project's.
+  effective: TestBuildSettings;
 }
 
 export interface TrackedArtifact {

@@ -474,3 +474,75 @@ def test_a_build_says_when_a_changed_files_original_has_changed(fx):
     # A file the test project adds has no original to compare with.
     fx.db.save_test_project_file(tpid, "stub.c", "int s;\n")
     assert len(tb.changed_originals(fx.db, tpid, str(fx.source))) == 1
+
+
+# -- project-wide settings -------------------------------------------------
+def _set_project_settings(fx, **overrides):
+    meta = {"inject_build_command": "make", "inject_build_cwd": str(fx.source),
+            "inject_clean_command": "make clean", "inject_source_path": str(fx.source),
+            "inject_output_path": str(fx.output), "inject_terminal": "bash"}
+    meta.update(overrides)
+    for key, value in meta.items():
+        fx.db.set_meta(key, value)
+
+
+def test_a_build_with_no_settings_of_its_own_runs_with_the_projects(fx):
+    _set_project_settings(fx)
+    build_id = fx.test_build(build_command="", build_cwd="", clean_command="",
+                             source_dir="", output_dir="")
+    cwds = []
+    runner = fake_build(fx)
+
+    def recording(argv, cwd, terminal, on_line, stop):
+        cwds.append((cwd, terminal))
+        return runner(argv, cwd, terminal, on_line, stop)
+
+    assert tb.preflight(fx.db, fx.store, [build_id], overridden_releases=(fx.r1,))[
+        "problems"] == []
+    run_id, _ = fx.run([build_id], recording)
+    assert [i["status"] for i in fx.db.get_build_run(run_id)["items"]] == ["passed", "passed"]
+    assert set(cwds) == {(str(fx.source), "bash")}
+    # Main wasn't given a copy of the settings, so it follows later changes too.
+    main = fx.db.get_main_build(fx.r1)
+    assert (main["build_command"], main["output_dir"], main["terminal"]) == ("", "", "")
+
+
+def test_a_builds_own_setting_wins_over_the_projects(fx):
+    _set_project_settings(fx, inject_build_command="make all")
+    build = fx.db.get_test_build(fx.test_build(build_command="make wd", output_dir=""))
+    effective = tb.effective_build(fx.db, build)
+    assert effective["build_command"] == "make wd"
+    assert effective["output_dir"] == str(fx.output)
+
+
+def test_build_folder_given_as_a_make_script_runs_in_its_folder(fx):
+    script = fx.source / "make.cmd"
+    script.write_text("@echo off")
+    _set_project_settings(fx, inject_build_cwd=str(script))
+    build = fx.db.get_test_build(fx.test_build(build_cwd=""))
+    assert tb.effective_build(fx.db, build)["build_cwd"] == str(fx.source)
+
+
+def test_preflight_says_when_the_build_folder_is_missing(fx):
+    build_id = fx.test_build(build_cwd=str(fx.tmp / "gone"))
+    report = tb.preflight(fx.db, fx.store, [build_id], overridden_releases=(fx.r1,))
+    assert any("can't be found" in p["problem"] for p in report["problems"])
+
+
+def test_copied_settings_are_emptied_once_so_builds_follow_the_project(fx):
+    _set_project_settings(fx)
+    copied = fx.test_build("Copied", terminal="bash")
+    own = fx.test_build("Own", build_command="make wd", terminal="cmd")
+    main_id = fx.db.create_test_build(fx.r1, "Main", is_main=True)
+    fx.db._conn.execute("UPDATE test_builds SET terminal='bash' WHERE id=?", (main_id,))
+
+    assert tb.adopt_project_settings(fx.db) == 3
+    copied_row = fx.db.get_test_build(copied)
+    assert all(copied_row[k] == "" for k in tb.BUILD_SETTINGS)
+    own_row = fx.db.get_test_build(own)
+    assert (own_row["build_command"], own_row["terminal"]) == ("make wd", "cmd")
+    assert fx.db.get_test_build(main_id)["terminal"] == ""
+    # Only once: a value set to match the project later is the user's choice.
+    fx.db.update_test_build(copied, build_command="make")
+    assert tb.adopt_project_settings(fx.db) == 0
+    assert fx.db.get_test_build(copied)["build_command"] == "make"

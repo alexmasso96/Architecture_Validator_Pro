@@ -20,10 +20,13 @@ A test build is a [test project](11-test-injection.md) attached to one release. 
 
 ## Set up a build
 
-1. Select the release in the table. Builds always belong to one release, so R2 needs its own builds even if it uses the same test project.
-2. Under **Builds for the selected release**, enter a name, choose a test project, and click **Add build**. A new build starts with the settings from **Preferences → Paths**.
-3. Check its settings: build command, clean command, terminal, working directory, source folder and build output folder. The clean command matters: without it, objects from the previous build can end up in this one.
-4. Under **Tracked files**, choose what to keep: files or folders, with a role of **Flash**, **Symbols**, **Source** or **Objects**. Folders accept patterns such as `**/*.hex`. The project-wide list applies unless a build has its own. If you don't track any Source files, the files your hooks change and your test files are kept.
+1. Set the project's paths once in **Preferences → Paths**: source folder, build folder, build output folder, terminal, build command and clean command. On a mapped drive, choose the folders on that drive. The clean command matters: without it, objects from the previous build can end up in the next one.
+2. Select the release in the table. Builds always belong to one release, so R2 needs its own builds even if it uses the same test project.
+3. Under **Builds for the selected release**, enter a name, check the test project, and click **Add build**. If the button stays disabled, hold the pointer over it to see what's missing.
+4. A build uses the project's settings, and follows them when they change. Click **Edit** and fill a field only where this build differs, such as its own build command. A field you fill is marked **this build only**. **Use project** empties it again.
+5. Under **Tracked files**, choose what to keep: files or folders, with a role of **Flash**, **Symbols**, **Source** or **Objects**. Folders accept patterns such as `**/*.hex`. Files in the build output folder are kept relative to it, and files in the source folder are kept as **Source**. The project-wide list applies unless a build has its own, and the list menu shows how many entries each list holds. If you don't track any Source files, the files your hooks change and your test files are kept.
+
+The **Build** button under **Test Code** is a quick check: it runs the build command in the build folder without applying hooks and without keeping anything. If it can't start, the reason is shown in the build console.
 
 Track your `.o` files with the **Objects** role. They're kept for Main only, so you can import them later from clean output.
 

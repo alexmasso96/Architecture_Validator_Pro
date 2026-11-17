@@ -105,8 +105,8 @@ def list_dir(path: str | None = Query(None),
     allowed = {e.strip().lower() for e in exts.split(",") if e.strip()}
     base = Path(path).expanduser() if path else Path.home()
     try:
-        base = base.resolve()
-    except OSError as e:
+        base = _absolute(base)
+    except (OSError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid path: {e}") from e
     if not base.exists():
         raise HTTPException(status_code=404, detail=f"No such path: {base}")
@@ -138,6 +138,17 @@ def list_dir(path: str | None = Query(None),
     }
 
 
+def _absolute(p: Path) -> Path:
+    """``p`` as an absolute, normalised path, keeping the drive it was reached by.
+
+    ``Path.resolve()`` follows links, and on Windows it turns a mapped network
+    drive or a ``subst`` drive into the share or folder behind it, so a folder
+    chosen on ``Z:`` came back with another path. Paths must stay as the user
+    sees them, because builds and debuggers are set up with the mapped drive.
+    """
+    return Path(os.path.abspath(p))
+
+
 def _is_dir_safe(p: Path) -> bool:
     try:
         return p.is_dir()
@@ -158,8 +169,8 @@ def mkdir(body: MkdirBody) -> dict:
     if not name or name in (".", "..") or "/" in name or "\\" in name:
         raise HTTPException(status_code=400, detail="Invalid folder name.")
     try:
-        parent = Path(body.parent).expanduser().resolve()
-    except OSError as e:
+        parent = _absolute(Path(body.parent).expanduser())
+    except (OSError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid parent: {e}") from e
     if not parent.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {parent}")

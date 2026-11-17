@@ -14,7 +14,13 @@ const TERMINALS: { key: TerminalKind; label: string; tint: string }[] = [
   { key: "wsl", label: "WSL", tint: "#e95420" },
 ];
 
-type BrowseTarget = "build_cwd" | "source_path";
+type BrowseTarget = "build_cwd" | "source_path" | "output_path";
+
+const BROWSE_TITLES: Record<BrowseTarget, string> = {
+  build_cwd: "Choose build folder",
+  source_path: "Choose source folder",
+  output_path: "Choose build output folder",
+};
 
 // Preferences → Paths. Build-tooling paths are project-scoped (stored in the
 // open project's meta via /injection/settings), so this panel only works with a
@@ -85,7 +91,7 @@ export function PathsSettings() {
     <div className="prefs-body">
       <PathField
         label="Source code (on disk)"
-        hint="Starting source folder for new test builds. Test Injection shows the source imported into the release, not this folder."
+        hint="The source folder every test build uses unless it sets its own. A run writes a build's hooks here and puts the files back afterwards."
         value={settings.source_path}
         placeholder="/path/to/src"
         onChange={(v) => patch({ source_path: v })}
@@ -99,6 +105,15 @@ export function PathsSettings() {
         placeholder="/path/to/make.cmd"
         onChange={(v) => patch({ build_cwd: v })}
         onBrowse={() => setBrowse("build_cwd")}
+      />
+
+      <PathField
+        label="Build output folder"
+        hint="Where a build leaves its .elf, .hex, .map and .o files. Test Builds keeps the tracked files from here."
+        value={settings.output_path}
+        placeholder="/path/to/output"
+        onChange={(v) => patch({ output_path: v })}
+        onBrowse={() => setBrowse("output_path")}
       />
 
       <div className="prefs-field">
@@ -140,12 +155,27 @@ export function PathsSettings() {
         </div>
       </div>
 
+      <div className="prefs-field">
+        <div className="prefs-label">Clean command</div>
+        <input
+          className="prefs-input"
+          placeholder="e.g. make clean"
+          value={settings.clean_command}
+          onChange={(e) => setSettings({ ...settings, clean_command: e.target.value })}
+          onBlur={(e) => patch({ clean_command: e.target.value })}
+        />
+        <div className="prefs-hint">
+          Runs before each test build, so objects from the previous build can't end up in
+          the next one.
+        </div>
+      </div>
+
       {note && <div className="ai-prov-toast">{note}</div>}
 
       {browse && (
         <FolderPicker
           mode="folder"
-          title={browse === "source_path" ? "Choose source folder" : "Choose build folder"}
+          title={BROWSE_TITLES[browse]}
           onCancel={() => setBrowse(null)}
           onConfirm={onBrowsed}
         />

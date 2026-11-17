@@ -327,6 +327,7 @@ def capture_build(db, store: BinaryStore, build: dict, captured_at: str,
     partial set. Objects are kept for Main only, so a late .o import can use
     clean output.
     """
+    build = effective_build(db, build)
     artifacts = [a for a in db.tracked_artifacts_for_build(build["id"])
                  if build["is_main"] or a.get("role") != ROLE_OBJECTS]
     if not any(a.get("role") == ROLE_SOURCE for a in artifacts):
@@ -370,13 +371,21 @@ def plan_run(db, build_ids: list, release_names: Optional[dict] = None) -> list:
     return items
 
 
+def main_seed(db, template: Optional[dict]) -> dict:
+    """What Main stores from the test build it's planned with: only the settings
+    the project doesn't set. Main otherwise follows the project's settings, not
+    one test build's own choices."""
+    if not template:
+        return {}
+    project = project_build_settings(db)
+    return {k: template[k] for k in BUILD_SETTINGS
+            if k != "terminal" and not project[k].strip()
+            and str(template.get(k) or "").strip()}
+
+
 def ensure_main_build(db, release_id: int, template: Optional[dict]) -> dict:
-    """The release's Main row, created from ``template`` or filled in from it."""
-    settings = {}
-    if template:
-        settings = {k: template[k] for k in (
-            "build_command", "build_cwd", "clean_command", "terminal", "wsl_distro",
-            "source_dir", "output_dir")}
+    """The release's Main row. Settings the project doesn't set come from ``template``."""
+    settings = main_seed(db, template)
     main = db.get_main_build(release_id)
     if main is None:
         db.create_test_build(release_id, "Main", is_main=True, **settings)
@@ -401,6 +410,7 @@ def preflight(db, store: BinaryStore, build_ids: list, overridden_releases: tupl
     reachable = store.is_reachable()
     needed = 0
     locks = {}
+    project = project_build_settings(db)
 
     def problem(item: dict, text: str) -> None:
         problems.append({"test_build_id": item["test_build_id"],
@@ -412,21 +422,24 @@ def preflight(db, store: BinaryStore, build_ids: list, overridden_releases: tupl
         if release_id not in locks:
             locks[release_id] = clean_lock_status(db, release_id, names.get(release_id, ""))
         lock = locks[release_id]
-        build = (db.get_test_build(item["test_build_id"]) if item["test_build_id"]
-                 else None) or item.get("template")
-        if item["is_main"] and build is None:
-            problem(item, "No build settings for Main. Add a test build or set them on Main.")
-            continue
+        build = db.get_test_build(item["test_build_id"]) if item["test_build_id"] else None
+        if build is None:
+            # Main isn't recorded yet: it'll follow the project's settings.
+            build = {"is_main": True, "test_project_id": None,
+                     **{k: "" for k in BUILD_SETTINGS}, **main_seed(db, item.get("template"))}
+        build = effective_build(db, build, project)
         if not lock["ok"] and release_id not in overridden_releases:
             problem(item, lock["message"])
         if not build["build_command"].strip():
-            problem(item, "No build command is set.")
+            problem(item, "No build command is set. Set it in Preferences → Paths.")
         if not build["build_cwd"].strip():
-            problem(item, "No working directory is set.")
+            problem(item, "No build folder is set. Set it in Preferences → Paths.")
+        elif build["terminal"] != "wsl" and not os.path.isdir(build["build_cwd"]):
+            problem(item, f"The build folder can't be found: {build['build_cwd']}")
         if not build["output_dir"].strip():
-            problem(item, "No build output folder is set.")
+            problem(item, "No build output folder is set. Set it in Preferences → Paths.")
         if not (item["is_main"] or build["source_dir"].strip()):
-            problem(item, "No source folder is set.")
+            problem(item, "No source folder is set. Set it in Preferences → Paths.")
         if not build["clean_command"].strip():
             warnings.append({"build_name": item["build_name"],
                              "warning": "No clean command is set, so stale objects "
@@ -493,15 +506,70 @@ def stored_build_folder(db) -> str:
     return build_folder(path)
 
 
-def build_defaults(db) -> dict:
-    """The project's build settings (Preferences → Paths), as a new build's start."""
+BUILD_SETTINGS = ("build_command", "build_cwd", "clean_command", "terminal", "wsl_distro",
+                  "source_dir", "output_dir")
+
+
+def project_build_settings(db) -> dict:
+    """The project's build settings (Preferences → Paths), in a build's field names.
+
+    Every build uses them for each setting it leaves empty, so changing them in
+    Preferences changes every build that doesn't set its own.
+    """
     return {
-        "terminal": db.get_meta("inject_terminal", "") or default_terminal(),
-        "wsl_distro": db.get_meta("inject_wsl_distro", "") or "",
         "build_command": db.get_meta("inject_build_command", "") or "",
         "build_cwd": stored_build_folder(db),
+        "clean_command": db.get_meta("inject_clean_command", "") or "",
+        "terminal": db.get_meta("inject_terminal", "") or default_terminal(),
+        "wsl_distro": db.get_meta("inject_wsl_distro", "") or "",
         "source_dir": db.get_meta("inject_source_path", "") or "",
+        "output_dir": db.get_meta("inject_output_path", "") or "",
     }
+
+
+def effective_build(db, build: dict, project: Optional[dict] = None) -> dict:
+    """``build`` with each empty setting taken from the project's settings."""
+    project = project_build_settings(db) if project is None else project
+    out = dict(build)
+    for key in BUILD_SETTINGS:
+        if not str(build.get(key) or "").strip():
+            out[key] = project[key]
+    out["build_cwd"] = build_folder(out["build_cwd"]) if out["build_cwd"] else ""
+    return out
+
+
+SHARED_SETTINGS_FLAG = "test_builds_use_project_settings"
+
+
+def adopt_project_settings(db) -> int:
+    """Once per project: empties each build setting that only repeats the project's.
+
+    Builds made before builds followed the project's settings hold a copy of
+    them, which would stop them following later changes. A ``bash`` terminal on
+    a build with nothing else set is the column's default, not a choice.
+    Returns how many builds changed.
+    """
+    if db.get_meta(SHARED_SETTINGS_FLAG, "") == "1":
+        return 0
+    project = project_build_settings(db)
+    changed = 0
+    for build in db.list_test_builds():
+        cleared = {}
+        for key in BUILD_SETTINGS:
+            own = str(build.get(key) or "").strip()
+            if own and (own == project[key].strip()
+                        or (key == "build_cwd" and build_folder(own) == project[key])):
+                cleared[key] = ""
+        rest = {k: build.get(k) for k in BUILD_SETTINGS
+                if k != "terminal" and k not in cleared}
+        if build.get("terminal") == "bash" and not any(
+                str(v or "").strip() for v in rest.values()):
+            cleared["terminal"] = ""
+        if cleared:
+            db.update_test_build(build["id"], **cleared)
+            changed += 1
+    db.set_meta(SHARED_SETTINGS_FLAG, "1")
+    return changed
 
 
 def build_argv(terminal: str, command: str, cwd: str, distro: str) -> list:
@@ -636,6 +704,7 @@ def _build_one(ctx: RunContext, item: dict, snapshot: SourceSnapshot,
         db.update_build_run_item(item["id"], status=ITEM_SKIPPED,
                                  message="This build was deleted.", ended_at=ctx.now())
         return
+    build = effective_build(db, build)
     if not build["is_main"] and build["release_id"] in failed_mains:
         db.update_build_run_item(
             item["id"], status=ITEM_SKIPPED, ended_at=ctx.now(),

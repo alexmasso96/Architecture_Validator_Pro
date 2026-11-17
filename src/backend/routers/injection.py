@@ -674,6 +674,8 @@ def get_settings(state: AppState = Depends(get_state)) -> dict:
             "build_command": db.get_meta("inject_build_command", ""),
             "build_cwd": test_builds.stored_build_folder(db),
             "source_path": db.get_meta("inject_source_path", ""),
+            "clean_command": db.get_meta("inject_clean_command", "") or "",
+            "output_path": db.get_meta("inject_output_path", "") or "",
         }
     return _guard(go)
 
@@ -684,10 +686,13 @@ class SettingsBody(BaseModel):
     build_command: Optional[str] = None
     build_cwd: Optional[str] = None
     source_path: Optional[str] = None
+    clean_command: Optional[str] = None
+    output_path: Optional[str] = None
 
 
 @router.post("/settings")
-def set_settings(body: SettingsBody, state: AppState = Depends(get_state)) -> dict:
+def set_settings(body: SettingsBody, state: AppState = Depends(get_state),
+                 bus: EventBus = Depends(get_bus)) -> dict:
     def go():
         db = state.require_edit()
         if body.terminal is not None:
@@ -702,7 +707,13 @@ def set_settings(body: SettingsBody, state: AppState = Depends(get_state)) -> di
             db.set_meta("inject_build_cwd", body.build_cwd)
         if body.source_path is not None:
             db.set_meta("inject_source_path", body.source_path)
+        if body.clean_command is not None:
+            db.set_meta("inject_clean_command", body.clean_command)
+        if body.output_path is not None:
+            db.set_meta("inject_output_path", body.output_path)
         db.commit()
+        # Test builds follow these settings, so their listing changes too.
+        bus.publish("db-changed", {"reason": "build-settings"})
         return {"ok": True}
     return _guard(go)
 

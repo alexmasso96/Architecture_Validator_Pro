@@ -473,8 +473,21 @@ class AppState:
         if mode == MODE_EXCLUSIVE:
             self.lock_info = {"held": True, "by": FileLockManager.get_username()}
             self._start_heartbeat(self.shared_path)
+            self._adopt_project_build_settings(db)
         else:
             self.lock_info = FileLockManager.check_lock(self.shared_path, self.sync_token)
+
+    @staticmethod
+    def _adopt_project_build_settings(db: ProjectDatabase) -> None:
+        """Test builds made before they followed the project's settings hold a
+        copy of them. Never stops a project opening."""
+        from Application_Logic import Logic_Test_Builds as test_builds
+        try:
+            changed = test_builds.adopt_project_settings(db)
+            if changed:
+                logger.info("%d test build(s) now follow the project's settings", changed)
+        except Exception:  # noqa: BLE001
+            logger.exception("Couldn't move test builds to the project's settings")
 
     # ------------------------------------------------------------------
     # Per-block encryption helpers (call with self._lock held)
